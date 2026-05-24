@@ -1,0 +1,6 @@
+numpy
+soundfile
+pydub
+silero-vad
+torch
+ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git

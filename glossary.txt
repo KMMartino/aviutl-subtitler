@@ -1,0 +1,9 @@
+# preferred term | optional guidance
+PSSR | prefer over PSVR, PSR, or PS5R when discussing PlayStation image upscaling
+PSSR Lite | prefer over PSVR Lite, PSR Lite, or PS5R Lite
+PlayStation Spectral Super Resolution | full expansion of PSSR
+FSR 4.1
+DLSS
+Nintendo Switch 2
+Digital Foundry
+AviUtl

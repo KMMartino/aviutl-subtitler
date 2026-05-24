@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.venv-win/
+venv/
+env/
+
+# Generated diagnostics and temporary outputs
+diagnostics/
+subtitle_files/
+*.chunks/
+*.tmp
+*.temp
+*.bak
+
+# Generated subtitle outputs
+*.exo
+*.srt
+*.vtt
+*.profile.csv
+*.alignment_workers.csv
+*.aligned_text.txt
+*.final_text.txt
+*.llm_split.csv
+*.llm_split.rejected.txt
+*.subtitle_timing.csv
+*.boundary_timing.csv
+*.possible_mistranscriptions.txt
+
+# Local media/test inputs
+*.mkv
+*.mp4
+*.m4a
+*.wav
+*.aac
+*.flac
+*.mp3
+
+# Large local model files
+*.gguf
+*.safetensors
+*.bin
+
+# Logs
+*.log
+.env
+.env.*
+
+# OS/editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
