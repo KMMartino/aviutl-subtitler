@@ -1,46 +1,37 @@
 # Offline AviUtl Subtitle Generator
 
-Local Windows pipeline for generating AviUtl `.exo` subtitle files from VOD audio.
+Local Windows pipeline for generating AviUtl `.exo` subtitles from VOD audio.
 
-The current drag-and-drop transcription backend is Gemma 4 audio through managed `llama.cpp` server (`llama-server.exe`). The native multimodal CLI (`llama-mtmd-cli.exe`) remains the stable fallback. The high-level `llama-cpp-python` audio path is retained only as a research/debug option because it did not correctly consume audio in this environment.
+The app is focused on Japanese audio. It transcribes with Gemma 4 audio through a managed `llama.cpp` server, aligns the transcript with CTC forced alignment, builds timing-aware subtitle chains, optionally runs a local cleanup model, and writes AviUtl `.exo`.
 
-## What It Does
+## Flow
 
 ```text
 video/audio input
 -> FFmpeg extracts mono 16 kHz WAV
 -> Silero VAD splits speech chunks
 -> llama-server transcribes each chunk with Gemma 4 + mmproj
--> ctc-forced-aligner aligns raw transcript timing
--> adjacent aligned chunks are regrouped when safe
--> optional local text LLM cleans display text
--> AviUtl .exo writer outputs subtitle objects
-```
-
-The default target is Japanese audio. UI, CLI, and code are English.
-
-## Key Defaults
-
-```text
-Model:       C:\coding\0_models\gemma\gemma4-e4b-q6\google-gemma-4-E4B-it-Q6_K.gguf
-Projector:   C:\coding\0_models\gemma\projectors\proj-for-q6.gguf
-llama.cpp:   C:\tools\llama-vulkan\llama-server.exe
-Fallback:    C:\tools\llama-vulkan\llama-mtmd-cli.exe
-Audio track: 1, the second audio stream
-Output:      AviUtl .exo
+-> ctc-forced-aligner aligns transcript timing
+-> adjacent aligned chunks are regrouped into timing chains
+-> deterministic token-boundary subtitle splitting
+-> optional cleanup/boundary review/final candidate report
+-> AviUtl .exo output
 ```
 
 ## Quick Start
 
-Read [WINDOWS_SETUP.md](WINDOWS_SETUP.md) first.
+Copy the example environment file if you plan to test hosted APIs later:
 
-After setup, run:
+```powershell
+Copy-Item .env.example .env
+```
+
+Fill in only the keys you need. `.env` is ignored by git and loaded automatically.
 
 ```powershell
 .\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" `
   --model "C:\coding\0_models\gemma\gemma4-e4b-q6\google-gemma-4-E4B-it-Q6_K.gguf" `
   --mmproj "C:\coding\0_models\gemma\projectors\proj-for-q6.gguf" `
-  --transcriber-backend server `
   -o "C:\path\to\input.exo"
 ```
 
@@ -58,182 +49,163 @@ Create a shortcut to:
 run_subtitler_drop.bat
 ```
 
-Move the shortcut anywhere, then drag a video file onto it. The `.exo` file is written beside the source video.
+Drag a video file onto it. The `.exo` file is written beside the source video, and sidecars are written under `subtitle_files`.
 
-The launcher uses `--transcriber-backend server`. The Python app starts `llama-server.exe`, waits for `/health`, sends each chunk to `/v1/chat/completions`, then shuts the server down when the batch finishes.
-
-The launcher also uses `--offline-model-cache` so the CTC aligner loads from the local Hugging Face/Transformers cache without checking the Hub on each run. It writes profile CSVs under `subtitle_files` beside the input video so alignment worker coverage, regrouping, and LLM split planning can be checked after a run.
-
-For Japanese char alignment, the launcher uses `--alignment-star-frequency edges`. This keeps the CTC aligner's wildcard tokens at the transcript edges instead of inserting one before every character, which can otherwise make split subtitle timings drift later within each chunk.
-
-If `glossary.txt` exists next to the input video, it is used automatically. To enable cleanup and LLM split planning, edit `CLEANUP_MODEL` in `run_subtitler_drop.bat` to point at a local text GGUF model.
-
-## Glossary
-
-Create `glossary.txt` next to the input video, or in the project directory:
-
-```text
-# preferred term | optional guidance
-PSSR | prefer over PSVR in graphics/upscaling context
-PSSR Lite
-AviUtl
-RDNA
-```
-
-The glossary is added to the Gemma audio prompt and to the optional cleanup prompt. It is a hint, not a forced replacement list.
+If `glossary.txt` exists next to the input video or in the project directory, it is loaded automatically.
 
 ## Cleanup Model
 
-Cleanup is off by default. It uses a second managed `llama-server.exe` on port `8082` and starts after audio transcription has finished, so it does not compete with the Gemma audio server.
-
-Recommended local text models:
-
-```text
-Japanese-heavy content: Swallow 8B Instruct GGUF, Q5_K_M or Q6_K
-General multilingual:   Qwen3-14B GGUF, Q6_K
-```
-
-Manual example:
+Cleanup is enabled when `--cleanup-model` is provided. It starts a second `llama-server.exe` on port `8082` by default and uses full cleanup mode.
 
 ```powershell
 .\.venv-win\Scripts\python.exe aviutl_subtitle.py input.mkv `
   --model "C:\coding\0_models\gemma\gemma4-e4b-q6\google-gemma-4-E4B-it-Q6_K.gguf" `
   --mmproj "C:\coding\0_models\gemma\projectors\proj-for-q6.gguf" `
-  --transcriber-backend server `
   --cleanup-model "C:\coding\0_models\qwen\qwen3-14b-q6\Qwen3-14B-Q6_K.gguf" `
-  --cleanup-mode full `
-  --cleanup-ctx-size 4096
+  --cleanup-ctx-size 32768
 ```
 
-Cleanup receives compact plain text plus glossary lines. It removes obvious fillers and fixes likely glossary terms, but subtitle timing remains based on the forced alignment from the raw transcript.
+When cleanup is active, the model also reviews same-chain connective/punctuation boundaries and performs a final non-destructive candidate report for human review.
 
-## Performance Profile
+## Hosted API Benchmarks
 
-The server backend prepares the next audio payload on CPU while the current chunk is being processed, and it can align returned chunks in a background worker while sending the next request. It still sends only one audio request at a time because llama.cpp audio support is experimental.
-
-Use:
+The default path remains local Gemma. Hosted transcription and cleanup can be selected explicitly:
 
 ```powershell
---profile
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py input.mkv `
+  --transcriber-backend gemini `
+  --transcription-model gemini-2.5-flash `
+  --cleanup-backend gemini `
+  --cleanup-api-model gemini-2.5-flash `
+  --llm-split-planning cleanup-model `
+  --profile `
+  -o input-gemini25.exo
 ```
 
-This writes `<output>.profile.csv` with per-chunk payload, transcription, and alignment timings. It also writes `<output>.regroup.csv` with alignment-chain diagnostics.
-It also writes `<output>.subtitle_timing.csv`, which shows each final subtitle's chain id, token timing, source split rule, prior gap, and timing adjustments.
-It also writes `<output>.aligned_text.txt`, which shows the raw aligned transcript per VAD chunk before regrouping and subtitle splitting.
-These sidecar files are written to `subtitle_files` in the input video's directory by default.
+Hosted runs estimate API cost after VAD and before spending. The default guard aborts a run above `$5.00` unless `--allow-api-spend` is provided. Actual provider token usage and computed cost are written to `<output>.api_usage.csv` and summarized in `<output>.run.json`.
 
-Use:
+For drag-and-drop hosted testing, use:
 
-```powershell
---llm-split-diagnostics
+```text
+run_subtitler_hosted_drop.bat
 ```
 
-This writes `<output>.llm_split.csv` and prints a short line for each LLM split-planning attempt, showing whether the plan was accepted or why it was rejected. If any attempts are rejected, it also writes `<output>.llm_split.rejected.txt` with the input text, raw model response, cleaned response lines, and rejection reason. It does not print the full suggested subtitle text.
+The hosted launcher uses Gemini 3.5 transcription, GPT-5.4 mini cleanup, hosted tuning, parallel hosted transcription, parallel chain splitting, parallel cleanup batching, and skips the final possible-mistranscription review by default.
 
 ## Diagnostics
 
-Test native Gemma audio:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\diagnose_native_llama_audio.ps1
-```
-
-Test server Gemma audio through the complete app on the included small file:
-
-```powershell
-.\.venv-win\Scripts\python.exe aviutl_subtitle.py test.m4a `
-  --audio-track 0 `
-  --model "C:\coding\0_models\gemma\gemma4-e4b-q6\google-gemma-4-E4B-it-Q6_K.gguf" `
-  --mmproj "C:\coding\0_models\gemma\projectors\proj-for-q6.gguf" `
-  --transcriber-backend server `
-  -o diagnostics\test_server.exo
-```
-
-The known-good test produced:
+`--profile` writes:
 
 ```text
-どうもみなさんこんにちは快快です
+<output>.profile.csv
+<output>.regroup.csv
+<output>.subtitle_timing.csv
+<output>.boundary_timing.csv
+<output>.aligned_text.txt
+<output>.run.json
+<output>.api_usage.csv
 ```
 
-## Important Files
+`<output>.run.json` records the backend/model settings, command-line arguments, and whether provider API keys were present. It does not store API key values.
+
+`--llm-split-diagnostics` writes:
 
 ```text
-aviutl_subtitle.py                 Main CLI
-run_subtitler_drop.bat             Drag-and-drop launcher
-diagnose_native_llama_audio.ps1    Native llama.cpp audio diagnostic
-diagnose_gemma_audio.py            Legacy llama-cpp-python diagnostic
-subtitler/audio.py                 FFmpeg/WAV helpers
-subtitler/vad.py                   Silero VAD segmentation
-subtitler/transcriber.py           Server, native, and Python Gemma transcribers
-subtitler/aligner.py               CTC forced alignment
-subtitler/alignment_pool.py        Parallel alignment workers
-subtitler/splitter.py              Subtitle shaping/splitting
-subtitler/subtitle_planner.py      Alignment-aware regrouping and cleanup
-subtitler/glossary.py              Plain-text glossary loading
-subtitler/text_refiner.py          Plain-text cleanup LLM client
-subtitler/profiling.py             Per-chunk timing CSV
-subtitler/exo.py                   AviUtl .exo writer
-aviutl_exo_format.md               EXO format notes
+<output>.llm_split.csv
+<output>.llm_split.rejected.txt
 ```
 
-## CLI Options
+Cleanup writes:
 
 ```text
---profile                         Write <output>.profile.csv timing diagnostics
---profile-output PATH             Override profile CSV path
---audio-prep-workers N            CPU workers for payload preparation, default 2
---transcription-max-split-depth N VAD re-split retries for suspect transcription output, default 2
---align-workers N                 Parallel alignment workers, default CPU count / 4
+<output>.final_text.txt
+<output>.possible_mistranscriptions.txt
+<output>.possible_mistranscriptions.raw.txt
+```
+
+## Main Options
+
+```text
+--audio-track N                   Audio stream index, default 1
+--language LANG                   App language, default ja; Japanese maps to CTC jpn
+--temp-dir PATH                   Temp root
+--keep-temp                       Keep generated WAV chunks
+--profile                         Write diagnostics
+--env-file PATH                   Dotenv-style API key file, default .env
+--estimate-cost-only              Estimate hosted API cost after VAD and exit
+--max-estimated-api-cost-usd N     Hosted API cost guard, default 5.00
+--allow-api-spend                 Allow runs over the estimate guard
+--sidecar-dir PATH                Diagnostics/intermediate output directory
+
+--transcriber-backend local-gemma|gemini|openai
+--transcription-model MODEL       Hosted transcription model
+--transcription-workers N         Concurrent hosted transcription requests
+--model PATH                      Gemma GGUF model, required
+--mmproj PATH                     Gemma audio projector, required
+--llama-server PATH               llama-server.exe path
+--server-port PORT                Transcription server port, default 8081
+--n-gpu-layers N                  llama.cpp GPU layers, default all
+--ctx-size N                      Transcription context size, default 8192
+--audio-prep-workers N            Audio payload prep workers, default 2
+--transcription-max-split-depth N VAD re-split retries for suspect transcripts, default 2
+
+--alignment-model NAME            CTC alignment model
+--alignment-device DEVICE         auto, cpu, or cuda
+--alignment-max-split-depth N     VAD re-split retries for CTC-too-long chunks, default 4
+--offline-model-cache             Use cached Hugging Face/Transformers files only
+--align-workers N                 Alignment workers, default CPU count / 4
 --align-torch-threads N           PyTorch CPU threads per aligner worker
 --align-emission-batch-size N     CTC emission batch size, default 4
---alignment-star-frequency MODE   CTC wildcard placement: edges or segment, default edges
---alignment-max-split-depth N     VAD re-split retries for CTC-too-long chunks, default 4
---glossary PATH                   Use a specific glossary.txt
---no-glossary                     Disable glossary auto-discovery
---regroup-adjacent                Merge adjacent aligned chunks when safe, default on
---no-regroup-adjacent             Disable adjacent regrouping
---regroup-gap-sec SEC             Max gap for regrouping, default 0.5
---regroup-max-window-sec SEC      Deprecated; kept for compatibility
---regroup-max-window-chars N      Deprecated; kept for compatibility
---regroup-ramp-start-sec SEC      Adaptive regrouping starts here, default 0.2
---regroup-ramp-step-sec SEC       Adaptive regrouping gap increment, default 0.1
---regroup-ramp-max-chain-sec SEC  Reject ramp chains longer than this, default 120
---regroup-ramp-max-chain-tokens N Reject ramp chains over this token count, default 900
---llm-split-planning MODE         off or cleanup-model; tries LLM split before mechanical max cuts
---llm-split-diagnostics           Write <output>.llm_split.csv and print accepted/rejected attempts
---llm-split-max-input-chars N     Skip LLM split planning above this size, default 240
---llm-split-second-pass-max-input-chars N
-                                  Skip second LLM split pass above this size, default 240
---chain-lead-in-sec SEC           Pull same-chain subtitle starts before first token, default 0.08
---chain-lead-in-growth-sec SEC    Add this much lead-in per chain part, default 0.0
---chain-lead-in-max-sec SEC       Cap same-chain lead-in, default 0.20
---sidecar-dir PATH                Directory for diagnostics/intermediate subtitle files
---cleanup-model PATH              Local text GGUF model for cleanup
+
+--max-chars N                     Max subtitle characters, default 40
+--min-duration SEC                Minimum subtitle duration, default 0.40
+--max-duration SEC                Maximum subtitle duration, default 6.0
+--gap-threshold SEC               Touch nearby subtitles, default 0.25
+--regroup-gap-sec SEC             Max gap for regrouping aligned chunks, default 0.5
+--chain-lead-in-sec SEC           Same-chain lead-in before first token, default 0.08
+--llm-split-planning off|cleanup-model
+--llm-split-diagnostics
+--chain-split-workers N           Concurrent chain splitting workers
+
+--cleanup-model PATH              Local GGUF cleanup/review model
+--cleanup-backend none|local-llama|gemini|openai
+--cleanup-api-model MODEL         Hosted cleanup/review model
+--tuning-profile auto|local|hosted
+--cleanup-window-subtitles N      Lines per cleanup request
+--cleanup-workers N               Concurrent hosted cleanup requests
+--skip-final-review               Skip final QA review and layer-4 markers
 --cleanup-llama-server PATH       Cleanup llama-server.exe path
---cleanup-server-host HOST        Cleanup server host, default 127.0.0.1
 --cleanup-server-port PORT        Cleanup server port, default 8082
---cleanup-ctx-size N              Cleanup model context, default 4096
---cleanup-n-gpu-layers N          Cleanup model GPU layers, defaults to --n-gpu-layers
---cleanup-mode MODE               off, fillers, glossary, or full
---cleanup-window-subtitles N      Cleanup lines per request, default 1
---no-initial-empty-exo-object     Do not insert an invisible frame-1 EXO alignment object
+--cleanup-ctx-size N              Cleanup context size, default 4096
+
+--width N --height N --fps N
+--font NAME --font-size N --y-position N
 ```
 
-## Notes
+## Removed Pre-Release Options
 
-- The server backend uses OpenAI-compatible chat completions with content type `input_audio` and base64 WAV data.
-- Server transcription uses a Japanese strict prompt and explicit Gemma chat stop tokens. If a chunk returns an obviously incomplete, repeated, or assistant-contaminated transcript, that audio chunk is re-split with tighter VAD and retried before alignment.
-- By default, EXO output inserts an empty text object from frame 1 to the first real subtitle. It also inserts empty layer-2 text objects spanning each merged regroup chain. These are timeline markers for checking video/subtitle alignment in AviUtl.
-- Japanese char alignment uses edge-only CTC wildcard tokens by default. The older per-character wildcard mode can be selected with `--alignment-star-frequency segment`, but it can allow token anchors to drift later inside a chunk.
-- If a transcript is too dense for the CTC aligner, the aligner reruns VAD on that audio chunk with tighter settings and retries on shorter subchunks instead of falling back to proportional timing.
-- Same-chain subtitles use a small configurable lead-in before the next aligned token for readability. Progressive lead-in is disabled by default; boundary adjustments are logged in `<output>.boundary_timing.csv`.
-- Regrouping uses an adaptive ramp: it first accepts tighter chains, then gradually relaxes toward `--regroup-gap-sec`. Candidate chains above the ramp length/token limits are split back into chunks for the next pass, which avoids extremely long drift-prone chains.
-- Subtitle resplitting uses multiple passes: sentence/connective splits, phrase punctuation for oversized blocks, LLM split planning, tighter phrase splitting, a second LLM pass, phrase splitting near the limit, then hard max-character splitting. A final left-merge pass joins adjacent subtitles when their combined text is still within `--max-chars`.
-- LLM split planning asks the model for a natural two-part split near the center. Valid copied splits are accepted even when one side is short; the final left-merge pass repairs overly small adjacent fragments.
-- The final possible-mistranscription report is produced only from the cleanup model's review. There is no hardcoded deterministic flag list.
-- The native backend starts `llama-mtmd-cli.exe` once per VAD chunk. This is reliable but slower than a persistent server.
-- `Loading weights: 100%` from the aligner means cached weights are being loaded into memory. It is not necessarily a download.
-- Alignment is PyTorch-based. On this AMD/Vulkan setup it runs on CPU; `--alignment-device auto` only uses CUDA when PyTorch reports an NVIDIA CUDA device.
-- Multiple aligner workers each load their own aligner instance. If RAM or CPU contention is high, lower `--align-workers`.
-- Generated `.exo` files are Shift-JIS text with AviUtl UTF-16LE hex subtitle buffers.
+The CLI was intentionally simplified. Removed options include:
 
+```text
+--llama-mtmd-cli
+--verbose
+--threads
+--batch-size
+--profile-output
+--alignment-split-size
+--alignment-star-frequency
+--max-lines
+--regroup-adjacent / --no-regroup-adjacent
+--regroup-max-window-sec / --regroup-max-window-chars
+--regroup-ramp-*
+--llm-split-max-input-chars
+--llm-split-second-pass-max-input-chars
+--chain-lead-in-growth-sec
+--chain-lead-in-max-sec
+--cleanup-mode
+--cleanup-server-host
+--cleanup-n-gpu-layers
+--no-initial-empty-exo-object
+```
+
+These were either unused, legacy debug paths, or tuning knobs whose current defaults are now part of the app behavior.

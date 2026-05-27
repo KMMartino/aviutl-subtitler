@@ -116,6 +116,7 @@ def generate_exo_file(
     settings: ExoSettings,
     total_duration: float,
     insert_initial_empty: bool = True,
+    vad_markers: list[ExoMarker] | None = None,
     chain_markers: list[ExoMarker] | None = None,
     mistranscription_markers: list[ExoMarker] | None = None,
 ) -> str:
@@ -150,21 +151,32 @@ audio_ch={settings.audio_ch}"""
     for start, end, text in frame_ranges:
         objects.append(generate_exo_object(index, start, end, text, settings, layer=1))
         index += 1
-    for marker in chain_markers or []:
-        start = time_to_frame(marker.start_time, settings.rate)
-        end = time_to_frame(marker.end_time, settings.rate)
-        if end <= start:
-            end = start + 1
-        objects.append(generate_exo_object(index, start, end, "", settings, layer=2))
+    for start, end, text in _marker_frame_ranges(vad_markers or [], settings.rate):
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=2))
         index += 1
-    for marker in mistranscription_markers or []:
-        start = time_to_frame(marker.start_time, settings.rate)
-        end = time_to_frame(marker.end_time, settings.rate)
-        if end <= start:
-            end = start + 1
-        objects.append(generate_exo_object(index, start, end, "", settings, layer=3))
+    for start, end, text in _marker_frame_ranges(chain_markers or [], settings.rate):
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=3))
+        index += 1
+    for start, end, text in _marker_frame_ranges(mistranscription_markers or [], settings.rate):
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=4))
         index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
+
+
+def _marker_frame_ranges(markers: list[ExoMarker], fps: int) -> list[tuple[int, int, str]]:
+    ranges: list[tuple[int, int, str]] = []
+    for marker in sorted(markers, key=lambda item: (item.start_time, item.end_time)):
+        start = time_to_frame(marker.start_time, fps)
+        end = time_to_frame(marker.end_time, fps)
+        if end < start:
+            end = start
+        ranges.append((start, end, marker.text))
+    for i in range(len(ranges) - 1):
+        start, end, text = ranges[i]
+        next_start = ranges[i + 1][0]
+        if end >= next_start:
+            ranges[i] = (start, max(start, next_start - 1), text)
+    return ranges
 
 
 def write_exo(path: Path, content: str) -> None:

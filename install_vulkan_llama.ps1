@@ -32,15 +32,10 @@ Write-Host "Extracting to $InstallDir"
 Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
 
 $serverPath = Join-Path $InstallDir "llama-server.exe"
-$mtmdPath = Join-Path $InstallDir "llama-mtmd-cli.exe"
 
 if (-not (Test-Path -LiteralPath $serverPath)) {
     throw "Install completed, but llama-server.exe was not found at $serverPath"
 }
-if (-not (Test-Path -LiteralPath $mtmdPath)) {
-    throw "Install completed, but llama-mtmd-cli.exe was not found at $mtmdPath"
-}
 
 Write-Host "Installed llama.cpp $latestRelease Vulkan build:"
 Write-Host "  $serverPath"
-Write-Host "  $mtmdPath"

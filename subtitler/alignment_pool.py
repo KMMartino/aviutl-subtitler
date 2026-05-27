@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .aligner import AlignmentTooLongError, ForcedAligner
+from .aligner import AlignmentTooLongError, ForcedAligner, is_japanese_language
 from .models import AlignedChunk, TranscriptChunk
 from .profiling import PipelineProfiler, now
 from .vad import split_chunk_with_tighter_vad
@@ -19,7 +19,6 @@ class AlignmentConfig:
     language: str
     device: str
     split_size: str
-    star_frequency: str
     temp_dir: Path
     sample_rate: int
     emission_batch_size: int
@@ -68,7 +67,6 @@ class AlignmentPool:
                 language=self.config.language,
                 device=self.config.device,
                 split_size=self.config.split_size,
-                star_frequency=self.config.star_frequency,
                 temp_dir=self.config.temp_dir,
                 sample_rate=self.config.sample_rate,
                 emission_batch_size=self.config.emission_batch_size,
@@ -171,12 +169,12 @@ def _split_transcript_for_subchunks(
 
 
 def _text_units(text: str, language: str) -> list[str]:
-    if language == "ja":
+    if is_japanese_language(language):
         return [char for char in text if char.strip()]
     return text.split()
 
 
 def _join_units(units: list[str], language: str) -> str:
-    if language == "ja":
+    if is_japanese_language(language):
         return "".join(units)
     return " ".join(units)

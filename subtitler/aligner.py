@@ -15,15 +15,32 @@ class AlignmentTooLongError(AlignmentError):
     """The transcript is too dense or long for the CTC emission length."""
 
 
+def is_japanese_language(language: str) -> bool:
+    return language.lower() in {"ja", "jp", "jpn"}
+
+
+def ctc_language_code(language: str) -> str:
+    normalized = language.lower()
+    if normalized in {"ja", "jp", "jpn"}:
+        return "jpn"
+    return language
+
+
+def _precise_emission_stride_ms(audio_waveform, emissions) -> float:
+    if emissions.size(0) <= 0:
+        raise AlignmentError("Alignment emissions were empty")
+    return float(audio_waveform.size(0)) * 1000.0 / float(emissions.size(0)) / 16000.0
+
+
 def proportional_alignment(item: TranscriptChunk, language: str) -> AlignedChunk:
     text = item.text
-    chars = list(text) if language == "ja" else text.split()
+    chars = list(text) if is_japanese_language(language) else text.split()
     chars = [c for c in chars if c.strip()]
     if not chars:
         return AlignedChunk(chunk=item.chunk, text=text, tokens=[], fallback=True)
     duration = max(item.chunk.end - item.chunk.start, 0.001)
     step = duration / len(chars)
-    kind = "char" if language == "ja" else "word"
+    kind = "char" if is_japanese_language(language) else "word"
     tokens = [
         AlignedToken(
             text=part,
@@ -43,7 +60,6 @@ class ForcedAligner:
         language: str,
         device: str,
         split_size: str,
-        star_frequency: str,
         temp_dir: Path,
         sample_rate: int,
         emission_batch_size: int = 4,
@@ -51,9 +67,9 @@ class ForcedAligner:
     ) -> None:
         self.model_name = model_name
         self.language = language
+        self.ctc_language = ctc_language_code(language)
         self.device = device
         self.split_size = split_size
-        self.star_frequency = star_frequency
         self.temp_dir = temp_dir
         self.sample_rate = sample_rate
         self.emission_batch_size = emission_batch_size
@@ -131,17 +147,18 @@ class ForcedAligner:
                 self.alignment_model.dtype,
                 self.alignment_model.device,
             )
-            emissions, stride = generate_emissions(
+            emissions, _rounded_stride = generate_emissions(
                 self.alignment_model,
                 audio_waveform,
                 batch_size=self.emission_batch_size,
             )
+            stride = _precise_emission_stride_ms(audio_waveform, emissions)
             tokens_starred, text_starred = preprocess_text(
                 item.text,
                 romanize=True,
-                language=self.language,
+                language=self.ctc_language,
                 split_size=self.split_size,
-                star_frequency=self.star_frequency,
+                star_frequency="edges",
             )
             segments, scores, blank_token = get_alignments(
                 emissions,

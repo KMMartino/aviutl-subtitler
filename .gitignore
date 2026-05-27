@@ -28,6 +28,8 @@ subtitle_files/
 *.alignment_workers.csv
 *.aligned_text.txt
 *.final_text.txt
+*.run.json
+*.api_usage.csv
 *.llm_split.csv
 *.llm_split.rejected.txt
 *.subtitle_timing.csv
@@ -52,6 +54,7 @@ subtitle_files/
 *.log
 .env
 .env.*
+!.env.example
 
 # OS/editor
 Thumbs.db

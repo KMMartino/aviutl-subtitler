@@ -52,7 +52,7 @@ echo.
 set "CLEANUP_ARGS="
 if not "%CLEANUP_MODEL%"=="" (
     if exist "%CLEANUP_MODEL%" (
-        set "CLEANUP_ARGS=--cleanup-model "%CLEANUP_MODEL%" --cleanup-mode full --cleanup-ctx-size 32768 --llm-split-planning cleanup-model"
+        set "CLEANUP_ARGS=--cleanup-model "%CLEANUP_MODEL%" --cleanup-ctx-size 32768 --llm-split-planning cleanup-model"
     ) else (
         echo Cleanup model not found:
         echo %CLEANUP_MODEL%
@@ -65,17 +65,13 @@ if not "%CLEANUP_MODEL%"=="" (
 "%PYTHON_EXE%" "%SCRIPT%" "%INPUT%" ^
   --model "%MODEL%" ^
   --mmproj "%MMPROJ%" ^
-  --transcriber-backend server ^
   --offline-model-cache ^
   --transcription-max-split-depth 2 ^
-  --alignment-star-frequency edges ^
   --alignment-max-split-depth 4 ^
   --profile ^
   --llm-split-diagnostics ^
   --regroup-gap-sec 0.5 ^
   --chain-lead-in-sec 0.08 ^
-  --chain-lead-in-growth-sec 0.0 ^
-  --chain-lead-in-max-sec 0.20 ^
   --audio-track 1 ^
   --language ja ^
   -o "%OUTPUT%" ^

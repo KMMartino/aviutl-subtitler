@@ -55,12 +55,14 @@ class Subtitle:
 class ExoMarker:
     start_time: float
     end_time: float
+    text: str = ""
 
 
 @dataclass
 class MisTranscriptionFlag:
     line_number: int
     text: str
+    reason: str = ""
 
 
 @dataclass

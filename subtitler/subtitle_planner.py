@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,20 @@ from .profiling import (
 )
 from .splitter import split_aligned_chunk, split_token_chain
 from .text_refiner import TextRefiner
+
+BOUNDARY_REVIEW_TERMS = (
+    "について",
+    "という",
+    "でも",
+    "けど",
+    "ので",
+    "から",
+    "って",
+    "も",
+    "で",
+    "が",
+)
+BOUNDARY_REVIEW_PUNCTUATION = set("、,;:")
 
 
 @dataclass
@@ -50,19 +65,13 @@ def _merge_window(chunks: list[AlignedChunk]) -> AlignedChunk:
 
 def group_aligned_chains(
     chunks: list[AlignedChunk],
-    regroup: bool,
     gap_sec: float,
-    _max_window_sec: float,
-    _max_window_chars: int,
     ramp_start_sec: float = 0.2,
     ramp_step_sec: float = 0.1,
     ramp_max_chain_sec: float = 120.0,
     ramp_max_chain_tokens: int = 900,
 ) -> list[Chain]:
     ordered = sorted(chunks, key=lambda item: (item.chunk.start, item.chunk.end))
-    if not regroup:
-        return [Chain([chunk], "disabled", 0.0) for chunk in ordered]
-
     if not ordered:
         return []
 
@@ -237,12 +246,8 @@ def build_grouped_subtitles(
     min_duration: float,
     max_duration: float,
     gap_threshold: float,
-    regroup: bool,
     regroup_gap_sec: float,
-    regroup_max_window_sec: float,
-    regroup_max_window_chars: int,
     refiner: TextRefiner | None = None,
-    cleanup_window_subtitles: int = 1,
     llm_splitter: TextRefiner | None = None,
     regroup_profile_path: Path | None = None,
     llm_split_profile_path: Path | None = None,
@@ -251,25 +256,13 @@ def build_grouped_subtitles(
     subtitle_timing_profile_path: Path | None = None,
     boundary_timing_profile_path: Path | None = None,
     chain_lead_in_sec: float = 0.20,
-    chain_lead_in_growth_sec: float = 0.01,
-    chain_lead_in_max_sec: float = 0.60,
-    regroup_ramp_start_sec: float = 0.2,
-    regroup_ramp_step_sec: float = 0.1,
-    regroup_ramp_max_chain_sec: float = 120.0,
-    regroup_ramp_max_chain_tokens: int = 900,
-    llm_max_input_chars: int = 240,
-    llm_second_pass_max_input_chars: int = 240,
+    cleanup_window_subtitles: int = 1,
+    cleanup_workers: int = 1,
+    chain_split_workers: int = 1,
 ) -> list[Subtitle]:
     chains = group_aligned_chains(
         chunks,
-        regroup=regroup,
         gap_sec=regroup_gap_sec,
-        _max_window_sec=regroup_max_window_sec,
-        _max_window_chars=regroup_max_window_chars,
-        ramp_start_sec=regroup_ramp_start_sec,
-        ramp_step_sec=regroup_ramp_step_sec,
-        ramp_max_chain_sec=regroup_ramp_max_chain_sec,
-        ramp_max_chain_tokens=regroup_ramp_max_chain_tokens,
     )
     subtitles: list[Subtitle] = []
     regroup_rows: list[RegroupProfile] = []
@@ -278,13 +271,17 @@ def build_grouped_subtitles(
     boundary_rows: list[BoundaryTimingProfile] = []
     fallback_chunks = 0
     tokenless_chunks = 0
-    for chain_index, chain in enumerate(chains):
+    def split_chain(chain_index: int, chain: Chain):
+        local_llm_rows: list[LlmSplitProfile] = []
+        local_llm_rejections: list[tuple[LlmSplitProfile, str, str, list[str], list[str], list[str]]] = []
+        local_fallback = 0
+        local_tokenless = 0
         group = _merge_window(chain.chunks) if len(chain.chunks) > 1 and not chain.fallback else chain.chunks[0]
         if group.fallback:
-            fallback_chunks += 1
+            local_fallback += 1
             split_parts = split_aligned_chunk(group, max_chars)
         elif not group.tokens:
-            tokenless_chunks += 1
+            local_tokenless += 1
             split_parts = split_aligned_chunk(group, max_chars)
         else:
             def record_llm_split(
@@ -318,9 +315,9 @@ def build_grouped_subtitles(
                     connective_break_count=result.connective_break_count,
                 )
                 if llm_split_profile_path is not None:
-                    llm_split_rows.append(row)
+                    local_llm_rows.append(row)
                     if not row.accepted or row.reject_reason == "partial_accept":
-                        llm_split_rejections.append(
+                        local_llm_rejections.append(
                             (
                                 row,
                                 result.input_text,
@@ -345,40 +342,59 @@ def build_grouped_subtitles(
                 fallback=False,
                 llm_splitter=llm_splitter,
                 llm_split_callback=record_llm_split,
-                llm_max_input_chars=llm_max_input_chars,
-                llm_second_pass_max_input_chars=llm_second_pass_max_input_chars,
             )
         for part_index, sub in enumerate(split_parts):
             sub.chain_index = chain_index
             sub.chain_part_index = part_index
+        start = chain.chunks[0].chunk.start
+        end = chain.chunks[-1].chunk.end
+        gaps = [
+            chain.chunks[i].chunk.start - chain.chunks[i - 1].chunk.end
+            for i in range(1, len(chain.chunks))
+        ]
+        regroup_row = RegroupProfile(
+            chain_index=chain_index,
+            source_chunk_indexes=";".join(str(chunk.chunk.index) for chunk in chain.chunks),
+            start=start,
+            end=end,
+            duration_sec=end - start,
+            chunk_count=len(chain.chunks),
+            token_count=sum(len(chunk.tokens) for chunk in chain.chunks),
+            fallback=chain.fallback,
+            split_count=len(split_parts),
+            reason_closed=chain.reason_closed,
+            max_internal_chunk_gap=max(gaps, default=0.0),
+            avg_internal_chunk_gap=sum(gaps) / len(gaps) if gaps else 0.0,
+            gap_sec_used=chain.gap_sec,
+        )
+        return chain_index, split_parts, regroup_row, local_llm_rows, local_llm_rejections, local_fallback, local_tokenless
+
+    if chain_split_workers > 1 and len(chains) > 1:
+        split_results = []
+        with ThreadPoolExecutor(max_workers=max(1, chain_split_workers)) as pool:
+            futures = [pool.submit(split_chain, chain_index, chain) for chain_index, chain in enumerate(chains)]
+            for future in as_completed(futures):
+                split_results.append(future.result())
+    else:
+        split_results = [split_chain(chain_index, chain) for chain_index, chain in enumerate(chains)]
+
+    for _, split_parts, regroup_row, local_rows, local_rejections, local_fallback, local_tokenless in sorted(
+        split_results,
+        key=lambda item: item[0],
+    ):
         subtitles.extend(split_parts)
+        fallback_chunks += local_fallback
+        tokenless_chunks += local_tokenless
+        llm_split_rows.extend(local_rows)
+        llm_split_rejections.extend(local_rejections)
         if regroup_profile_path is not None:
-            start = chain.chunks[0].chunk.start
-            end = chain.chunks[-1].chunk.end
-            gaps = [
-                chain.chunks[i].chunk.start - chain.chunks[i - 1].chunk.end
-                for i in range(1, len(chain.chunks))
-            ]
-            regroup_rows.append(
-                RegroupProfile(
-                    chain_index=chain_index,
-                    source_chunk_indexes=";".join(str(chunk.chunk.index) for chunk in chain.chunks),
-                    start=start,
-                    end=end,
-                    duration_sec=end - start,
-                    chunk_count=len(chain.chunks),
-                    token_count=sum(len(chunk.tokens) for chunk in chain.chunks),
-                    fallback=chain.fallback,
-                    split_count=len(split_parts),
-                    reason_closed=chain.reason_closed,
-                    max_internal_chunk_gap=max(gaps, default=0.0),
-                    avg_internal_chunk_gap=sum(gaps) / len(gaps) if gaps else 0.0,
-                    gap_sec_used=chain.gap_sec,
-                )
-            )
+            regroup_rows.append(regroup_row)
     subtitles = [s for s in subtitles if s.text.strip()]
     subtitles.sort(key=lambda s: (s.start_time, s.end_time))
     left_merge_count = _left_merge_adjacent_subtitles(subtitles, max_chars)
+    boundary_review_count = 0
+    if refiner is not None:
+        boundary_review_count = _review_same_chain_leading_phrases(subtitles, refiner, max_chars)
 
     if regroup_profile_path is not None:
         write_regroup_profile(regroup_profile_path, regroup_rows)
@@ -391,6 +407,7 @@ def build_grouped_subtitles(
         print(f"  chain_count={len(regroup_rows)}", flush=True)
         print(f"  merged_chains={merged_chains}", flush=True)
         print(f"  left_merged_subtitles={left_merge_count}", flush=True)
+        print(f"  boundary_review_moves={boundary_review_count}", flush=True)
         if longest is not None:
             print(f"  longest_chain_chunks={longest.chunk_count}", flush=True)
             print(f"  longest_chain_sec={longest.duration_sec:.2f}", flush=True)
@@ -419,8 +436,8 @@ def build_grouped_subtitles(
     _touch_same_chain_subtitles(
         subtitles,
         chain_lead_in_sec,
-        chain_lead_in_growth_sec,
-        chain_lead_in_max_sec,
+        0.0,
+        max(0.20, chain_lead_in_sec),
     )
 
     for i in range(len(subtitles) - 1):
@@ -436,8 +453,8 @@ def build_grouped_subtitles(
     _touch_same_chain_subtitles(
         subtitles,
         chain_lead_in_sec,
-        chain_lead_in_growth_sec,
-        chain_lead_in_max_sec,
+        0.0,
+        max(0.20, chain_lead_in_sec),
         boundary_rows,
     )
 
@@ -450,7 +467,7 @@ def build_grouped_subtitles(
         chain_markers.extend(_build_chain_markers_from_subtitles(subtitles))
 
     if refiner is not None:
-        _refine_subtitle_text(subtitles, refiner, max(1, cleanup_window_subtitles))
+        _refine_subtitle_text(subtitles, refiner, max(1, cleanup_window_subtitles), max(1, cleanup_workers))
     return subtitles
 
 
@@ -504,6 +521,73 @@ def _renumber_chain_parts(subtitles: list[Subtitle]) -> None:
         part_index = counts.get(sub.chain_index, 0)
         sub.chain_part_index = part_index
         counts[sub.chain_index] = part_index + 1
+
+
+def _leading_boundary_phrase_len(tokens: list[AlignedToken]) -> int:
+    if not tokens:
+        return 0
+    text = _normalized_text(_tokens_to_text(tokens))
+    for term in sorted(BOUNDARY_REVIEW_TERMS, key=len, reverse=True):
+        for punctuation in BOUNDARY_REVIEW_PUNCTUATION:
+            phrase = f"{term}{punctuation}"
+            if not text.startswith(phrase):
+                continue
+            seen = ""
+            for index, token in enumerate(tokens, start=1):
+                seen += _normalized_text(token.text)
+                if len(seen) >= len(phrase):
+                    return index if seen == phrase else 0
+    return 0
+
+
+def _refresh_subtitle_from_tokens(sub: Subtitle) -> None:
+    if not sub.tokens:
+        return
+    sub.text = _tokens_to_text(sub.tokens)
+    sub.start_time = sub.tokens[0].start
+    sub.end_time = sub.tokens[-1].end
+
+
+def _move_leading_phrase_left(left: Subtitle, right: Subtitle, token_count: int) -> None:
+    moved = right.tokens[:token_count]
+    remaining = right.tokens[token_count:]
+    if not moved or not remaining:
+        return
+    left.tokens.extend(moved)
+    right.tokens = remaining
+    _refresh_subtitle_from_tokens(left)
+    _refresh_subtitle_from_tokens(right)
+    left.split_source = _merge_source_labels(left.split_source, "llm_boundary_review")
+    right.split_source = _merge_source_labels(right.split_source, "llm_boundary_review")
+    left.timing_adjustment = _append_adjustment(left.timing_adjustment, "llm_boundary_review")
+    right.timing_adjustment = _append_adjustment(right.timing_adjustment, "llm_boundary_review")
+
+
+def _review_same_chain_leading_phrases(
+    subtitles: list[Subtitle],
+    refiner: TextRefiner,
+    max_chars: int,
+) -> int:
+    moved_count = 0
+    for index in range(1, len(subtitles)):
+        previous = subtitles[index - 1]
+        current = subtitles[index]
+        if previous.chain_index is None or previous.chain_index != current.chain_index:
+            continue
+        phrase_tokens = _leading_boundary_phrase_len(current.tokens)
+        if phrase_tokens <= 0:
+            continue
+        phrase_text = _tokens_to_text(current.tokens[:phrase_tokens])
+        if len(_normalized_text(previous.text + phrase_text)) > max_chars:
+            continue
+        if not refiner.should_move_leading_phrase_left(previous.text, current.text, phrase_text):
+            continue
+        _move_leading_phrase_left(previous, current, phrase_tokens)
+        moved_count += 1
+    if moved_count:
+        _renumber_chain_parts(subtitles)
+        print(f"LLM boundary phrase review moved {moved_count} leading phrase(s).", flush=True)
+    return moved_count
 
 
 def _normalized_text(text: str) -> str:
@@ -615,16 +699,52 @@ def _build_chain_markers_from_subtitles(subtitles: list[Subtitle]) -> list[ExoMa
     return markers
 
 
-def _refine_subtitle_text(subtitles: list[Subtitle], refiner: TextRefiner, window_size: int) -> None:
+def _cleanup_windows(subtitles: list[Subtitle], window_size: int) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
     i = 0
-    total = len(subtitles)
     while i < len(subtitles):
-        window = subtitles[i : i + window_size]
-        print(f"Cleaning subtitles {i + 1}-{i + len(window)}/{total}...", flush=True)
-        original = [sub.text for sub in window]
-        refined = refiner.refine(original)
+        chain_index = subtitles[i].chain_index
+        end = i + 1
+        while (
+            end < len(subtitles)
+            and end - i < window_size
+            and subtitles[end].chain_index == chain_index
+        ):
+            end += 1
+        windows.append((i, end))
+        i = end
+    return windows
+
+
+def _refine_window(refiner: TextRefiner, subtitles: list[Subtitle], start: int, end: int) -> tuple[int, list[str]]:
+    original = [sub.text for sub in subtitles[start:end]]
+    return start, refiner.refine(original)
+
+
+def _refine_subtitle_text(subtitles: list[Subtitle], refiner: TextRefiner, window_size: int, workers: int = 1) -> None:
+    total = len(subtitles)
+    windows = _cleanup_windows(subtitles, window_size)
+    if workers > 1 and len(windows) > 1:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {}
+            for start, end in windows:
+                print(f"Cleaning subtitles {start + 1}-{end}/{total}...", flush=True)
+                futures[pool.submit(_refine_window, refiner, subtitles, start, end)] = (start, end)
+            for future in as_completed(futures):
+                start, end = futures[future]
+                _, refined = future.result()
+                window = subtitles[start:end]
+                if len(refined) == len(window):
+                    for sub, text in zip(window, refined):
+                        if text.strip():
+                            sub.text = text.strip()
+        return
+
+    for start, end in windows:
+        window = subtitles[start:end]
+        print(f"Cleaning subtitles {start + 1}-{end}/{total}...", flush=True)
+        refined = refiner.refine([sub.text for sub in window])
         if len(refined) == len(window):
             for sub, text in zip(window, refined):
                 if text.strip():
                     sub.text = text.strip()
-        i += window_size

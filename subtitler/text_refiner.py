@@ -17,6 +17,8 @@ from .models import MisTranscriptionFlag, SplitPlanResult
 
 
 class TextRefiner:
+    last_mistranscription_raw: str = ""
+
     def refine(self, lines: list[str]) -> list[str]:
         return lines
 
@@ -37,6 +39,9 @@ class TextRefiner:
 
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
         return []
+
+    def should_move_leading_phrase_left(self, previous_text: str, current_text: str, phrase: str) -> bool:
+        return False
 
     def close(self) -> None:
         return None
@@ -67,6 +72,7 @@ class LlamaServerTextRefiner(TextRefiner):
         self.base_url = f"http://{host}:{port}"
         self.process: subprocess.Popen[str] | None = None
         self._owned_process = False
+        self.last_mistranscription_raw = ""
         self._ensure_server()
 
     @staticmethod
@@ -241,13 +247,72 @@ class LlamaServerTextRefiner(TextRefiner):
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
         if not numbered_lines:
             return []
-        prompt = self._mistranscription_prompt(numbered_lines)
+        flags: list[MisTranscriptionFlag] = []
+        raw_blocks: list[str] = []
+        batch_size = 16
+        total_batches = (len(numbered_lines) + batch_size - 1) // batch_size
+        print(
+            f"Final candidate review: {len(numbered_lines)} subtitles in {total_batches} batch(es).",
+            flush=True,
+        )
+        for start in range(0, len(numbered_lines), batch_size):
+            batch = numbered_lines[start : start + batch_size]
+            batch_number = start // batch_size + 1
+            print(
+                f"Final candidate review batch {batch_number}/{total_batches}: "
+                f"lines {batch[0][0]}-{batch[-1][0]}...",
+                flush=True,
+            )
+            prompt = self._mistranscription_prompt(batch)
+            try:
+                raw = self._chat(prompt, max_tokens=1024)
+            except Exception as exc:
+                print(f"Warning: final mistranscription check failed for lines {batch[0][0]}-{batch[-1][0]}; continuing. {exc}")
+                continue
+            raw_blocks.append(f"=== lines {batch[0][0]}-{batch[-1][0]} ===\n{raw.strip()}")
+            batch_flags = _parse_mistranscription_flags(raw, batch)
+            flags.extend(batch_flags)
+            print(
+                f"Final candidate review batch {batch_number}/{total_batches}: "
+                f"{len(batch_flags)} candidate(s).",
+                flush=True,
+            )
+
+        deterministic_flags = _deterministic_mistranscription_flags(numbered_lines)
+        if deterministic_flags:
+            print(
+                f"Final candidate review deterministic scan: {len(deterministic_flags)} candidate(s).",
+                flush=True,
+            )
+        flags.extend(deterministic_flags)
+        self.last_mistranscription_raw = "\n\n".join(raw_blocks)
+        result = _dedupe_mistranscription_flags(flags)
+        print(f"Final candidate review complete: {len(result)} unique candidate(s).", flush=True)
+        return result
+
+    def should_move_leading_phrase_left(self, previous_text: str, current_text: str, phrase: str) -> bool:
+        prompt = (
+            "Task:\n"
+            "Decide whether the leading Japanese connective/punctuation phrase in the current subtitle "
+            "belongs at the end of the previous subtitle.\n\n"
+            "Rules:\n"
+            "- Output exactly MOVE or KEEP.\n"
+            "- MOVE if the leading phrase clearly continues or completes the previous clause/sentence.\n"
+            "- KEEP if the leading phrase is a valid discourse opener for the current sentence.\n"
+            "- KEEP if either choice is plausible or context is insufficient.\n"
+            "- Do not rewrite text.\n\n"
+            f"Leading phrase: {phrase}\n"
+            f"Previous subtitle: {previous_text}\n"
+            f"Current subtitle: {current_text}\n\n"
+            "Answer:"
+        )
         try:
-            raw = self._chat(prompt, max_tokens=1024)
+            raw = self._chat(prompt, max_tokens=8)
         except Exception as exc:
-            print(f"Warning: final mistranscription check failed; no markers added. {exc}")
-            return []
-        return _parse_mistranscription_flags(raw, numbered_lines)
+            print(f"Warning: boundary phrase review failed; keeping subtitle boundary. {exc}")
+            return False
+        decision = raw.strip().upper()
+        return decision.startswith("MOVE")
 
     def _base_rules(self) -> str:
         mode_line = {
@@ -293,15 +358,17 @@ class LlamaServerTextRefiner(TextRefiner):
         lines = "\n".join(f"{line_number}. {text}" for line_number, text in numbered_lines)
         return (
             "Task:\n"
-            "Review this Japanese gaming-news subtitle transcript. Flag subtitle lines that likely contain "
-            "speech-to-text mistranscriptions or obvious ASR artifacts.\n\n"
+            "Find candidate subtitle text spans a human editor may want to inspect or fix. "
+            "This is non-destructive triage, so high recall is more important than precision.\n\n"
             "Rules:\n"
             "- Do not rewrite or correct the transcript.\n"
-            "- Be conservative about normal Japanese wording, but do flag obvious broken names, broken English, impossible dates, duplicated fragments, and assistant/chat contamination.\n"
-            "- Examples of suspicious segments: garbled proper nouns, partial English phrases in a Japanese sentence, repeated words caused by ASR looping, and phrases that are semantically impossible in context.\n"
-            "- Each flagged text segment must be copied exactly from its original line.\n"
-            "- Output one flagged item per line as: line_number<TAB>copied text segment\n"
-            "- If there are no suspicious segments, output exactly: NONE\n"
+            "- Flag anything a human might reasonably review, even if it could be correct.\n"
+            "- Flag likely ASR errors, odd proper nouns, broken English/product names, impossible dates or numbers, repeated fragments, partial words from subtitle cuts, unnatural particles, cleanup artifacts, mojibake, glossary leaks, and topic-incoherent wording.\n"
+            "- Flag suspicious but grammatical-looking Japanese when it is awkward in context or likely from a bad split.\n"
+            "- Flag short exact substrings when possible. If the suspicious part cannot be isolated, copy the whole subtitle line exactly.\n"
+            "- Output one flagged item per line as: line_number<TAB>exact copied text segment<TAB>short reason\n"
+            "- If you are unsure, flag it.\n"
+            "- Output NONE only if there is truly nothing worth human review in this batch.\n"
             "- Do not output explanations, bullets, JSON, or extra text.\n\n"
             f"Transcript lines:\n{lines}"
         )
@@ -310,7 +377,15 @@ class LlamaServerTextRefiner(TextRefiner):
         payload = {
             "temperature": 0.0,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
         }
         request = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",
@@ -403,12 +478,15 @@ def _parse_mistranscription_flags(
         if not line:
             continue
         if line.upper() == "NONE":
-            return []
+            continue
         match = re.match(r"^\s*(\d+)\s*(?:\t|[:：,，.)、-]+)\s*(.+?)\s*$", line)
         if not match:
             continue
         line_number = int(match.group(1))
-        flagged_text = _clean_response_line(match.group(2))
+        remainder = match.group(2)
+        parts = [part.strip() for part in remainder.split("\t", 1)]
+        flagged_text = _clean_response_line(parts[0])
+        reason = _clean_response_line(parts[1]) if len(parts) > 1 else ""
         original = originals.get(line_number)
         if not original or not flagged_text:
             continue
@@ -418,6 +496,73 @@ def _parse_mistranscription_flags(
         if key in seen:
             continue
         seen.add(key)
-        flags.append(MisTranscriptionFlag(line_number=line_number, text=flagged_text))
+        flags.append(MisTranscriptionFlag(line_number=line_number, text=flagged_text, reason=reason))
     return flags
 
+
+def _deterministic_mistranscription_flags(
+    numbered_lines: list[tuple[int, str]],
+) -> list[MisTranscriptionFlag]:
+    flags: list[MisTranscriptionFlag] = []
+    artifact_markers = [
+        "| prefer over",
+        "full expansion of",
+    ]
+    for line_number, text in numbered_lines:
+        for marker in artifact_markers:
+            if marker in text:
+                flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="glossary artifact leaked into subtitle"))
+                break
+        if _looks_like_mojibake(text):
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="possible mojibake"))
+            continue
+        repeated = _repeated_fragment(text)
+        if repeated:
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=repeated, reason="repeated fragment"))
+        cut_fragment = _suspicious_cut_fragment(text)
+        if cut_fragment:
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=cut_fragment, reason="possible cut fragment"))
+    return flags
+
+
+def _looks_like_mojibake(text: str) -> bool:
+    markers = ("‚", "ƒ", "Ѓ", "Љ", "Ќ", "Џ", "‰", "–", "•", "�")
+    return sum(text.count(marker) for marker in markers) >= 2
+
+
+def _repeated_fragment(text: str) -> str:
+    normalized = _normalize_for_validation(text)
+    max_size = min(12, len(normalized) // 2)
+    for size in range(max_size, 2, -1):
+        for index in range(0, len(normalized) - size * 2 + 1):
+            fragment = normalized[index : index + size]
+            if normalized[index + size : index + size * 2] == fragment:
+                return fragment * 2
+    return ""
+
+
+def _suspicious_cut_fragment(text: str) -> str:
+    normalized = _normalize_for_validation(text)
+    if not normalized:
+        return ""
+    suspicious_heads = ("いか", "配も", "しないか", "では", "ことで")
+    suspicious_tails = ("という心", "であると", "につい", "によっ", "してい")
+    for head in suspicious_heads:
+        if normalized.startswith(head):
+            return text[: min(len(text), max(6, len(head)))]
+    for tail in suspicious_tails:
+        if normalized.endswith(tail):
+            return text[-min(len(text), max(6, len(tail))) :]
+    return ""
+
+
+def _dedupe_mistranscription_flags(flags: list[MisTranscriptionFlag]) -> list[MisTranscriptionFlag]:
+    result: list[MisTranscriptionFlag] = []
+    seen: set[tuple[int, str]] = set()
+    for flag in flags:
+        key = (flag.line_number, flag.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(flag)
+    return result
