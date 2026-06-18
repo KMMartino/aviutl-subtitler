@@ -7,8 +7,9 @@ from unittest import mock
 import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
-from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner
-from subtitler.external_transcribers import GeminiTranscriber, OpenAITranscriber
+from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
+from subtitler.external_transcribers import GeminiTranscriber, OpenAITranscriber, _hosted_transcription_timeout
+from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
 
@@ -35,6 +36,21 @@ class ExternalApiClientTests(unittest.TestCase):
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "どうも")
         self.assertEqual(ledger.rows[0].audio_input_tokens, 32)
+
+    def test_gemini_untranscribable_token_returns_empty_transcript(self) -> None:
+        ledger = ApiUsageLedger()
+        response = {
+            "candidates": [{"content": {"parts": [{"text": UNTRANSCRIBABLE_AUDIO_TOKEN}]}}],
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch("subtitler.external_transcribers.require_api_key", return_value="key"), mock.patch(
+                "subtitler.external_transcribers.verify_gemini_model_available"
+            ), mock.patch("subtitler.external_transcribers._request_json_with_retries", return_value=response):
+                transcriber = GeminiTranscriber("gemini-2.5-flash", Path(temp_name), ledger)
+                result = transcriber.transcribe(self._chunk())
+        self.assertEqual(result.text, "")
+        self.assertEqual(len(ledger.rows), 1)
 
     def test_openai_transcriber_parses_text_and_usage(self) -> None:
         ledger = ApiUsageLedger()
@@ -75,6 +91,15 @@ class ExternalApiClientTests(unittest.TestCase):
                 result = refiner.split_lines_with_diagnostics("前半後半", 10)
         self.assertTrue(result.accepted)
         self.assertEqual(result.lines, ["前半", "後半"])
+
+    def test_transcription_timeout_scales_with_audio_length_and_caps(self) -> None:
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 5.0, [])), 15.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, [])), 60.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 100.0, [])), 60.0)
+
+    def test_text_timeout_has_floor_and_cap(self) -> None:
+        self.assertEqual(_hosted_text_timeout("short", 32), 45.0)
+        self.assertEqual(_hosted_text_timeout("x" * 12000, 1024), 180.0)
 
 
 if __name__ == "__main__":

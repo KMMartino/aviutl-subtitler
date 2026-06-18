@@ -1,0 +1,34 @@
+{
+  "name": "subtitler-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron frontend for the four-workflow subtitler",
+  "main": "dist-electron/main/main.js",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "clean:electron": "node scripts/clean-electron.mjs",
+    "electron": "npm run clean:electron && tsc -p tsconfig.node.json && set ELECTRON_RUN_AS_NODE=&& electron .",
+    "start": "concurrently \"npm run dev\" \"wait-on http://127.0.0.1:5173 && npm run electron\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "build": "vite build && npm run clean:electron && tsc -p tsconfig.node.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "extract-zip": "^2.0.1",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^4.1.8",
+    "wait-on": "^8.0.1"
+  }
+}

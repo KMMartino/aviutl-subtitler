@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 from .audio import write_wav_segment
 from .errors import ModelLoadError, TranscriptionError
@@ -19,13 +20,17 @@ from .models import AudioChunk, TranscriptChunk
 from .vad import split_chunk_with_tighter_vad
 
 
+UNTRANSCRIBABLE_AUDIO_TOKEN = "__SUBTITLER_UNTRANSCRIBABLE_AUDIO__"
+
 PROMPT = (
     "この音声の日本語の発話を、聞こえた順番どおりに一字一句そのまま文字起こししてください。"
     "翻訳、要約、補足、タイムスタンプ、記号トークンは出力しないでください。"
+    f"音声が判別不能、無音、ノイズのみ、または日本語の発話として文字起こしできない場合は、必ず {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力してください。"
     "文字起こし本文だけを出力してください。"
 )
 
 TRANSCRIPTION_STOP = ["<|im_end|>", "<end_of_turn>", "<|end|>", "<|eot_id|>"]
+EMPTY_TRANSCRIPT_ATTEMPTS = 2
 
 
 def build_transcription_prompt(glossary: list[GlossaryEntry] | None = None) -> str:
@@ -35,6 +40,7 @@ def build_transcription_prompt(glossary: list[GlossaryEntry] | None = None) -> s
     return (
         "この音声の日本語の発話を、聞こえた順番どおりに一字一句そのまま文字起こししてください。\n"
         "翻訳、要約、補足、タイムスタンプ、記号トークンは出力しないでください。\n"
+        f"音声が判別不能、無音、ノイズのみ、または日本語の発話として文字起こしできない場合は、必ず {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力してください。\n"
         "文字起こし本文だけを出力してください。\n"
         "以下の語彙ヒントは、音声として聞こえる場合だけ使ってください:\n"
         f"{hints}"
@@ -78,7 +84,7 @@ class ServerGemmaTranscriber:
     def __init__(
         self,
         model_path: Path,
-        mmproj: Path,
+        mmproj: Path | None,
         n_gpu_layers: int,
         ctx_size: int,
         temp_dir: Path,
@@ -87,14 +93,28 @@ class ServerGemmaTranscriber:
         port: int = 8081,
         glossary: list[GlossaryEntry] | None = None,
         max_transcription_split_depth: int = 2,
+        spec_draft_model: Path | None = None,
+        spec_draft_n_max: int = 3,
+        log_path: Path | None = None,
     ) -> None:
         if not model_path.exists():
             raise ModelLoadError(f"Gemma GGUF model not found: {model_path}")
-        if not mmproj.exists():
+        if mmproj is not None and not mmproj.exists():
             raise ModelLoadError(f"Gemma projector file not found: {mmproj}")
+        if spec_draft_model is not None and not spec_draft_model.exists():
+            raise ModelLoadError(f"Speculative draft/MTP model not found: {spec_draft_model}")
+        if spec_draft_model is not None and spec_draft_model.suffix.lower() != ".gguf":
+            raise ModelLoadError(
+                "Speculative draft/MTP model must be a GGUF file for llama.cpp. "
+                f"Got: {spec_draft_model}"
+            )
         self.server_path = self._resolve_server(server_path)
         self.model_path = model_path
         self.mmproj = mmproj
+        self.spec_draft_model = spec_draft_model
+        self.spec_draft_n_max = max(1, spec_draft_n_max)
+        self.log_path = log_path
+        self._log_handle: TextIO | None = None
         self.n_gpu_layers = n_gpu_layers
         self.ctx_size = ctx_size
         self.temp_dir = temp_dir
@@ -132,8 +152,6 @@ class ServerGemmaTranscriber:
             str(self.server_path),
             "-m",
             str(self.model_path),
-            "--mmproj",
-            str(self.mmproj),
             "-ngl",
             gpu_layers,
             "-c",
@@ -146,11 +164,35 @@ class ServerGemmaTranscriber:
             "--log-verbosity",
             "2",
         ]
+        if self.mmproj is not None:
+            cmd.extend(["--mmproj", str(self.mmproj)])
+        if self.spec_draft_model is not None:
+            cmd.extend(
+                [
+                    "--spec-draft-model",
+                    str(self.spec_draft_model),
+                    "--spec-type",
+                    "draft-mtp",
+                    "--spec-draft-n-max",
+                    str(self.spec_draft_n_max),
+                ]
+            )
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_handle = self.log_path.open("w", encoding="utf-8")
+            self._log_handle.write(" ".join(cmd) + "\n\n")
+            self._log_handle.flush()
+            stdout = self._log_handle
+            stderr = subprocess.STDOUT
+            print(f"Transcription llama-server log: {self.log_path}", flush=True)
+        else:
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
         try:
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
                 text=True,
             )
         except OSError as exc:
@@ -160,12 +202,17 @@ class ServerGemmaTranscriber:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                raise ModelLoadError(f"llama-server exited early with code {self.process.returncode}")
+                detail = f" See log: {self.log_path}" if self.log_path is not None else ""
+                tail = _tail_log(self.log_path) if self.log_path is not None else ""
+                raise ModelLoadError(
+                    f"llama-server exited early with code {self.process.returncode}.{detail}{tail}"
+                )
             if self._health_ok():
                 return
             time.sleep(1)
         self.close()
-        raise ModelLoadError("llama-server did not become healthy within 180 seconds")
+        detail = f" See log: {self.log_path}" if self.log_path is not None else ""
+        raise ModelLoadError(f"llama-server did not become healthy within 180 seconds.{detail}")
 
     def _health_ok(self) -> bool:
         try:
@@ -201,7 +248,9 @@ class ServerGemmaTranscriber:
         }
 
     def transcribe_payload(self, chunk: AudioChunk, payload: dict, depth: int = 0) -> str:
-        cleaned = self._transcribe_payload_once(chunk, payload)
+        cleaned = self._transcribe_payload_with_empty_retry(chunk, payload)
+        if not cleaned:
+            return ""
         if _is_suspect_transcript(cleaned, chunk) and depth < self.max_transcription_split_depth:
             subchunks = split_chunk_with_tighter_vad(
                 chunk,
@@ -224,6 +273,25 @@ class ServerGemmaTranscriber:
                     return merged
         return cleaned
 
+    def _transcribe_payload_with_empty_retry(self, chunk: AudioChunk, payload: dict) -> str:
+        for attempt in range(EMPTY_TRANSCRIPT_ATTEMPTS):
+            cleaned = self._transcribe_payload_once(chunk, payload)
+            if cleaned:
+                return cleaned
+            if attempt < EMPTY_TRANSCRIPT_ATTEMPTS - 1:
+                print(
+                    f"Warning: llama-server returned an empty transcript for chunk {chunk.index}; "
+                    f"retrying attempt {attempt + 2}/{EMPTY_TRANSCRIPT_ATTEMPTS}.",
+                    flush=True,
+                )
+                time.sleep(1)
+        print(
+            f"Warning: llama-server returned an empty transcript for chunk {chunk.index} "
+            f"after {EMPTY_TRANSCRIPT_ATTEMPTS} attempts; skipping this chunk.",
+            flush=True,
+        )
+        return ""
+
     def _transcribe_payload_once(self, chunk: AudioChunk, payload: dict) -> str:
         request = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",
@@ -239,8 +307,6 @@ class ServerGemmaTranscriber:
             raise TranscriptionError(f"llama-server transcription failed for chunk {chunk.index}: {exc}") from exc
 
         cleaned = clean_transcript(str(text))
-        if not cleaned:
-            raise TranscriptionError(f"llama-server returned an empty transcript for chunk {chunk.index}")
         if _looks_like_ignored_audio(cleaned):
             raise TranscriptionError(f"llama-server returned known template/placeholder text ({cleaned!r})")
         return cleaned
@@ -255,6 +321,18 @@ class ServerGemmaTranscriber:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=10)
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+
+def _tail_log(path: Path, max_chars: int = 2000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    tail = text[-max_chars:].strip()
+    return f"\nLast llama-server log lines:\n{tail}" if tail else ""
 
 def _merge_transcript_parts(parts: list[str]) -> str:
     cleaned = [part.strip() for part in parts if part.strip()]

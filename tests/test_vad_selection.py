@@ -1,0 +1,49 @@
+import unittest
+
+from subtitler.backends.existing_pipeline import long_stream_default_duration_ratio
+from subtitler.models import AudioChunk
+from subtitler.vad import _speech_timestamps_from_probabilities, select_high_activation_chunks
+
+
+def _chunk(index: int, activation: float, peak: float = 0.0) -> AudioChunk:
+    return AudioChunk(index=index, start=float(index), end=float(index + 1), samples=[], vad_activation=activation, vad_peak=peak)
+
+
+class VadSelectionTests(unittest.TestCase):
+    def test_select_high_activation_chunks_targets_active_voice_duration_in_timeline_order(self) -> None:
+        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2), _chunk(3, 0.8), _chunk(4, 0.3)]
+
+        selected = select_high_activation_chunks(chunks, target_duration_ratio=0.4)
+
+        self.assertEqual([chunk.index for chunk in selected], [1, 3])
+
+    def test_select_high_activation_chunks_honors_minimum(self) -> None:
+        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2)]
+
+        selected = select_high_activation_chunks(chunks, target_duration_ratio=0.0, min_chunks=1)
+
+        self.assertEqual([chunk.index for chunk in selected], [1])
+
+    def test_long_stream_default_ratio_smoothly_ramps_down_by_media_duration(self) -> None:
+        self.assertAlmostEqual(long_stream_default_duration_ratio(0.0), 0.15)
+        self.assertAlmostEqual(long_stream_default_duration_ratio(5 * 3600.0), 0.07)
+        self.assertGreater(long_stream_default_duration_ratio(2.5 * 3600.0), 0.07)
+        self.assertLess(long_stream_default_duration_ratio(2.5 * 3600.0), 0.15)
+
+    def test_speech_timestamps_from_probabilities_splits_on_silence(self) -> None:
+        timestamps = _speech_timestamps_from_probabilities(
+            [0.1, 0.8, 0.9, 0.2, 0.1, 0.8, 0.9, 0.1, 0.1],
+            window_size_samples=100,
+            sample_rate=1000,
+            total_samples=900,
+            max_chunk_sec=10.0,
+            min_speech_sec=0.1,
+            min_silence_ms=100,
+            speech_pad_ms=0,
+        )
+
+        self.assertEqual(timestamps, [{"start": 100, "end": 300}, {"start": 500, "end": 700}])
+
+
+if __name__ == "__main__":
+    unittest.main()

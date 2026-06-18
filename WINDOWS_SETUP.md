@@ -1,99 +1,194 @@
 # Windows Setup
 
-This project generates AviUtl `.exo` subtitles from local audio/video files on Windows. The supported transcription path is managed `llama-server.exe` with Gemma audio and an mmproj file.
+This project generates AviUtl `.exo` subtitles from local audio/video files on Windows.
 
-## Required Tools
+The supported app surface is four workflows:
+
+```text
+local
+hosted
+local-long-stream
+hosted-long-stream
+```
+
+Use the batch files for normal runs:
+
+```text
+run_subtitler_drop.bat
+run_subtitler_hosted_drop.bat
+run_subtitler_long_stream_drop.bat
+run_subtitler_long_stream_hosted_drop.bat
+```
+
+## Requirements
 
 - Python 3.11+
 - FFmpeg on `PATH`
-- `llama-server.exe`, usually at `C:\tools\llama-vulkan\llama-server.exe`
-- Gemma audio GGUF model
-- Gemma audio projector/mmproj
-- Optional cleanup GGUF model
+- For local workflows: `llama-server.exe`
+- For local workflows: Gemma audio GGUF model
+- For local workflows: Gemma audio projector file
+- For local cleanup: cleanup GGUF model
+- For hosted workflows: API keys in `.env`
 
-Install Python dependencies:
+## Python Environment
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m venv .venv-win
+.\.venv-win\Scripts\python.exe -m pip install --upgrade pip
+.\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-For hosted API experiments, copy the example environment file and paste in only the keys you need:
+## FFmpeg
+
+Install FFmpeg and make sure `ffmpeg` and `ffprobe` are available on `PATH`.
+
+```powershell
+ffmpeg -version
+ffprobe -version
+```
+
+## llama.cpp Server
+
+For most local workflow users, the Electron frontend can download and manage `llama-server.exe`:
+
+```powershell
+cd frontend
+npm run start
+```
+
+Open **Settings**, choose a managed server backend, then use **Check latest**, **Download server**, and **Use managed server**.
+
+Supported managed backends:
+
+```text
+Vulkan: recommended for AMD on Windows and broadly compatible on Windows GPUs
+CUDA 12.4: recommended NVIDIA option for this app
+```
+
+Managed installs live under:
+
+```text
+.frontend-state\tools\llama
+```
+
+The frontend does not replace an existing valid `llama-server.exe` path automatically. It updates the workflow config only when you click **Use managed server**.
+
+Manual Vulkan install is still available:
+
+```powershell
+.\install_vulkan_llama.ps1
+```
+
+The default configs expect:
+
+```text
+C:\tools\llama-vulkan\llama-server.exe
+```
+
+Update `configs/local.json` and `configs/local-long-stream.json` if your path differs and you are not using the frontend-managed path.
+
+## Local Model Paths
+
+Local workflow paths live in:
+
+```text
+configs/local.json
+configs/local-long-stream.json
+```
+
+Edit these fields for your machine:
+
+```text
+backend.model
+backend.mmproj
+backend.llama_server
+cleanup.model
+cleanup.llama_server
+```
+
+## Hosted API Keys
+
+Copy the example env file:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-`.env` is ignored by git and loaded automatically. Use `--env-file PATH` to point at a different file.
-
-Hosted API runs estimate cost after VAD and before sending audio/text to a provider. The default guard stops runs estimated above `$5.00`; use `--allow-api-spend` only after reviewing the estimate.
-
-For hosted drag-and-drop testing, create a shortcut to:
+Then add the provider keys needed by hosted workflows. Key values stay in `.env`; hosted model names live in:
 
 ```text
-run_subtitler_hosted_drop.bat
+configs/hosted.json
+configs/hosted-long-stream.json
 ```
 
-## Quick Test
+## Running
+
+Drag a video file onto one of the four batch files.
+
+Direct CLI examples:
 
 ```powershell
-.\.venv-win\Scripts\python.exe aviutl_subtitle.py test.m4a `
-  --audio-track 0 `
-  --model "C:\coding\0_models\gemma\gemma4-e4b-q6\google-gemma-4-E4B-it-Q6_K.gguf" `
-  --mmproj "C:\coding\0_models\gemma\projectors\proj-for-q6.gguf" `
-  -o diagnostics\test_server.exo
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow local
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow hosted
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow local-long-stream
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow hosted-long-stream
 ```
 
-## Drag And Drop
+Outputs are written beside the input file by default. Diagnostics are written under `subtitle_files`.
 
-Create a shortcut to:
+## Audio Track
+
+The configs default to audio track `1`, the second stream. For files with only one audio stream, either edit the config:
 
 ```text
-run_subtitler_drop.bat
+audio.track
 ```
 
-Then drag a video file onto it. The batch file writes the `.exo` beside the source video and diagnostics under `subtitle_files`.
+or use the public override:
 
-The batch file currently enables:
+```powershell
+.\.venv-win\Scripts\python.exe aviutl_subtitle.py input.mkv --workflow local --audio-track 0
+```
+
+## Tests
+
+```powershell
+.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+## Electron Frontend
+
+The frontend is a development app, not a packaged installer.
+
+```powershell
+cd frontend
+npm install
+npm run start
+```
+
+It creates managed configs under `.frontend-state\configs` and calls `aviutl_subtitle.py` as a subprocess.
+
+Drop media onto the input panel or use the file picker. **Analyze** uses `ffprobe` to list the available audio tracks before generation. Both `ffmpeg.exe` and `ffprobe.exe` must be on `PATH`.
+
+Diagnostic sidecars are enabled by default and can be disabled in the input panel for EXO-only output. The Python field should normally resolve to `.venv-win\Scripts\python.exe`; change it only when the project environment is elsewhere.
+
+### Managed local models
+
+For local workflows, choose a models directory, select an 8 GB, 12 GB, or 16 GB Gemma profile, and use **Download model profile**. Profiles use progressively larger models or quantizations while retaining runtime-context headroom:
 
 ```text
---offline-model-cache
---profile
---llm-split-diagnostics
---cleanup-model ... when configured
---llm-split-planning cleanup-model when cleanup is configured
+8 GB:  Gemma 4 E2B Q5 + E2B projector; E2B Q6 cleanup
+12 GB: Gemma 4 E4B Q6 + E4B projector; 12B Q5 cleanup
+16 GB: Gemma 4 E4B Q6 + E4B projector; 12B Q6 cleanup
 ```
 
-## Common Options
+The frontend writes these managed model paths into its workflow configs. It can also download a managed `llama-server.exe`:
 
 ```text
---audio-track 0                   Use the first audio stream
---env-file PATH                   Load API keys/settings from a dotenv-style file
---transcriber-backend local-gemma|gemini|openai
---transcription-model MODEL       Hosted transcription model
---transcription-workers N         Concurrent hosted transcription requests
---cleanup-backend none|local-llama|gemini|openai
---cleanup-api-model MODEL         Hosted cleanup/review model
---estimate-cost-only              Estimate hosted API cost after VAD and exit
---tuning-profile auto|local|hosted
---cleanup-window-subtitles N      Lines per cleanup request
---cleanup-workers N               Concurrent hosted cleanup requests
---chain-split-workers N           Concurrent chain splitting workers
---skip-final-review               Skip final possible-mistranscription review
---llama-server PATH               Override transcription llama-server.exe
---server-port PORT                Override transcription server port, default 8081
---cleanup-llama-server PATH       Override cleanup llama-server.exe
---cleanup-server-port PORT        Override cleanup server port, default 8082
---cleanup-ctx-size N              Cleanup context size
---sidecar-dir PATH                Diagnostics/intermediate output directory
+Vulkan: AMD-friendly Windows default
+CUDA 12.4: NVIDIA Windows option
 ```
 
-See `README.md` for the current full option list and the removed pre-release options.
+Use **Use managed server** to copy the downloaded executable path into both transcription and cleanup server fields. Existing valid manual server paths are left alone unless you explicitly switch.
 
-## Notes
-
-- `--language ja` is the default. Internally the CTC aligner receives `jpn`.
-- Japanese alignment always uses char splitting and edge-only wildcard placement.
-- Regrouping is always enabled.
-- Cleanup mode is full when `--cleanup-model` is provided.
-- The app inserts the initial empty EXO object and chain marker objects by default.
+Experimental MTP variants are available for all three tiers. They reuse downloaded target models and add matching Q8 MTP assistant files. Use a current llama.cpp build with `draft-mtp` support.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline Gemma transcription to AviUtl EXO subtitles."""
+"""Workflow runner for AviUtl EXO subtitle generation."""
 
 from __future__ import annotations
 
@@ -8,523 +8,316 @@ import json
 import os
 import sys
 import tempfile
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from subtitler.aligner import ctc_language_code, is_japanese_language
-from subtitler.alignment_pool import AlignmentConfig, AlignmentPool
-from subtitler.api_costs import estimate_run_cost
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.audio import extract_audio, get_media_duration, load_mono_16k_wav
+from subtitler.backends.existing_pipeline import ExistingPipelineBackend
+from subtitler.config import WORKFLOWS, default_config_path, load_workflow_config, validate_workflow_config
 from subtitler.env import load_env_file
 from subtitler.errors import SubtitlerError
 from subtitler.exo import generate_exo_file, write_exo
 from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner
-from subtitler.external_transcribers import GeminiTranscriber, OpenAITranscriber, require_api_key, verify_gemini_model_available, verify_openai_model_available
 from subtitler.glossary import find_glossary, load_glossary
 from subtitler.models import ExoMarker, ExoSettings
-from subtitler.profiling import PipelineProfiler, now
+from subtitler.profiling import PipelineProfiler
 from subtitler.subtitle_planner import build_grouped_subtitles
 from subtitler.text_refiner import LlamaServerTextRefiner
-from subtitler.transcriber import ServerGemmaTranscriber
-from subtitler.vad import segment_speech
-
-
-def default_align_workers() -> int:
-    return max(1, (os.cpu_count() or 4) // 4)
-
-
-def _effective_cleanup_backend(args: argparse.Namespace) -> str:
-    if args.cleanup_backend == "none" and args.cleanup_model:
-        return "local-llama"
-    return args.cleanup_backend
-
-
-def _transcription_model(args: argparse.Namespace) -> str:
-    if args.transcriber_backend == "local-gemma":
-        return args.transcription_model or args.model or ""
-    return args.transcription_model or ""
-
-
-def _uses_hosted_api(transcriber_backend: str, cleanup_backend: str) -> bool:
-    return transcriber_backend in {"gemini", "openai"} or cleanup_backend in {"gemini", "openai"}
-
-
-def _tuning_profile(args: argparse.Namespace, cleanup_backend: str) -> str:
-    if args.tuning_profile != "auto":
-        return args.tuning_profile
-    return "hosted" if _uses_hosted_api(args.transcriber_backend, cleanup_backend) else "local"
-
-
-def _cleanup_window_subtitles(args: argparse.Namespace, cleanup_backend: str) -> int:
-    if args.cleanup_window_subtitles is not None:
-        return max(1, args.cleanup_window_subtitles)
-    return 8 if _tuning_profile(args, cleanup_backend) == "hosted" and cleanup_backend != "none" else 1
-
-
-def _transcription_workers(args: argparse.Namespace, cleanup_backend: str) -> int:
-    if args.transcription_workers is not None:
-        return max(1, args.transcription_workers)
-    return 4 if _tuning_profile(args, cleanup_backend) == "hosted" and args.transcriber_backend != "local-gemma" else 1
-
-
-def _chain_split_workers(args: argparse.Namespace, cleanup_backend: str) -> int:
-    if args.chain_split_workers is not None:
-        return max(1, args.chain_split_workers)
-    return 6 if _tuning_profile(args, cleanup_backend) == "hosted" else 1
-
-
-def _cleanup_workers(args: argparse.Namespace, cleanup_backend: str) -> int:
-    if args.cleanup_workers is not None:
-        return max(1, args.cleanup_workers)
-    return 8 if _tuning_profile(args, cleanup_backend) == "hosted" and cleanup_backend in {"gemini", "openai"} else 1
-
-
-def _preflight_hosted_models(
-    *,
-    transcriber_backend: str,
-    transcription_model: str,
-    cleanup_backend: str,
-    cleanup_model: str,
-) -> None:
-    if transcriber_backend == "gemini":
-        verify_gemini_model_available(transcription_model, require_api_key("GEMINI_API_KEY"))
-    elif transcriber_backend == "openai":
-        verify_openai_model_available(transcription_model, require_api_key("OPENAI_API_KEY"))
-
-    if cleanup_backend == "gemini":
-        verify_gemini_model_available(cleanup_model, require_api_key("GEMINI_API_KEY"))
-    elif cleanup_backend == "openai":
-        verify_openai_model_available(cleanup_model, require_api_key("OPENAI_API_KEY"))
+from subtitler.transcript_normalizer import backend_result_to_aligned_chunks, speech_regions_to_markers
+from subtitler.transcription_backend import TranscriptionRequest
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate AviUtl .exo subtitles using offline Gemma, Silero VAD, and CTC alignment.",
+        description="Generate AviUtl .exo subtitles using one of the supported workflows.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input", help="Input audio or video file")
-    parser.add_argument("-o", "--output", help="Output .exo file")
-    parser.add_argument("--model", help="Local Gemma GGUF model path")
     parser.add_argument(
-        "--transcriber-backend",
-        choices=["local-gemma", "gemini", "openai"],
-        default="local-gemma",
-        help="Transcription backend",
+        "--workflow",
+        choices=sorted(WORKFLOWS),
+        default="local",
+        help="Supported workflow to run",
     )
-    parser.add_argument("--transcription-model", help="Hosted transcription model, or local model path override")
-    parser.add_argument("--mmproj", help="Optional multimodal/projector file path")
-    parser.add_argument(
-        "--audio-track",
-        type=int,
-        default=1,
-        help="Audio stream index, 0-based. Default is 1, the second audio track.",
-    )
-    parser.add_argument("--language", default="ja", help="Transcription/alignment language")
-    parser.add_argument("--temp-dir", help="Temporary directory")
-    parser.add_argument("--keep-temp", action="store_true", help="Keep chunk WAV files")
-    parser.add_argument("--profile", action="store_true", help="Write per-chunk pipeline timing CSV")
-    parser.add_argument("--env-file", default=".env", help="Load API keys/settings from this dotenv-style file")
-    parser.add_argument("--estimate-cost-only", action="store_true", help="Estimate hosted API cost after VAD and exit")
-    parser.add_argument("--max-estimated-api-cost-usd", type=float, default=5.0, help="Abort hosted API runs above this estimate")
-    parser.add_argument("--allow-api-spend", action="store_true", help="Allow hosted API runs above the estimate guard")
-    parser.add_argument(
-        "--tuning-profile",
-        choices=["auto", "local", "hosted"],
-        default="auto",
-        help="Default tuning profile for model-sensitive settings",
-    )
-    parser.add_argument("--llama-server", help="Path to llama-server.exe for server backend")
-    parser.add_argument("--server-port", type=int, default=8081, help="llama-server port for server backend")
-
-    model_group = parser.add_argument_group("Gemma / llama.cpp options")
-    model_group.add_argument("--n-gpu-layers", type=int, default=-1)
-    model_group.add_argument("--ctx-size", type=int, default=8192)
-    model_group.add_argument("--audio-prep-workers", type=int, default=2)
-    model_group.add_argument(
-        "--transcription-workers",
-        type=int,
-        help="Concurrent hosted transcription requests. Defaults to 1 local, 4 hosted.",
-    )
-    model_group.add_argument(
-        "--transcription-max-split-depth",
-        type=int,
-        default=2,
-        help="Recursive VAD re-split attempts when server transcription output looks incomplete or contaminated",
-    )
-    model_group.add_argument("--align-workers", type=int, default=default_align_workers(), help="Defaults to CPU count / 4")
-    model_group.add_argument("--align-torch-threads", type=int, help="PyTorch CPU threads per aligner worker")
-    model_group.add_argument("--align-emission-batch-size", type=int, default=4, help="CTC emission batch size")
-
-    glossary_group = parser.add_argument_group("Glossary options")
-    glossary_group.add_argument("--glossary", help="Plain-text glossary path")
-    glossary_group.add_argument("--no-glossary", action="store_true", help="Disable glossary auto-discovery")
-
-    vad_group = parser.add_argument_group("VAD options")
-    vad_group.add_argument("--max-chunk-sec", type=float, default=30.0)
-    vad_group.add_argument("--min-speech-sec", type=float, default=0.25)
-    vad_group.add_argument("--min-silence-ms", type=int, default=400)
-    vad_group.add_argument("--speech-pad-ms", type=int, default=200)
-
-    align_group = parser.add_argument_group("Alignment options")
-    align_group.add_argument(
-        "--alignment-model",
-        default="MahmoudAshraf/mms-300m-1130-forced-aligner",
-    )
-    align_group.add_argument("--alignment-device", default="auto")
-    align_group.add_argument(
-        "--alignment-max-split-depth",
-        type=int,
-        default=4,
-        help="Recursive VAD re-split attempts when a chunk is too dense for CTC alignment",
-    )
-    align_group.add_argument(
-        "--offline-model-cache",
-        action="store_true",
-        help="Use local Hugging Face/Transformers cache only for alignment models",
-    )
-
-    sub_group = parser.add_argument_group("Subtitle shaping options")
-    sub_group.add_argument("--max-chars", type=int, default=40)
-    sub_group.add_argument("--min-duration", type=float, default=0.40)
-    sub_group.add_argument("--max-duration", type=float, default=6.0)
-    sub_group.add_argument("--gap-threshold", type=float, default=0.25)
-    sub_group.add_argument("--regroup-gap-sec", type=float, default=0.5)
-    sub_group.add_argument("--llm-split-planning", choices=["off", "cleanup-model"], default="off")
-    sub_group.add_argument("--llm-split-diagnostics", action="store_true")
-    sub_group.add_argument(
-        "--chain-split-workers",
-        type=int,
-        help="Concurrent chain splitting workers. Defaults to 1 local, 6 hosted.",
-    )
-    sub_group.add_argument("--chain-lead-in-sec", type=float, default=0.08)
-
-    cleanup_group = parser.add_argument_group("Cleanup LLM options")
-    cleanup_group.add_argument(
-        "--cleanup-backend",
-        choices=["none", "local-llama", "gemini", "openai"],
-        default="none",
-        help="Cleanup/refinement backend",
-    )
-    cleanup_group.add_argument("--cleanup-model", help="Local GGUF text model for subtitle cleanup")
-    cleanup_group.add_argument("--cleanup-api-model", help="Hosted cleanup/refinement model")
-    cleanup_group.add_argument(
-        "--cleanup-window-subtitles",
-        type=int,
-        help="Subtitle lines per cleanup request. Defaults to 1 for local models and 8 for hosted models.",
-    )
-    cleanup_group.add_argument(
-        "--cleanup-workers",
-        type=int,
-        help="Concurrent hosted cleanup requests. Defaults to 1 local, 8 hosted.",
-    )
-    cleanup_group.add_argument(
-        "--skip-final-review",
-        action="store_true",
-        help="Skip final possible-mistranscription review and layer-4 QA markers",
-    )
-    cleanup_group.add_argument("--cleanup-llama-server", help="Path to llama-server.exe for cleanup backend")
-    cleanup_group.add_argument("--cleanup-server-port", type=int, default=8082)
-    cleanup_group.add_argument("--cleanup-ctx-size", type=int, default=4096)
-
-    exo_group = parser.add_argument_group("EXO options")
-    exo_group.add_argument("--width", type=int, default=2560)
-    exo_group.add_argument("--height", type=int, default=1440)
-    exo_group.add_argument("--fps", type=int, default=60)
-    exo_group.add_argument("--font", default="M+ 2p heavy")
-    exo_group.add_argument("--font-size", type=int, default=60)
-    exo_group.add_argument("--y-position", type=float, default=717.0)
-    exo_group.add_argument("--sidecar-dir", help="Directory for diagnostics/intermediate subtitle files")
+    parser.add_argument("--output", "-o", help="Output .exo file")
+    parser.add_argument("--config", help="Workflow config JSON. Defaults to configs/<workflow>.json")
+    parser.add_argument("--env-file", default=".env", help="Dotenv-style API key file")
+    parser.add_argument("--profile", action="store_true", help="Write diagnostics even if config disables them")
+    parser.add_argument("--audio-track", type=int, help="Override config audio track")
+    parser.add_argument("--sidecar-dir", help="Diagnostics/intermediate output directory")
+    parser.add_argument("--no-sidecars", action="store_true", help="Do not create diagnostic or intermediate sidecar files")
     return parser.parse_args()
 
 
 def main() -> int:
+    started = time.monotonic()
     args = parse_args()
-    if args.align_torch_threads is None:
-        cpu_count = os.cpu_count() or 4
-        args.align_torch_threads = max(1, cpu_count // max(1, args.align_workers))
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"Error: input file not found: {input_path}", file=sys.stderr)
-        return 1
-
-    output_path = Path(args.output) if args.output else input_path.with_suffix(".exo")
-    temp_root = Path(args.temp_dir) if args.temp_dir else None
-    sidecar_dir = Path(args.sidecar_dir) if args.sidecar_dir else input_path.parent / "subtitle_files"
-    sidecar_dir.mkdir(parents=True, exist_ok=True)
-    sidecar_base = sidecar_dir / output_path.stem
-    profile_path = sidecar_base.with_suffix(".profile.csv")
-    regroup_profile_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.regroup.csv")
-    llm_split_profile_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.llm_split.csv")
-    subtitle_timing_profile_path = profile_path.with_name(
-        f"{profile_path.stem.removesuffix('.profile')}.subtitle_timing.csv"
-    )
-    boundary_timing_profile_path = profile_path.with_name(
-        f"{profile_path.stem.removesuffix('.profile')}.boundary_timing.csv"
-    )
-    run_metadata_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.run.json")
-    api_usage_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.api_usage.csv")
-    aligned_text_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.aligned_text.txt")
-    final_text_path = profile_path.with_name(f"{profile_path.stem.removesuffix('.profile')}.final_text.txt")
-    mistranscription_path = profile_path.with_name(
-        f"{profile_path.stem.removesuffix('.profile')}.possible_mistranscriptions.txt"
-    )
-
     try:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            raise SubtitlerError(f"input file not found: {input_path}")
+
+        config = load_workflow_config(args.workflow, Path(args.config) if args.config else None)
+        if args.audio_track is not None:
+            config["audio"]["track"] = args.audio_track
+        if args.profile:
+            config["diagnostics"]["profile"] = True
+        validate_workflow_config(config, workflow=args.workflow)
+
         env_path = Path(args.env_file)
         if not env_path.is_absolute():
             env_path = Path.cwd() / env_path
         loaded_env_keys = load_env_file(env_path)
-        cleanup_backend = _effective_cleanup_backend(args)
-        transcription_model = _transcription_model(args)
-        cleanup_api_model = args.cleanup_api_model or ""
-        cleanup_window_subtitles = _cleanup_window_subtitles(args, cleanup_backend)
-        transcription_workers = _transcription_workers(args, cleanup_backend)
-        chain_split_workers = _chain_split_workers(args, cleanup_backend)
-        cleanup_workers = _cleanup_workers(args, cleanup_backend)
-        if args.transcriber_backend != "local-gemma" and not transcription_model:
-            raise SubtitlerError("--transcription-model is required for hosted transcription")
-        if cleanup_backend == "local-llama" and not args.cleanup_model:
-            raise SubtitlerError("--cleanup-model is required when --cleanup-backend local-llama")
-        if cleanup_backend in {"gemini", "openai"} and not cleanup_api_model:
-            raise SubtitlerError("--cleanup-api-model is required for hosted cleanup")
-        api_usage = ApiUsageLedger()
 
-        if args.offline_model_cache:
+        if config["alignment"].get("offline_model_cache", True):
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-        with tempfile.TemporaryDirectory(dir=temp_root, prefix="subtitler_") as temp_name:
+        output_path = Path(args.output) if args.output else _default_output_path(input_path, args.workflow)
+        sidecars_enabled = not args.no_sidecars
+        sidecar_dir = (Path(args.sidecar_dir) if args.sidecar_dir else input_path.parent / "subtitle_files") if sidecars_enabled else None
+        if sidecar_dir is not None:
+            sidecar_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_base = sidecar_dir / output_path.stem if sidecar_dir is not None else None
+        profile_path = sidecar_base.with_suffix(".profile.csv") if sidecar_base is not None else None
+        run_metadata_path = sidecar_base.with_suffix(".run.json") if sidecar_base is not None else None
+        api_usage_path = sidecar_base.with_suffix(".api_usage.csv") if sidecar_base is not None else None
+        aligned_text_path = sidecar_base.with_suffix(".aligned_text.txt") if sidecar_base is not None else None
+        final_text_path = sidecar_base.with_suffix(".final_text.txt") if sidecar_base is not None else None
+        mistranscription_path = sidecar_base.with_suffix(".possible_mistranscriptions.txt") if sidecar_base is not None else None
+        regroup_profile_path = sidecar_base.with_suffix(".regroup.csv") if sidecar_base is not None else None
+        llm_split_profile_path = sidecar_base.with_suffix(".llm_split.csv") if sidecar_base is not None else None
+        subtitle_timing_profile_path = sidecar_base.with_suffix(".subtitle_timing.csv") if sidecar_base is not None else None
+        boundary_timing_profile_path = sidecar_base.with_suffix(".boundary_timing.csv") if sidecar_base is not None else None
+
+        print(f"Input:  {input_path}")
+        print(f"Output: {output_path}")
+        print(f"Workflow: {args.workflow}")
+        print(f"Config: {Path(args.config) if args.config else default_config_path(args.workflow)}")
+        print(f"Sidecars: {sidecar_dir if sidecar_dir is not None else 'disabled'}")
+
+        api_usage = ApiUsageLedger()
+        diagnostics_enabled = sidecars_enabled and bool(config["diagnostics"]["profile"])
+        profiler = PipelineProfiler(diagnostics_enabled, profile_path)
+
+        with tempfile.TemporaryDirectory(prefix="subtitler_") as temp_name:
             temp_dir = Path(temp_name)
             wav_path = temp_dir / "input_16k_mono.wav"
-
-            print(f"Input:  {input_path}")
-            print(f"Output: {output_path}")
-            print(f"Sidecars: {sidecar_dir}")
-            print("Extracting mono 16 kHz audio...")
-            extract_audio(input_path, wav_path, args.audio_track)
             duration = get_media_duration(input_path)
+            print("Extracting mono 16 kHz audio...")
+            extract_audio(
+                input_path,
+                wav_path,
+                int(config["audio"]["track"]),
+                duration=duration,
+                progress_callback=_progress_reporter("Audio extraction"),
+            )
             samples, sample_rate = load_mono_16k_wav(wav_path)
             if duration <= 0:
                 duration = len(samples) / sample_rate
 
-            print("Running Silero VAD...")
-            chunks = segment_speech(
-                samples=samples,
-                sample_rate=sample_rate,
-                max_chunk_sec=args.max_chunk_sec,
-                min_speech_sec=args.min_speech_sec,
-                min_silence_ms=args.min_silence_ms,
-                speech_pad_ms=args.speech_pad_ms,
-                temp_dir=temp_dir,
-                keep_temp=True,
-            )
-            print(f"VAD chunks: {len(chunks)}")
-            speech_seconds = sum(max(0.0, chunk.end - chunk.start) for chunk in chunks)
-            estimated_api_cost = estimate_run_cost(
-                transcriber_backend=args.transcriber_backend,
-                transcription_model=transcription_model,
-                cleanup_backend=cleanup_backend,
-                cleanup_model=cleanup_api_model,
-                speech_seconds=speech_seconds,
-            )
-            print(
-                "Estimated hosted API cost: "
-                f"${estimated_api_cost:.4f} "
-                f"(speech={speech_seconds / 60.0:.2f} min, "
-                f"transcriber={args.transcriber_backend}:{transcription_model or 'local'}, "
-                f"cleanup={cleanup_backend}:{cleanup_api_model or args.cleanup_model or 'none'})",
-                flush=True,
-            )
-            if args.profile:
-                _write_run_metadata(
-                    run_metadata_path,
-                    args,
-                    env_path,
-                    loaded_env_keys,
-                    estimated_api_cost=estimated_api_cost,
-                    api_usage=api_usage,
-                    api_usage_path=api_usage_path,
-                )
-            if args.estimate_cost_only:
-                print("Cost estimate only; exiting before transcription.", flush=True)
-                return 0
-            if _uses_hosted_api(args.transcriber_backend, cleanup_backend):
-                if estimated_api_cost > args.max_estimated_api_cost_usd and not args.allow_api_spend:
-                    print(
-                        "Error: estimated hosted API cost "
-                        f"${estimated_api_cost:.4f} exceeds limit "
-                        f"${args.max_estimated_api_cost_usd:.2f}. "
-                        "Re-run with --allow-api-spend to proceed.",
-                        file=sys.stderr,
-                    )
-                    return 1
-                _preflight_hosted_models(
-                    transcriber_backend=args.transcriber_backend,
-                    transcription_model=transcription_model,
-                    cleanup_backend=cleanup_backend,
-                    cleanup_model=cleanup_api_model,
-                )
             glossary_path = find_glossary(
                 input_path=input_path,
-                explicit=Path(args.glossary) if args.glossary else None,
-                disabled=args.no_glossary,
+                explicit=None,
+                disabled=False,
                 project_dir=Path(__file__).resolve().parent,
             )
             glossary = load_glossary(glossary_path)
             if glossary:
                 print(f"Loaded glossary entries: {len(glossary)}")
-            profiler = PipelineProfiler(enabled=args.profile, output_path=profile_path)
-            for chunk in chunks:
-                profiler.start_chunk(chunk.index, chunk.start, chunk.end)
 
-            transcriber = _build_transcriber(args, temp_dir, glossary, api_usage)
+            backend = _build_backend(config, api_usage, profiler)
+            request = TranscriptionRequest(
+                input_path=input_path,
+                wav_path=wav_path,
+                duration_sec=duration,
+                sample_rate=sample_rate,
+                language=config["backend"].get("language", "ja"),
+                temp_dir=temp_dir,
+                sidecar_base=sidecar_base,
+                glossary=glossary,
+                profile_enabled=diagnostics_enabled,
+                workflow=args.workflow,
+                metadata={
+                    "samples": samples,
+                    "stage_progress_reporter": _stage_progress_reporter("VAD"),
+                },
+            )
+            backend_result = backend.transcribe(request)
+            if backend_result.status == "partial" and any(
+                item.code == "cost_estimate_only" for item in backend_result.diagnostics
+            ):
+                if run_metadata_path is not None and api_usage_path is not None:
+                    _write_run_metadata(
+                        run_metadata_path,
+                        args,
+                        config,
+                        env_path,
+                        loaded_env_keys,
+                        backend_result,
+                        api_usage,
+                        api_usage_path,
+                        elapsed_run_seconds=time.monotonic() - started,
+                    )
+                print("Cost estimate only; exiting before transcription.", flush=True)
+                return 0
+            aligned = backend_result_to_aligned_chunks(backend_result)
+            if diagnostics_enabled and aligned_text_path is not None:
+                _write_aligned_text(aligned_text_path, aligned)
 
-            try:
-                split_size = "char" if is_japanese_language(args.language) else "word"
-                ctc_language = ctc_language_code(args.language)
-                print(
-                    "Alignment: "
-                    f"model={args.alignment_model}, language={args.language}, "
-                    f"ctc_language={ctc_language}, split_size={split_size}, "
-                    "star_frequency=edges",
-                    flush=True,
-                )
-                alignment_config = AlignmentConfig(
-                    model_name=args.alignment_model,
-                    language=args.language,
-                    device=args.alignment_device,
-                    split_size=split_size,
-                    temp_dir=temp_dir,
-                    sample_rate=sample_rate,
-                    emission_batch_size=args.align_emission_batch_size,
-                    torch_threads=args.align_torch_threads,
-                    max_split_depth=max(0, args.alignment_max_split_depth),
-                )
-
-                aligned = _transcribe_and_align(
-                    chunks=chunks,
-                    transcriber=transcriber,
-                    alignment_config=alignment_config,
-                    profiler=profiler,
-                    audio_prep_workers=max(1, args.audio_prep_workers),
-                    align_workers=max(1, args.align_workers),
-                    transcription_workers=transcription_workers,
-                )
-                if args.profile:
-                    _write_aligned_text(aligned_text_path, aligned)
-            finally:
-                close = getattr(transcriber, "close", None)
-                if close is not None:
-                    close()
-
-            refiner = None
-            if cleanup_backend == "local-llama":
-                print("Starting cleanup model...")
-                refiner = LlamaServerTextRefiner(
-                    model_path=Path(args.cleanup_model),
-                    server_path=Path(args.cleanup_llama_server) if args.cleanup_llama_server else None,
-                    glossary=glossary,
-                    mode="full",
-                    host="127.0.0.1",
-                    port=args.cleanup_server_port,
-                    ctx_size=args.cleanup_ctx_size,
-                    n_gpu_layers=args.n_gpu_layers,
-                )
-            elif cleanup_backend == "openai":
-                refiner = OpenAITextRefiner(model=cleanup_api_model, glossary=glossary, usage=api_usage)
-            elif cleanup_backend == "gemini":
-                refiner = GeminiTextRefiner(model=cleanup_api_model, glossary=glossary, usage=api_usage)
+            refiner = _build_refiner(config, glossary, api_usage, sidecar_base)
             try:
                 chain_markers: list[ExoMarker] = []
                 mistranscription_markers: list[ExoMarker] = []
+                cleanup_cfg = config["cleanup"]
+                subtitle_cfg = config["subtitles"]
                 subtitles = build_grouped_subtitles(
                     aligned,
-                    max_chars=args.max_chars,
-                    min_duration=args.min_duration,
-                    max_duration=args.max_duration,
-                    gap_threshold=args.gap_threshold,
-                    regroup_gap_sec=args.regroup_gap_sec,
+                    max_chars=int(subtitle_cfg["max_chars"]),
+                    min_duration=float(subtitle_cfg["min_duration"]),
+                    max_duration=float(subtitle_cfg["max_duration"]),
+                    gap_threshold=float(subtitle_cfg["gap_threshold"]),
+                    regroup_gap_sec=float(subtitle_cfg["regroup_gap_sec"]),
                     refiner=refiner,
-                    llm_splitter=refiner if args.llm_split_planning == "cleanup-model" else None,
-                    regroup_profile_path=regroup_profile_path if args.profile else None,
-                    llm_split_profile_path=llm_split_profile_path if args.llm_split_diagnostics else None,
-                    llm_split_console=args.llm_split_diagnostics,
+                    llm_splitter=refiner if cleanup_cfg.get("llm_split_planning") else None,
+                    regroup_profile_path=regroup_profile_path if diagnostics_enabled else None,
+                    llm_split_profile_path=llm_split_profile_path if sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"] else None,
+                    llm_split_console=bool(sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]),
                     chain_markers=chain_markers,
-                    subtitle_timing_profile_path=subtitle_timing_profile_path if args.profile else None,
-                    boundary_timing_profile_path=boundary_timing_profile_path if args.profile else None,
-                    chain_lead_in_sec=max(0.0, args.chain_lead_in_sec),
-                    cleanup_window_subtitles=cleanup_window_subtitles,
-                    cleanup_workers=cleanup_workers,
-                    chain_split_workers=chain_split_workers,
+                    subtitle_timing_profile_path=subtitle_timing_profile_path if diagnostics_enabled else None,
+                    boundary_timing_profile_path=boundary_timing_profile_path if diagnostics_enabled else None,
+                    chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
+                    cleanup_window_subtitles=int(cleanup_cfg["window_subtitles"] or _default_cleanup_window(config)),
+                    cleanup_workers=int(cleanup_cfg["workers"] or _default_cleanup_workers(config)),
+                    chain_split_workers=int(subtitle_cfg["chain_split_workers"] or _default_chain_split_workers(config)),
                 )
                 if refiner is not None:
-                    _write_final_subtitle_text(final_text_path, subtitles)
-                    if args.skip_final_review:
+                    if final_text_path is not None:
+                        _write_final_subtitle_text(final_text_path, subtitles)
+                    if cleanup_cfg.get("skip_final_review"):
                         print("Skipping final mistranscription check.", flush=True)
                     else:
                         print("Running final mistranscription check...", flush=True)
-                        mistranscription_markers = _flag_possible_mistranscriptions(
-                            subtitles,
-                            refiner,
-                            mistranscription_path,
-                        )
+                        if mistranscription_path is not None:
+                            mistranscription_markers = _flag_possible_mistranscriptions(
+                                subtitles,
+                                refiner,
+                                mistranscription_path,
+                            )
             finally:
                 if refiner is not None:
                     refiner.close()
+
             profiler.write()
-            api_usage.write_csv(api_usage_path)
+            if api_usage_path is not None:
+                api_usage.write_csv(api_usage_path)
             _print_api_cost_summary(api_usage)
-            if args.profile:
-                print(f"Wrote profile: {profile_path}")
-                print(f"Wrote run metadata: {run_metadata_path}")
-                print(f"Wrote API usage: {api_usage_path}")
+            if run_metadata_path is not None and api_usage_path is not None:
                 _write_run_metadata(
                     run_metadata_path,
                     args,
+                    config,
                     env_path,
                     loaded_env_keys,
-                    estimated_api_cost=estimated_api_cost,
-                    api_usage=api_usage,
-                    api_usage_path=api_usage_path,
+                    backend_result,
+                    api_usage,
+                    api_usage_path,
+                    elapsed_run_seconds=time.monotonic() - started,
                 )
+
+            exo_cfg = config["exo"]
             settings = ExoSettings(
-                width=args.width,
-                height=args.height,
-                rate=args.fps,
-                font=args.font,
-                font_size=args.font_size,
-                y_position=args.y_position,
+                width=int(exo_cfg["width"]),
+                height=int(exo_cfg["height"]),
+                rate=int(exo_cfg["fps"]),
+                font=exo_cfg["font"],
+                font_size=int(exo_cfg["font_size"]),
+                y_position=float(exo_cfg["y_position"]),
             )
             content = generate_exo_file(
                 subtitles,
                 settings,
                 duration,
                 insert_initial_empty=True,
-                vad_markers=_build_vad_markers(chunks),
+                vad_markers=speech_regions_to_markers(backend_result.speech_regions),
                 chain_markers=chain_markers,
                 mistranscription_markers=mistranscription_markers,
             )
             write_exo(output_path, content)
 
-            if args.keep_temp:
-                keep_dir = output_path.with_suffix(".chunks")
-                keep_dir.mkdir(exist_ok=True)
-                for path in temp_dir.glob("*.wav"):
-                    target = keep_dir / path.name
-                    target.write_bytes(path.read_bytes())
-                print(f"Kept temporary WAV files in: {keep_dir}")
-
-            print(f"Successfully generated: {output_path}")
-            print(f"Total subtitles: {len(subtitles)}")
-            return 0
+        print(f"Successfully generated: {output_path}")
+        print(f"Total subtitles: {len(subtitles)}")
+        print(f"Run time: {_format_elapsed(time.monotonic() - started)}")
+        return 0
     except SubtitlerError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("Interrupted.", file=sys.stderr)
         return 130
+
+
+def _build_backend(config: dict, api_usage: ApiUsageLedger, profiler: PipelineProfiler):
+    if config["backend"]["name"] == "existing-pipeline":
+        return ExistingPipelineBackend(config, api_usage, profiler)
+    raise SubtitlerError(f"Unknown backend: {config['backend']['name']}")
+
+
+def _build_refiner(config: dict, glossary, api_usage: ApiUsageLedger, sidecar_base: Path | None):
+    cleanup = config["cleanup"]
+    backend = cleanup["backend"]
+    if backend == "none":
+        return None
+    if backend == "local-llama":
+        if not cleanup.get("model"):
+            raise SubtitlerError("local cleanup requires cleanup.model")
+        print("Starting cleanup model...")
+        return LlamaServerTextRefiner(
+            model_path=Path(cleanup["model"]),
+            server_path=Path(cleanup["llama_server"]) if cleanup.get("llama_server") else None,
+            glossary=glossary,
+            mode="full",
+            host="127.0.0.1",
+            port=int(cleanup["server_port"]),
+            ctx_size=int(cleanup["ctx_size"]),
+            n_gpu_layers=int(config["backend"]["n_gpu_layers"]),
+            spec_draft_model=Path(cleanup["spec_draft_model"]) if cleanup.get("spec_draft_model") else None,
+            spec_draft_n_max=int(cleanup["spec_draft_n_max"]),
+            log_path=(
+                sidecar_base.with_suffix(".cleanup_llama.log")
+                if sidecar_base is not None
+                else Path(tempfile.gettempdir()) / f"subtitler_cleanup_llama_{os.getpid()}.log"
+            ),
+        )
+    if backend == "openai":
+        return OpenAITextRefiner(model=cleanup["api_model"], glossary=glossary, usage=api_usage)
+    if backend == "gemini":
+        return GeminiTextRefiner(model=cleanup["api_model"], glossary=glossary, usage=api_usage)
+    raise SubtitlerError(f"Unknown cleanup backend: {backend}")
+
+
+def _default_output_path(input_path: Path, workflow: str) -> Path:
+    suffix = {
+        "local": "",
+        "hosted": "-hosted-gemini35-gpt54mini",
+        "local-long-stream": "-long-stream-local",
+        "hosted-long-stream": "-long-stream-hosted",
+    }[workflow]
+    return input_path.with_name(f"{input_path.stem}{suffix}.exo")
+
+
+def _default_cleanup_window(config: dict) -> int:
+    return 8 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
+
+
+def _default_cleanup_workers(config: dict) -> int:
+    return 8 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
+
+
+def _default_chain_split_workers(config: dict) -> int:
+    return 6 if config["backend"]["transcriber"] != "local-gemma" else 1
 
 
 def _write_aligned_text(path: Path, aligned) -> None:
@@ -544,112 +337,6 @@ def _write_final_subtitle_text(path: Path, subtitles) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{index}. {sub.text}" for index, sub in enumerate(subtitles, start=1)]
     path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-
-
-def _build_vad_markers(chunks) -> list[ExoMarker]:
-    return [ExoMarker(chunk.start, chunk.end, f"VAD {index}") for index, chunk in enumerate(chunks, start=1)]
-
-
-def _build_transcriber(args: argparse.Namespace, temp_dir: Path, glossary, api_usage: ApiUsageLedger):
-    transcription_model = _transcription_model(args)
-    if args.transcriber_backend == "local-gemma":
-        if not transcription_model:
-            raise SubtitlerError("--model or --transcription-model is required for local Gemma transcription")
-        if not args.mmproj:
-            raise SubtitlerError("--mmproj is required for Gemma audio transcription")
-        return ServerGemmaTranscriber(
-            model_path=Path(transcription_model),
-            mmproj=Path(args.mmproj),
-            n_gpu_layers=args.n_gpu_layers,
-            ctx_size=args.ctx_size,
-            temp_dir=temp_dir,
-            server_path=Path(args.llama_server) if args.llama_server else None,
-            host="127.0.0.1",
-            port=args.server_port,
-            glossary=glossary,
-            max_transcription_split_depth=max(0, args.transcription_max_split_depth),
-        )
-    if not transcription_model:
-        raise SubtitlerError("--transcription-model is required for hosted transcription")
-    if args.transcriber_backend == "gemini":
-        return GeminiTranscriber(
-            model=transcription_model,
-            temp_dir=temp_dir,
-            usage=api_usage,
-            glossary=glossary,
-            max_transcription_split_depth=max(0, args.transcription_max_split_depth),
-        )
-    if args.transcriber_backend == "openai":
-        return OpenAITranscriber(
-            model=transcription_model,
-            temp_dir=temp_dir,
-            usage=api_usage,
-            glossary=glossary,
-            language=args.language,
-            max_transcription_split_depth=max(0, args.transcription_max_split_depth),
-        )
-    raise SubtitlerError(f"Unknown transcription backend: {args.transcriber_backend}")
-
-
-def _write_run_metadata(
-    path: Path,
-    args: argparse.Namespace,
-    env_path: Path,
-    loaded_env_keys: list[str],
-    *,
-    estimated_api_cost: float = 0.0,
-    api_usage: ApiUsageLedger | None = None,
-    api_usage_path: Path | None = None,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    api_key_names = ["OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPGRAM_API_KEY"]
-    args_dict = vars(args).copy()
-    cleanup_backend = _effective_cleanup_backend(args)
-    transcription_model = _transcription_model(args)
-    metadata = {
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "input": args.input,
-        "output": args.output,
-        "transcriber_backend": args.transcriber_backend,
-        "transcriber_model": transcription_model,
-        "cleanup_backend": cleanup_backend,
-        "cleanup_model": args.cleanup_api_model if cleanup_backend in {"gemini", "openai"} else args.cleanup_model or "",
-        "tuning_profile": _tuning_profile(args, cleanup_backend),
-        "cleanup_window_subtitles": _cleanup_window_subtitles(args, cleanup_backend),
-        "transcription_workers": _transcription_workers(args, cleanup_backend),
-        "chain_split_workers": _chain_split_workers(args, cleanup_backend),
-        "cleanup_workers": _cleanup_workers(args, cleanup_backend),
-        "skip_final_review": bool(args.skip_final_review),
-        "alignment_model": args.alignment_model,
-        "alignment_device": args.alignment_device,
-        "language": args.language,
-        "estimated_api_cost_usd": estimated_api_cost,
-        "actual_api_cost_usd": api_usage.total_cost_usd if api_usage is not None else 0.0,
-        "actual_api_total_tokens": api_usage.total_tokens if api_usage is not None else 0,
-        "api_usage_path": str(api_usage_path) if api_usage_path is not None else "",
-        "api_usage_by_provider_model": api_usage.by_provider_model() if api_usage is not None else [],
-        "env_file": str(env_path),
-        "env_file_loaded": bool(loaded_env_keys),
-        "env_keys_loaded": sorted(loaded_env_keys),
-        "api_keys_present": {name: bool(os.environ.get(name)) for name in api_key_names},
-        "argv": sys.argv[1:],
-        "args": args_dict,
-    }
-    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _print_api_cost_summary(api_usage: ApiUsageLedger) -> None:
-    if not api_usage.rows:
-        return
-    print("Hosted API cost summary:", flush=True)
-    for provider, cost in sorted(api_usage.total_cost_by_provider().items()):
-        print(f"  {provider}: ${cost:.4f}", flush=True)
-    print(f"  total: ${api_usage.total_cost_usd:.4f}", flush=True)
-    operation_costs = api_usage.total_cost_by_operation()
-    if operation_costs:
-        print("Hosted API cost by operation:", flush=True)
-        for operation, cost in sorted(operation_costs.items()):
-            print(f"  {operation}: ${cost:.4f}", flush=True)
 
 
 def _flag_possible_mistranscriptions(subtitles, refiner, output_path: Path) -> list[ExoMarker]:
@@ -675,8 +362,7 @@ def _flag_possible_mistranscriptions(subtitles, refiner, output_path: Path) -> l
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_lines = []
     for line_number in sorted(by_line):
-        for text in by_line[line_number]:
-            output_lines.append(f"{line_number}\t{text}")
+        output_lines.extend(by_line[line_number])
     output_path.write_text("\n".join(output_lines) + ("\n" if output_lines else "NONE\n"), encoding="utf-8")
     if raw_response:
         raw_path = output_path.with_name(f"{output_path.stem}.raw.txt")
@@ -687,138 +373,88 @@ def _flag_possible_mistranscriptions(subtitles, refiner, output_path: Path) -> l
     return markers
 
 
-def _transcribe_and_align(
-    chunks,
-    transcriber,
-    alignment_config: AlignmentConfig,
-    profiler: PipelineProfiler,
-    audio_prep_workers: int,
-    align_workers: int,
-    transcription_workers: int = 1,
-):
-    if hasattr(transcriber, "prepare_payload") and hasattr(transcriber, "transcribe_payload"):
-        return _transcribe_and_align_server(
-            chunks, transcriber, alignment_config, profiler, audio_prep_workers, align_workers
-        )
-
-    if transcription_workers > 1:
-        return _transcribe_and_align_parallel(
-            chunks,
-            transcriber,
-            alignment_config,
-            profiler,
-            transcription_workers,
-            align_workers,
-        )
-
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
-    try:
-        for i, chunk in enumerate(chunks, start=1):
-            print(f"Transcribing chunk {i}/{len(chunks)} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
-            start = now()
-            transcript = transcriber.transcribe(chunk)
-            profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
-            if not transcript.text:
-                print(f"Warning: empty transcript for chunk {chunk.index}")
-                continue
-            pool.submit(transcript)
-        print("Waiting for alignment workers...", flush=True)
-        return pool.close_and_collect()
-    except Exception:
-        raise
-
-
-def _transcribe_one(transcriber, chunk, profiler: PipelineProfiler):
-    start = now()
-    transcript = transcriber.transcribe(chunk)
-    profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
-    return transcript
+def _write_run_metadata(
+    path: Path,
+    args: argparse.Namespace,
+    config: dict,
+    env_path: Path,
+    loaded_env_keys: list[str],
+    backend_result,
+    api_usage: ApiUsageLedger,
+    api_usage_path: Path,
+    elapsed_run_seconds: float,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    api_key_names = ["OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPGRAM_API_KEY"]
+    metadata = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "input": args.input,
+        "output": args.output,
+        "workflow": args.workflow,
+        "config": config,
+        "backend": {
+            "name": backend_result.backend_name,
+            "model": backend_result.model_name,
+            "status": backend_result.status,
+            "capabilities": backend_result.capabilities.__dict__,
+            "metadata": backend_result.metadata,
+            "diagnostics": [item.__dict__ for item in backend_result.diagnostics],
+        },
+        "actual_api_cost_usd": api_usage.total_cost_usd,
+        "actual_api_total_tokens": api_usage.total_tokens,
+        "api_usage_path": str(api_usage_path),
+        "api_usage_by_provider_model": api_usage.by_provider_model(),
+        "elapsed_run_seconds": elapsed_run_seconds,
+        "elapsed_run_display": _format_elapsed(elapsed_run_seconds),
+        "env_file": str(env_path),
+        "env_file_loaded": bool(loaded_env_keys),
+        "env_keys_loaded": sorted(loaded_env_keys),
+        "api_keys_present": {name: bool(os.environ.get(name)) for name in api_key_names},
+        "argv": sys.argv[1:],
+    }
+    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _transcribe_and_align_parallel(
-    chunks,
-    transcriber,
-    alignment_config: AlignmentConfig,
-    profiler: PipelineProfiler,
-    transcription_workers: int,
-    align_workers: int,
-):
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
-    try:
-        with ThreadPoolExecutor(max_workers=max(1, transcription_workers)) as transcribe_pool:
-            futures = {}
-            for i, chunk in enumerate(chunks, start=1):
-                print(f"Queueing transcription chunk {i}/{len(chunks)} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
-                futures[transcribe_pool.submit(_transcribe_one, transcriber, chunk, profiler)] = (i, chunk)
-            for future in as_completed(futures):
-                i, chunk = futures[future]
-                print(f"Transcription complete: {i}/{len(chunks)} [{chunk.start:.2f}-{chunk.end:.2f}s]", flush=True)
-                try:
-                    transcript = future.result()
-                    if not transcript.text:
-                        print(f"Warning: empty transcript for chunk {chunk.index}")
-                        continue
-                    pool.submit(transcript)
-                except Exception as exc:
-                    profiler.mark_error(chunk.index, exc)
-                    raise
-        print("Waiting for alignment workers...", flush=True)
-        return pool.close_and_collect()
-    except Exception:
-        raise
+def _progress_reporter(label: str, step: int = 10):
+    next_percent = {"value": step}
+
+    def report(progress: float) -> None:
+        while progress + 1e-9 >= next_percent["value"] and next_percent["value"] <= 100:
+            print(f"{label} progress: {next_percent['value']}%", flush=True)
+            next_percent["value"] += step
+
+    return report
 
 
-def _prepare_payload(transcriber, chunk, profiler: PipelineProfiler):
-    start = now()
-    payload = transcriber.prepare_payload(chunk)
-    profiler.add_ms(chunk.index, "payload_prepare_ms", (now() - start) * 1000)
-    return payload
+def _stage_progress_reporter(label: str, step: int = 10):
+    reporters: dict[str, object] = {}
+
+    def report(stage: str, progress: float) -> None:
+        if stage not in reporters:
+            reporters[stage] = _progress_reporter(f"{label} {stage}", step)
+        reporters[stage](progress)
+
+    return report
 
 
-def _transcribe_and_align_server(
-    chunks,
-    transcriber,
-    alignment_config: AlignmentConfig,
-    profiler: PipelineProfiler,
-    audio_prep_workers: int,
-    align_workers: int,
-):
-    from subtitler.models import TranscriptChunk
+def _print_api_cost_summary(api_usage: ApiUsageLedger) -> None:
+    if not api_usage.rows:
+        return
+    print("Hosted API cost summary:", flush=True)
+    for provider, cost in sorted(api_usage.total_cost_by_provider().items()):
+        print(f"  {provider}: ${cost:.4f}", flush=True)
+    print(f"  total: ${api_usage.total_cost_usd:.4f}", flush=True)
 
-    prep_futures: dict[int, Future] = {}
-    next_to_submit = 0
-    total = len(chunks)
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
-    with ThreadPoolExecutor(max_workers=audio_prep_workers) as prep_pool:
-        while next_to_submit < min(audio_prep_workers, total):
-            chunk = chunks[next_to_submit]
-            prep_futures[chunk.index] = prep_pool.submit(_prepare_payload, transcriber, chunk, profiler)
-            next_to_submit += 1
 
-        for i, chunk in enumerate(chunks, start=1):
-            if chunk.index not in prep_futures:
-                prep_futures[chunk.index] = prep_pool.submit(_prepare_payload, transcriber, chunk, profiler)
-            print(f"Transcribing chunk {i}/{total} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
-            try:
-                payload = prep_futures.pop(chunk.index).result()
-                while next_to_submit < total and len(prep_futures) < audio_prep_workers:
-                    upcoming = chunks[next_to_submit]
-                    prep_futures[upcoming.index] = prep_pool.submit(_prepare_payload, transcriber, upcoming, profiler)
-                    next_to_submit += 1
-                start = now()
-                text = transcriber.transcribe_payload(chunk, payload)
-                profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
-                if not text:
-                    print(f"Warning: empty transcript for chunk {chunk.index}")
-                    continue
-                transcript = TranscriptChunk(chunk=chunk, text=text)
-                pool.submit(transcript)
-            except Exception as exc:
-                profiler.mark_error(chunk.index, exc)
-                raise
-
-    print("Waiting for alignment workers...", flush=True)
-    return pool.close_and_collect()
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 if __name__ == "__main__":

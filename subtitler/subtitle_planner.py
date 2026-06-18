@@ -19,7 +19,7 @@ from .profiling import (
     write_boundary_timing_profile,
     write_subtitle_timing_profile,
 )
-from .splitter import split_aligned_chunk, split_token_chain
+from .splitter import SENTENCE_TERMINAL_SOURCE, split_aligned_chunk, split_token_chain
 from .text_refiner import TextRefiner
 
 BOUNDARY_REVIEW_TERMS = (
@@ -346,6 +346,7 @@ def build_grouped_subtitles(
         for part_index, sub in enumerate(split_parts):
             sub.chain_index = chain_index
             sub.chain_part_index = part_index
+            sub.cleanup_group_index = _cleanup_group_for_subtitle(sub, chain)
         start = chain.chunks[0].chunk.start
         end = chain.chunks[-1].chunk.end
         gaps = [
@@ -392,6 +393,7 @@ def build_grouped_subtitles(
     subtitles = [s for s in subtitles if s.text.strip()]
     subtitles.sort(key=lambda s: (s.start_time, s.end_time))
     left_merge_count = _left_merge_adjacent_subtitles(subtitles, max_chars)
+    stripped_period_count = _strip_standard_sentence_periods(subtitles)
     boundary_review_count = 0
     if refiner is not None:
         boundary_review_count = _review_same_chain_leading_phrases(subtitles, refiner, max_chars)
@@ -407,6 +409,7 @@ def build_grouped_subtitles(
         print(f"  chain_count={len(regroup_rows)}", flush=True)
         print(f"  merged_chains={merged_chains}", flush=True)
         print(f"  left_merged_subtitles={left_merge_count}", flush=True)
+        print(f"  stripped_sentence_periods={stripped_period_count}", flush=True)
         print(f"  boundary_review_moves={boundary_review_count}", flush=True)
         if longest is not None:
             print(f"  longest_chain_chunks={longest.chunk_count}", flush=True)
@@ -485,7 +488,12 @@ def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) ->
     for sub in subtitles:
         if not sub.text.strip():
             continue
-        if merged and len(_normalized_text(merged[-1].text + sub.text)) <= max_chars:
+        if (
+            merged
+            and _same_chain_for_left_merge(merged[-1], sub)
+            and not _blocks_following_left_merge(merged[-1])
+            and len(_normalized_text(merged[-1].text + sub.text)) <= max_chars
+        ):
             _merge_subtitle_left(merged[-1], sub)
             merge_count += 1
             continue
@@ -496,6 +504,16 @@ def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) ->
     return merge_count
 
 
+def _same_chain_for_left_merge(left: Subtitle, right: Subtitle) -> bool:
+    if left.chain_index is None or right.chain_index is None:
+        return left.chain_index is right.chain_index
+    return left.chain_index == right.chain_index
+
+
+def _blocks_following_left_merge(subtitle: Subtitle) -> bool:
+    return SENTENCE_TERMINAL_SOURCE in subtitle.split_source.split("+")
+
+
 def _merge_subtitle_left(left: Subtitle, right: Subtitle) -> None:
     left.end_time = max(left.end_time, right.end_time)
     left.text = f"{left.text}{right.text}"
@@ -503,6 +521,31 @@ def _merge_subtitle_left(left: Subtitle, right: Subtitle) -> None:
     left.alignment_fallback = left.alignment_fallback or right.alignment_fallback
     left.split_source = _merge_source_labels(left.split_source, right.split_source)
     left.timing_adjustment = _append_adjustment(left.timing_adjustment, "left_merge")
+
+
+def _strip_standard_sentence_periods(subtitles: list[Subtitle]) -> int:
+    stripped = 0
+    kept: list[Subtitle] = []
+    for sub in subtitles:
+        if not sub.text.rstrip().endswith("。"):
+            kept.append(sub)
+            continue
+        stripped += 1
+        while sub.tokens and sub.tokens[-1].text.rstrip() == "。":
+            sub.tokens.pop()
+        if sub.tokens and sub.tokens[-1].text.endswith("。"):
+            sub.tokens[-1].text = sub.tokens[-1].text.rstrip("。")
+        if sub.tokens:
+            _refresh_subtitle_from_tokens(sub)
+        else:
+            sub.text = sub.text.rstrip().rstrip("。")
+        sub.timing_adjustment = _append_adjustment(sub.timing_adjustment, "strip_sentence_period")
+        if sub.text.strip():
+            kept.append(sub)
+    if len(kept) != len(subtitles):
+        subtitles[:] = kept
+        _renumber_chain_parts(subtitles)
+    return stripped
 
 
 def _merge_source_labels(left: str, right: str) -> str:
@@ -699,16 +742,33 @@ def _build_chain_markers_from_subtitles(subtitles: list[Subtitle]) -> list[ExoMa
     return markers
 
 
+def _cleanup_group_for_subtitle(subtitle: Subtitle, chain: Chain) -> int | None:
+    if not chain.chunks:
+        return subtitle.chain_index
+    probe_time = subtitle.start_time
+    if subtitle.tokens:
+        first = subtitle.tokens[0]
+        probe_time = (first.start + first.end) / 2
+    for chunk in chain.chunks:
+        if chunk.chunk.start <= probe_time <= chunk.chunk.end:
+            return chunk.chunk.index
+    return chain.chunks[0].chunk.index
+
+
+def _cleanup_group_key(subtitle: Subtitle) -> int | None:
+    return subtitle.cleanup_group_index if subtitle.cleanup_group_index is not None else subtitle.chain_index
+
+
 def _cleanup_windows(subtitles: list[Subtitle], window_size: int) -> list[tuple[int, int]]:
     windows: list[tuple[int, int]] = []
     i = 0
     while i < len(subtitles):
-        chain_index = subtitles[i].chain_index
+        group_index = _cleanup_group_key(subtitles[i])
         end = i + 1
         while (
             end < len(subtitles)
             and end - i < window_size
-            and subtitles[end].chain_index == chain_index
+            and _cleanup_group_key(subtitles[end]) == group_index
         ):
             end += 1
         windows.append((i, end))

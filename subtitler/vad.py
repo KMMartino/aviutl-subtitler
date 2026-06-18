@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .audio import write_wav_segment
 from .errors import VadError
@@ -39,6 +39,120 @@ def _merge_speech_timestamps(
     return merged
 
 
+def _speech_probabilities(
+    audio_tensor: Any,
+    model: Any,
+    sample_rate: int,
+    progress_callback: Callable[[float], None] | None = None,
+) -> tuple[list[float], int]:
+    import torch
+
+    window_size_samples = 512 if sample_rate == 16000 else 256
+    model.reset_states()
+    probabilities: list[float] = []
+    audio_length_samples = len(audio_tensor)
+    for current_start_sample in range(0, audio_length_samples, window_size_samples):
+        chunk = audio_tensor[current_start_sample : current_start_sample + window_size_samples]
+        if len(chunk) < window_size_samples:
+            chunk = torch.nn.functional.pad(chunk, (0, int(window_size_samples - len(chunk))))
+        probabilities.append(float(model(chunk, sample_rate).item()))
+        if progress_callback is not None:
+            progress = min(audio_length_samples, current_start_sample + window_size_samples)
+            progress_callback(progress / max(1, audio_length_samples) * 100.0)
+    return probabilities, window_size_samples
+
+
+def _span_activation(
+    probabilities: list[float],
+    window_size_samples: int,
+    start_sample: int,
+    end_sample: int,
+) -> tuple[float, float]:
+    if not probabilities or end_sample <= start_sample:
+        return 0.0, 0.0
+    first = max(0, start_sample // window_size_samples)
+    last = min(len(probabilities) - 1, max(first, (end_sample - 1) // window_size_samples))
+    values = probabilities[first : last + 1]
+    if not values:
+        return 0.0, 0.0
+    return sum(values) / len(values), max(values)
+
+
+def _speech_timestamps_from_probabilities(
+    probabilities: list[float],
+    window_size_samples: int,
+    sample_rate: int,
+    total_samples: int,
+    max_chunk_sec: float,
+    min_speech_sec: float,
+    min_silence_ms: int,
+    speech_pad_ms: int,
+    threshold: float = 0.5,
+) -> list[dict]:
+    min_speech_samples = int(min_speech_sec * sample_rate)
+    speech_pad_samples = int(speech_pad_ms * sample_rate / 1000)
+    max_speech_samples = int(max_chunk_sec * sample_rate) - window_size_samples - 2 * speech_pad_samples
+    max_speech_samples = max(window_size_samples, max_speech_samples)
+    min_silence_samples = int(min_silence_ms * sample_rate / 1000)
+    min_silence_at_max_speech = int(0.098 * sample_rate)
+    neg_threshold = max(threshold - 0.15, 0.01)
+
+    triggered = False
+    current_start = 0
+    temp_end = 0
+    possible_ends: list[tuple[int, int]] = []
+    speeches: list[dict] = []
+
+    for index, probability in enumerate(probabilities):
+        current_sample = min(total_samples, window_size_samples * index)
+
+        if probability >= threshold and temp_end:
+            silence_duration = current_sample - temp_end
+            if silence_duration > min_silence_at_max_speech:
+                possible_ends.append((temp_end, silence_duration))
+            temp_end = 0
+
+        if probability >= threshold and not triggered:
+            triggered = True
+            current_start = current_sample
+            possible_ends = []
+            continue
+
+        if triggered and current_sample - current_start > max_speech_samples:
+            if possible_ends:
+                end_sample, silence_duration = max(possible_ends, key=lambda item: item[1])
+                if end_sample - current_start >= min_speech_samples:
+                    speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
+                current_start = min(total_samples, end_sample + silence_duration)
+                temp_end = 0
+                possible_ends = []
+                if probability < threshold:
+                    triggered = False
+            else:
+                end_sample = current_sample
+                if end_sample - current_start >= min_speech_samples:
+                    speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
+                current_start = current_sample
+                temp_end = 0
+                possible_ends = []
+            continue
+
+        if probability < neg_threshold and triggered:
+            if not temp_end:
+                temp_end = current_sample
+            if current_sample - temp_end >= min_silence_samples:
+                end_sample = temp_end
+                if end_sample - current_start >= min_speech_samples:
+                    speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
+                triggered = False
+                temp_end = 0
+                possible_ends = []
+
+    if triggered and total_samples - current_start >= min_speech_samples:
+        speeches.append({"start": current_start, "end": total_samples})
+    return speeches
+
+
 def segment_speech(
     samples: Any,
     sample_rate: int,
@@ -48,11 +162,12 @@ def segment_speech(
     speech_pad_ms: int,
     temp_dir: Path | None = None,
     keep_temp: bool = False,
+    progress_callback: Callable[[str, float], None] | None = None,
 ) -> list[AudioChunk]:
     """Run Silero VAD and return speech chunks split only on detected silence."""
     try:
         import torch
-        from silero_vad import get_speech_timestamps, load_silero_vad
+        from silero_vad import load_silero_vad
     except ImportError as exc:
         raise VadError("silero-vad and torch are required for VAD") from exc
 
@@ -60,14 +175,22 @@ def segment_speech(
         raise VadError("Silero VAD input must be 16 kHz")
     try:
         model = load_silero_vad()
-        speech = get_speech_timestamps(
-            torch.from_numpy(samples),
+        audio_tensor = torch.from_numpy(samples)
+        speech_probs, window_size_samples = _speech_probabilities(
+            audio_tensor,
             model,
-            sampling_rate=sample_rate,
-            min_speech_duration_ms=int(min_speech_sec * 1000),
-            max_speech_duration_s=max_chunk_sec,
-            min_silence_duration_ms=min_silence_ms,
-            speech_pad_ms=speech_pad_ms,
+            sample_rate,
+            (lambda progress: progress_callback("inference", progress)) if progress_callback else None,
+        )
+        speech = _speech_timestamps_from_probabilities(
+            speech_probs,
+            window_size_samples,
+            sample_rate,
+            len(samples),
+            max_chunk_sec,
+            min_speech_sec,
+            min_silence_ms,
+            speech_pad_ms,
         )
     except Exception as exc:
         raise VadError("Silero VAD failed") from exc
@@ -80,6 +203,7 @@ def segment_speech(
         chunk_samples = samples[start_sample:end_sample]
         if len(chunk_samples) == 0:
             continue
+        activation, peak = _span_activation(speech_probs, window_size_samples, start_sample, end_sample)
         wav_path = None
         if keep_temp and temp_dir is not None:
             wav_path = temp_dir / f"chunk_{index:05d}.wav"
@@ -91,9 +215,44 @@ def segment_speech(
                 end=end_sample / sample_rate,
                 samples=chunk_samples,
                 wav_path=wav_path,
+                vad_activation=activation,
+                vad_peak=peak,
             )
         )
     return chunks
+
+
+def select_high_activation_chunks(
+    chunks: list[AudioChunk],
+    target_duration_ratio: float = 0.20,
+    min_chunks: int = 1,
+) -> list[AudioChunk]:
+    """Return high-activation chunks until the selected active voice duration target is reached."""
+    if not chunks:
+        return []
+    bounded_ratio = min(1.0, max(0.0, target_duration_ratio))
+    total_duration = sum(max(0.0, chunk.end - chunk.start) for chunk in chunks)
+    target_duration = total_duration * bounded_ratio
+    if target_duration <= 0 and min_chunks <= 0:
+        return []
+    ranked = sorted(
+        chunks,
+        key=lambda chunk: (
+            chunk.vad_activation,
+            chunk.vad_peak,
+            max(0.0, chunk.end - chunk.start),
+        ),
+        reverse=True,
+    )
+    selected: list[AudioChunk] = []
+    selected_duration = 0.0
+    min_selected = min(len(chunks), max(0, min_chunks))
+    for chunk in ranked:
+        if selected_duration >= target_duration and len(selected) >= min_selected:
+            break
+        selected.append(chunk)
+        selected_duration += max(0.0, chunk.end - chunk.start)
+    return sorted(selected, key=lambda chunk: (chunk.start, chunk.end))
 
 
 def split_chunk_with_tighter_vad(

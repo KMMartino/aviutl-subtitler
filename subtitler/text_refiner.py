@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 from .errors import ModelLoadError
 from .glossary import GlossaryEntry, format_glossary
@@ -58,11 +59,25 @@ class LlamaServerTextRefiner(TextRefiner):
         port: int = 8082,
         ctx_size: int = 4096,
         n_gpu_layers: int = -1,
+        spec_draft_model: Path | None = None,
+        spec_draft_n_max: int = 3,
+        log_path: Path | None = None,
     ) -> None:
         if not model_path.exists():
             raise ModelLoadError(f"Cleanup model not found: {model_path}")
+        if spec_draft_model is not None and not spec_draft_model.exists():
+            raise ModelLoadError(f"Speculative draft/MTP model not found: {spec_draft_model}")
+        if spec_draft_model is not None and spec_draft_model.suffix.lower() != ".gguf":
+            raise ModelLoadError(
+                "Cleanup speculative draft/MTP model must be a GGUF file for llama.cpp. "
+                f"Got: {spec_draft_model}"
+            )
         self.server_path = self._resolve_server(server_path)
         self.model_path = model_path
+        self.spec_draft_model = spec_draft_model
+        self.spec_draft_n_max = max(1, spec_draft_n_max)
+        self.log_path = log_path
+        self._log_handle: TextIO | None = None
         self.glossary = glossary
         self.mode = mode
         self.host = host
@@ -114,15 +129,43 @@ class LlamaServerTextRefiner(TextRefiner):
             "--reasoning-budget",
             "0",
         ]
+        if self.spec_draft_model is not None:
+            cmd.extend(
+                [
+                    "--spec-draft-model",
+                    str(self.spec_draft_model),
+                    "--spec-type",
+                    "draft-mtp",
+                    "--spec-draft-n-max",
+                    str(self.spec_draft_n_max),
+                ]
+            )
         print(f"Starting cleanup llama-server on {self.host}:{self.port}...", flush=True)
         print(f"Cleanup model: {self.model_path}", flush=True)
-        self.process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        if self.spec_draft_model is not None:
+            print(f"Cleanup MTP draft model: {self.spec_draft_model}", flush=True)
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_handle = self.log_path.open("w", encoding="utf-8")
+            self._log_handle.write(" ".join(cmd) + "\n\n")
+            self._log_handle.flush()
+            stdout = self._log_handle
+            stderr = subprocess.STDOUT
+            print(f"Cleanup llama-server log: {self.log_path}", flush=True)
+        else:
+            stdout = subprocess.DEVNULL
+            stderr = subprocess.DEVNULL
+        self.process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, text=True)
         self._owned_process = True
         deadline = time.monotonic() + 180
         next_notice = time.monotonic() + 10
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                raise ModelLoadError(f"cleanup llama-server exited early with code {self.process.returncode}")
+                detail = f" See log: {self.log_path}" if self.log_path is not None else ""
+                tail = _tail_log(self.log_path) if self.log_path is not None else ""
+                raise ModelLoadError(
+                    f"cleanup llama-server exited early with code {self.process.returncode}.{detail}{tail}"
+                )
             if self._health_ok():
                 print("Cleanup model ready.", flush=True)
                 return
@@ -131,7 +174,8 @@ class LlamaServerTextRefiner(TextRefiner):
                 next_notice = time.monotonic() + 10
             time.sleep(1)
         self.close()
-        raise ModelLoadError("cleanup llama-server did not become healthy within 180 seconds")
+        detail = f" See log: {self.log_path}" if self.log_path is not None else ""
+        raise ModelLoadError(f"cleanup llama-server did not become healthy within 180 seconds.{detail}")
 
     def _health_ok(self) -> bool:
         try:
@@ -429,6 +473,18 @@ class LlamaServerTextRefiner(TextRefiner):
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=10)
+        if self._log_handle is not None:
+            self._log_handle.close()
+            self._log_handle = None
+
+
+def _tail_log(path: Path, max_chars: int = 2000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    tail = text[-max_chars:].strip()
+    return f"\nLast cleanup llama-server log lines:\n{tail}" if tail else ""
 
 
 def _clean_response_line(text: str) -> str:

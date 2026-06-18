@@ -1,0 +1,35 @@
+{
+  "backend": {
+    "name": "existing-pipeline",
+    "transcriber": "gemini",
+    "transcription_model": "gemini-3.5-flash",
+    "language": "ja",
+    "transcription_workers": 2
+  },
+  "audio": {
+    "track": 1
+  },
+  "workflow": {
+    "mode": "long-stream",
+    "long_stream_min_chunks": 1
+  },
+  "alignment": {
+    "max_split_depth": 4,
+    "offline_model_cache": true
+  },
+  "cleanup": {
+    "backend": "openai",
+    "api_model": "gpt-5.4-mini",
+    "window_subtitles": 8,
+    "workers": 8,
+    "skip_final_review": true,
+    "llm_split_planning": true
+  },
+  "subtitles": {
+    "chain_split_workers": 6
+  },
+  "diagnostics": {
+    "profile": true,
+    "llm_split_diagnostics": true
+  }
+}

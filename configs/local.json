@@ -1,0 +1,31 @@
+{
+  "backend": {
+    "name": "existing-pipeline",
+    "transcriber": "local-gemma",
+    "model": "C:/coding/0_models/gemma/gemma4-e4b-q6/google-gemma-4-E4B-it-Q6_K.gguf",
+    "mmproj": "C:/coding/0_models/gemma/projectors/proj-for-q6.gguf",
+    "llama_server": "C:/tools/llama-vulkan/llama-server.exe",
+    "language": "ja"
+  },
+  "audio": {
+    "track": 1
+  },
+  "workflow": {
+    "mode": "full"
+  },
+  "alignment": {
+    "max_split_depth": 4,
+    "offline_model_cache": true
+  },
+  "cleanup": {
+    "backend": "local-llama",
+    "model": "C:/coding/0_models/gemma/gemma4-12B-q6/gemma-4-12b-it-UD-Q6_K_XL.gguf",
+    "llama_server": "C:/tools/llama-vulkan/llama-server.exe",
+    "ctx_size": 32768,
+    "llm_split_planning": true
+  },
+  "diagnostics": {
+    "profile": true,
+    "llm_split_diagnostics": true
+  }
+}

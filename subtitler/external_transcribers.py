@@ -19,7 +19,7 @@ from .audio import write_wav_segment
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .models import AudioChunk, TranscriptChunk
-from .transcriber import build_transcription_prompt, clean_transcript, _is_suspect_transcript
+from .transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN, build_transcription_prompt, clean_transcript, _is_suspect_transcript
 from .vad import split_chunk_with_tighter_vad
 
 
@@ -28,6 +28,11 @@ def require_api_key(name: str) -> str:
     if not value:
         raise ModelLoadError(f"{name} is required for this hosted API backend")
     return value
+
+
+def _hosted_transcription_timeout(chunk: AudioChunk) -> float:
+    duration = max(0.0, chunk.end - chunk.start)
+    return min(60.0, max(15.0, duration * 2.0))
 
 
 class GeminiTranscriber:
@@ -55,6 +60,8 @@ class GeminiTranscriber:
 
     def _transcribe_with_retry(self, chunk: AudioChunk, depth: int) -> str:
         text = self._transcribe_once(chunk)
+        if not text:
+            return ""
         if not _is_external_suspect(text, chunk):
             return text
         if depth < self.max_transcription_split_depth:
@@ -97,11 +104,15 @@ class GeminiTranscriber:
             payload,
             TranscriptionError,
             f"Gemini transcription failed for chunk {chunk.index}",
+            timeout_sec=_hosted_transcription_timeout(chunk),
         )
         text = clean_transcript(_gemini_text(data))
+        self._record_usage(data, chunk)
+        if _is_untranscribable_audio_response(text):
+            print(f"Warning: Gemini reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
+            return ""
         if not text:
             raise TranscriptionError(f"Gemini returned an empty transcript for chunk {chunk.index}")
-        self._record_usage(data, chunk)
         return text
 
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
@@ -153,6 +164,8 @@ class OpenAITranscriber:
 
     def _transcribe_with_retry(self, chunk: AudioChunk, depth: int) -> str:
         text = self._transcribe_once(chunk)
+        if not text:
+            return ""
         if not _is_external_suspect(text, chunk):
             return text
         if depth < self.max_transcription_split_depth:
@@ -190,11 +203,15 @@ class OpenAITranscriber:
             wav_path,
             TranscriptionError,
             f"OpenAI transcription failed for chunk {chunk.index}",
+            timeout_sec=_hosted_transcription_timeout(chunk),
         )
         text = clean_transcript(str(data.get("text", "")))
+        self._record_usage(data, chunk)
+        if _is_untranscribable_audio_response(text):
+            print(f"Warning: OpenAI reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
+            return ""
         if not text:
             raise TranscriptionError(f"OpenAI returned an empty transcript for chunk {chunk.index}")
-        self._record_usage(data, chunk)
         return text
 
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
@@ -227,6 +244,7 @@ def verify_gemini_model_available(model: str, api_key: str) -> None:
         None,
         ModelLoadError,
         "Could not list Gemini models",
+        timeout_sec=30.0,
     )
     names = [str(item.get("name", "")).removeprefix("models/") for item in data.get("models", [])]
     if model not in names:
@@ -242,6 +260,7 @@ def verify_openai_model_available(model: str, api_key: str) -> None:
         ModelLoadError,
         "Could not list OpenAI models",
         headers={"Authorization": f"Bearer {api_key}"},
+        timeout_sec=30.0,
     )
     names = [str(item.get("id", "")) for item in data.get("data", [])]
     if model not in names:
@@ -274,6 +293,11 @@ def _is_external_suspect(text: str, chunk: AudioChunk) -> bool:
     return False
 
 
+def _is_untranscribable_audio_response(text: str) -> bool:
+    normalized = text.strip().strip("`").strip()
+    return normalized == UNTRANSCRIBABLE_AUDIO_TOKEN
+
+
 def _request_json_with_retries(
     method: str,
     url: str,
@@ -281,23 +305,27 @@ def _request_json_with_retries(
     error_type: type[Exception],
     message: str,
     headers: dict[str, str] | None = None,
+    timeout_sec: float = 600.0,
 ) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
     if headers:
         request_headers.update(headers)
-    for attempt in range(3):
+    max_attempts = 2
+    for attempt in range(max_attempts):
         request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
                 raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
         except Exception as exc:
-            if attempt == 2:
+            if attempt == max_attempts - 1:
                 raise error_type(f"{message}: {exc}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, str(exc))
         time.sleep(2**attempt)
     raise error_type(message)
 
@@ -310,8 +338,10 @@ def _request_multipart_with_retries(
     file_path: Path,
     error_type: type[Exception],
     message: str,
+    timeout_sec: float = 600.0,
 ) -> dict[str, Any]:
-    for attempt in range(3):
+    max_attempts = 2
+    for attempt in range(max_attempts):
         boundary = f"----subtitler-{uuid.uuid4().hex}"
         body = _multipart_body(boundary, fields, file_field, file_path)
         request = urllib.request.Request(
@@ -324,17 +354,27 @@ def _request_multipart_with_retries(
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
+            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
                 raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
         except Exception as exc:
-            if attempt == 2:
+            if attempt == max_attempts - 1:
                 raise error_type(f"{message}: {exc}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, str(exc))
         time.sleep(2**attempt)
     raise error_type(message)
+
+
+def _print_retry_warning(message: str, attempt: int, timeout_sec: float, reason: str) -> None:
+    print(
+        f"Warning: {message}; attempt {attempt + 1}/2 failed after timeout={timeout_sec:.1f}s "
+        f"or retryable error ({reason}). Resending request...",
+        flush=True,
+    )
 
 
 def _multipart_body(boundary: str, fields: dict[str, str], file_field: str, file_path: Path) -> bytes:

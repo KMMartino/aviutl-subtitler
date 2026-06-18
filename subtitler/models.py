@@ -14,6 +14,8 @@ class AudioChunk:
     end: float
     samples: Any
     wav_path: Path | None = None
+    vad_activation: float = 0.0
+    vad_peak: float = 0.0
 
 
 @dataclass
@@ -47,6 +49,7 @@ class Subtitle:
     alignment_fallback: bool = False
     chain_index: int | None = None
     chain_part_index: int | None = None
+    cleanup_group_index: int | None = None
     split_source: str = ""
     timing_adjustment: str = "none"
 

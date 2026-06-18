@@ -111,6 +111,18 @@ class ConnectiveBoundaryTests(unittest.TestCase):
         self.assertEqual(planner.calls, 0)
         self.assertEqual(subtitles[0].text, "前の話も、")
 
+    def test_sentence_end_split_marks_left_side(self) -> None:
+        subtitles = split_token_chain(
+            _tokens("これは文です。次の文です"),
+            max_chars=8,
+            max_duration=6.0,
+        )
+
+        self.assertGreaterEqual(len(subtitles), 2)
+        self.assertTrue(subtitles[0].text.endswith("。"))
+        self.assertIn("sentence_terminal", subtitles[0].split_source)
+        self.assertNotIn("sentence_terminal", subtitles[1].split_source)
+
 
 if __name__ == "__main__":
     unittest.main()

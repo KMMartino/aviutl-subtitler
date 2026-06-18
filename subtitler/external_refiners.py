@@ -258,6 +258,12 @@ class HostedTextRefiner(TextRefiner):
         raise NotImplementedError
 
 
+def _hosted_text_timeout(prompt: str, max_tokens: int) -> float:
+    prompt_chars = len(prompt)
+    estimated_seconds = prompt_chars / 60.0 + max_tokens / 25.0
+    return min(180.0, max(45.0, estimated_seconds))
+
+
 class OpenAITextRefiner(HostedTextRefiner):
     provider = "openai"
 
@@ -282,6 +288,8 @@ class OpenAITextRefiner(HostedTextRefiner):
             "https://api.openai.com/v1/chat/completions",
             payload,
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            timeout_sec=_hosted_text_timeout(prompt, max_tokens),
+            message=f"OpenAI hosted text {operation} request failed",
         )
         usage = data.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
@@ -318,6 +326,8 @@ class GeminiTextRefiner(HostedTextRefiner):
             f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent"
             f"?key={urllib.parse.quote(self.api_key)}",
             payload,
+            timeout_sec=_hosted_text_timeout(prompt, max_tokens),
+            message=f"Gemini hosted text {operation} request failed",
         )
         usage = data.get("usageMetadata") or {}
         input_tokens = int(usage.get("promptTokenCount") or 0)
@@ -339,6 +349,8 @@ def _request_json_with_retries(
     url: str,
     payload: dict[str, Any],
     headers: dict[str, str] | None = None,
+    timeout_sec: float = 300.0,
+    message: str = "Hosted text request failed",
 ) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
@@ -347,17 +359,27 @@ def _request_json_with_retries(
     for attempt in range(3):
         request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
-                raise ModelLoadError(f"Hosted text request failed: HTTP {exc.code}: {detail}") from exc
+                raise ModelLoadError(f"{message}: HTTP {exc.code}: {detail}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
         except Exception as exc:
             if attempt == 2:
-                raise ModelLoadError(f"Hosted text request failed: {exc}") from exc
+                raise ModelLoadError(f"{message}: {exc}") from exc
+            _print_retry_warning(message, attempt, timeout_sec, str(exc))
         time.sleep(2**attempt)
-    raise ModelLoadError("Hosted text request failed")
+    raise ModelLoadError(message)
+
+
+def _print_retry_warning(message: str, attempt: int, timeout_sec: float, reason: str) -> None:
+    print(
+        f"Warning: {message}; attempt {attempt + 1}/3 failed after timeout={timeout_sec:.1f}s "
+        f"or retryable error ({reason}). Resending request...",
+        flush=True,
+    )
 
 
 def _openai_max_tokens_key(model: str) -> str:

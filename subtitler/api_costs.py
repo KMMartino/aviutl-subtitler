@@ -22,7 +22,8 @@ class TokenPrices:
 GEMINI_PRICES: dict[str, TokenPrices] = {
     "gemini-3.5-flash": TokenPrices(input_per_1m=1.50, output_per_1m=9.00, audio_input_per_1m=1.50),
     "gemini-3-flash-preview": TokenPrices(input_per_1m=0.50, output_per_1m=3.00, audio_input_per_1m=1.00),
-    "gemini-3.1-flash-lite": TokenPrices(input_per_1m=0.15, output_per_1m=0.40, audio_input_per_1m=0.30),
+    "gemini-3.1-pro-preview": TokenPrices(input_per_1m=2.00, output_per_1m=12.00, audio_input_per_1m=2.00),
+    "gemini-3.1-flash-lite": TokenPrices(input_per_1m=0.10, output_per_1m=0.40, audio_input_per_1m=0.30),
     "gemini-2.5-flash": TokenPrices(input_per_1m=0.30, output_per_1m=2.50, audio_input_per_1m=1.00),
 }
 

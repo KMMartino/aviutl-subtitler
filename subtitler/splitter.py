@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from .models import AlignedChunk, AlignedToken, SplitPlanResult, Subtitle
 
 SENTENCE_BREAK_CHARS = set("。！？!?")
+SENTENCE_TERMINAL_SOURCE = "sentence_terminal"
 PHRASE_BREAK_CHARS = set("、,;:")
 JAPANESE_TRAILING_CONNECTIVE_TERMS = (
     "について",
@@ -82,6 +83,13 @@ def _source_with(source: str, label: str) -> str:
     if label not in labels:
         labels.append(label)
     return "+".join(labels)
+
+
+def _ends_with_sentence_break(tokens: list[AlignedToken]) -> bool:
+    if not tokens:
+        return False
+    text = _tokens_to_text(tokens).rstrip()
+    return bool(text) and text[-1] in SENTENCE_BREAK_CHARS
 
 
 def _token_count_for_normalized_prefix(tokens: list[AlignedToken], prefix: str) -> int | None:
@@ -370,7 +378,10 @@ def _segments_to_subtitles(segments: list[TokenSegment], fallback: bool) -> list
 
 def _split_once_at(tokens: list[AlignedToken], index: int, source: str) -> list[TokenSegment]:
     index = max(1, min(index, len(tokens) - 1))
-    return [TokenSegment(tokens[:index], source), TokenSegment(tokens[index:], source)]
+    left = tokens[:index]
+    right = tokens[index:]
+    left_source = _source_with(source, SENTENCE_TERMINAL_SOURCE) if _ends_with_sentence_break(left) else source
+    return [TokenSegment(left, left_source), TokenSegment(right, source)]
 
 
 def _cut_is_balanced_enough(tokens: list[AlignedToken], index: int, max_chars: int) -> bool:
@@ -594,8 +605,13 @@ def _split_segment(
         )
     if candidate.index <= 0 or candidate.index >= len(segment.tokens):
         return [segment]
-    left = TokenSegment(segment.tokens[: candidate.index], _source_with(segment.source, candidate.kind))
-    right = TokenSegment(segment.tokens[candidate.index :], _source_with(segment.source, candidate.kind))
+    left_tokens = segment.tokens[: candidate.index]
+    right_tokens = segment.tokens[candidate.index :]
+    left_source = _source_with(segment.source, candidate.kind)
+    if candidate.kind == "structural_sentence" or _ends_with_sentence_break(left_tokens):
+        left_source = _source_with(left_source, SENTENCE_TERMINAL_SOURCE)
+    left = TokenSegment(left_tokens, left_source)
+    right = TokenSegment(right_tokens, _source_with(segment.source, candidate.kind))
     if len(left.tokens) == len(segment.tokens) or len(right.tokens) == len(segment.tokens):
         return [segment]
     return [left, right]
