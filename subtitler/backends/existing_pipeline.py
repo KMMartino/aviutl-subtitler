@@ -13,7 +13,7 @@ from subtitler.alignment_pool import AlignmentConfig, AlignmentPool
 from subtitler.api_costs import estimate_run_cost
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.errors import SubtitlerError
-from subtitler.external_transcribers import GeminiTranscriber, OpenAITranscriber
+from subtitler.external_transcribers import FallbackTranscriber, GeminiTranscriber, OpenAITranscriber
 from subtitler.models import AlignedChunk, AudioChunk, TranscriptChunk
 from subtitler.profiling import PipelineProfiler, now
 from subtitler.transcriber import ServerGemmaTranscriber
@@ -211,12 +211,46 @@ class ExistingPipelineBackend:
         if not model:
             raise SubtitlerError("Hosted workflow requires backend.transcription_model")
         if name == "gemini":
+            return FallbackTranscriber(
+                GeminiTranscriber(
+                    model=model,
+                    temp_dir=request.temp_dir,
+                    usage=self.api_usage,
+                    glossary=request.glossary,
+                    max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
+                ),
+                self._build_fallback_transcriber(request),
+            )
+        if name == "openai":
+            return FallbackTranscriber(
+                OpenAITranscriber(
+                    model=model,
+                    temp_dir=request.temp_dir,
+                    usage=self.api_usage,
+                    glossary=request.glossary,
+                    language=request.language,
+                    max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
+                ),
+                self._build_fallback_transcriber(request),
+            )
+        raise SubtitlerError(f"Unknown existing-pipeline transcriber: {name}")
+
+    def _build_fallback_transcriber(self, request: TranscriptionRequest):
+        backend_cfg = self.config["backend"]
+        name = str(backend_cfg.get("fallback_transcriber") or "").strip()
+        model = str(backend_cfg.get("fallback_transcription_model") or "").strip()
+        if not name or not model:
+            return None
+        if name == backend_cfg["transcriber"] and model == transcription_model(self.config):
+            return None
+        if name == "gemini":
             return GeminiTranscriber(
                 model=model,
                 temp_dir=request.temp_dir,
                 usage=self.api_usage,
                 glossary=request.glossary,
                 max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
+                timeout_scale=2.0,
             )
         if name == "openai":
             return OpenAITranscriber(
@@ -226,8 +260,9 @@ class ExistingPipelineBackend:
                 glossary=request.glossary,
                 language=request.language,
                 max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
+                timeout_scale=2.0,
             )
-        raise SubtitlerError(f"Unknown existing-pipeline transcriber: {name}")
+        raise SubtitlerError(f"Unknown hosted fallback transcriber: {name}")
 
 
 def transcription_model(config: dict[str, Any]) -> str:

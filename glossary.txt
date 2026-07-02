@@ -1,12 +1,30 @@
 # preferred term | optional guidance
 かいかい | 配信者名 挨拶で発言
-PSSR | prefer over PSVR, PSR, or PS5R when discussing PlayStation image upscaling
-PSSR Lite | prefer over PSVR Lite, PSR Lite, or PS5R Lite
+PSSR | PlayStation image upscaling
 PlayStation Spectral Super Resolution | full expansion of PSSR
 FSR 4.1
 DLSS
 Nintendo Switch 2
 Digital Foundry
-CXMT | ChangXin Memory Technologies
+CXMT
 RDIMM
-MT/s
+MT/s | メガトランスファー毎秒
+UE5
+UE6
+アンリアルエンジン5
+アンリアルエンジン6
+Witcher4
+Stellar Blade
+鬼武者
+Way of the sword
+Duskbloods
+ニンダイ
+フロム
+From Software
+佐々ピ | 佐々木の別称
+Steam Machine
+Valve
+Kepler_L2
+PS3
+PS Vita
+GOG | ジーオージー

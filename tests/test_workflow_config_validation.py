@@ -85,6 +85,21 @@ class WorkflowConfigValidationTests(unittest.TestCase):
                 config["backend"]["transcription_model"] = model
                 validate_workflow_config(config, workflow="hosted", check_paths=False)
 
+    def test_approved_fallback_transcription_models_are_allowed(self):
+        config = load_workflow_config("hosted")
+        config["backend"]["fallback_transcriber"] = "openai"
+        config["backend"]["fallback_transcription_model"] = "gpt-4o-mini-transcribe"
+
+        validate_workflow_config(config, workflow="hosted", check_paths=False)
+
+    def test_unapproved_fallback_transcription_model_is_rejected(self):
+        config = load_workflow_config("hosted")
+        config["backend"]["fallback_transcriber"] = "openai"
+        config["backend"]["fallback_transcription_model"] = "gemini-3.5-flash"
+
+        with self.assertRaises(SubtitlerError):
+            validate_workflow_config(config, workflow="hosted", check_paths=False)
+
     def test_negative_audio_track_is_rejected(self):
         config = load_workflow_config("local")
         config["audio"]["track"] = -1
@@ -112,6 +127,20 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
         with self.assertRaises(SubtitlerError):
             validate_workflow_config(config, workflow="local-long-stream", check_paths=False)
+
+    def test_hosted_short_youtube_chapters_are_allowed(self):
+        config = load_workflow_config("hosted")
+        config["additional_settings"]["youtube_chapters"] = True
+
+        validate_workflow_config(config, workflow="hosted", check_paths=False)
+
+    def test_youtube_chapters_are_rejected_outside_hosted_short(self):
+        for workflow in ("local", "local-long-stream", "hosted-long-stream"):
+            with self.subTest(workflow=workflow):
+                config = load_workflow_config(workflow)
+                config["additional_settings"]["youtube_chapters"] = True
+                with self.assertRaises(SubtitlerError):
+                    validate_workflow_config(config, workflow=workflow, check_paths=False)
 
 
 if __name__ == "__main__":

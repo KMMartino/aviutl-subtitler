@@ -27,5 +27,8 @@
   "diagnostics": {
     "profile": true,
     "llm_split_diagnostics": true
+  },
+  "additional_settings": {
+    "youtube_chapters": false
   }
 }

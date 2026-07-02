@@ -8,7 +8,7 @@ import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
-from subtitler.external_transcribers import GeminiTranscriber, OpenAITranscriber, _hosted_transcription_timeout
+from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json_with_retries
 from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
@@ -72,6 +72,45 @@ class ExternalApiClientTests(unittest.TestCase):
         self.assertEqual(result.text, "こんにちは")
         self.assertEqual(ledger.rows[0].output_tokens, 5)
 
+    def test_fallback_transcriber_uses_fallback_on_malformed_response(self) -> None:
+        chunk = self._chunk()
+        primary = mock.Mock(provider="gemini", model="gemini-3.5-flash")
+        fallback = mock.Mock(provider="openai", model="gpt-4o-mini-transcribe")
+        primary.transcribe.side_effect = MalformedTranscriptionResponse("empty response")
+        fallback.transcribe.return_value = mock.Mock(text="fallback transcript")
+
+        result = FallbackTranscriber(primary, fallback).transcribe(chunk)
+
+        self.assertEqual(result.text, "fallback transcript")
+        primary.transcribe.assert_called_once_with(chunk)
+        fallback.transcribe.assert_called_once_with(chunk)
+
+    def test_fallback_transcriber_uses_fallback_on_dead_request(self) -> None:
+        chunk = self._chunk()
+        primary = mock.Mock(provider="gemini", model="gemini-3.5-flash")
+        fallback = mock.Mock(provider="openai", model="gpt-4o-mini-transcribe")
+        primary.transcribe.side_effect = DeadTranscriptionRequest("read operation timed out")
+        fallback.transcribe.return_value = mock.Mock(text="fallback transcript")
+
+        result = FallbackTranscriber(primary, fallback).transcribe(chunk)
+
+        self.assertEqual(result.text, "fallback transcript")
+        primary.transcribe.assert_called_once_with(chunk)
+        fallback.transcribe.assert_called_once_with(chunk)
+
+    def test_transcription_timeout_request_can_be_classified_for_fallback(self) -> None:
+        with mock.patch("subtitler.external_transcribers.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(DeadTranscriptionRequest):
+                _request_json_with_retries(
+                    "GET",
+                    "https://example.test",
+                    None,
+                    Exception,
+                    "request failed",
+                    timeout_sec=0.01,
+                    dead_request_error_type=DeadTranscriptionRequest,
+                )
+
     def test_missing_openai_key_is_rejected(self) -> None:
         previous = os.environ.pop("OPENAI_API_KEY", None)
         try:
@@ -93,13 +132,17 @@ class ExternalApiClientTests(unittest.TestCase):
         self.assertEqual(result.lines, ["前半", "後半"])
 
     def test_transcription_timeout_scales_with_audio_length_and_caps(self) -> None:
-        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 5.0, [])), 15.0)
-        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, [])), 60.0)
-        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 100.0, [])), 60.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 2.0, [])), 5.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 5.0, []), "gemini-3.1-flash-lite"), 5.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gemini-3.5-flash"), 30.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gemini-3.1-pro-preview"), 60.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gpt-4o-transcribe"), 60.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gpt-4o-mini-transcribe", 2.0), 60.0)
 
     def test_text_timeout_has_floor_and_cap(self) -> None:
         self.assertEqual(_hosted_text_timeout("short", 32), 45.0)
-        self.assertEqual(_hosted_text_timeout("x" * 12000, 1024), 180.0)
+        self.assertEqual(_hosted_text_timeout("x" * 12000, 1024), 240.96)
+        self.assertEqual(_hosted_text_timeout("x" * 100000, 8192), 600.0)
 
 
 if __name__ == "__main__":

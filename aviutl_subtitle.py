@@ -11,6 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.audio import extract_audio, get_media_duration, load_mono_16k_wav
@@ -25,7 +26,7 @@ from subtitler.models import ExoMarker, ExoSettings
 from subtitler.profiling import PipelineProfiler
 from subtitler.subtitle_planner import build_grouped_subtitles
 from subtitler.text_refiner import LlamaServerTextRefiner
-from subtitler.transcript_normalizer import backend_result_to_aligned_chunks, speech_regions_to_markers
+from subtitler.transcript_normalizer import backend_result_to_aligned_chunks
 from subtitler.transcription_backend import TranscriptionRequest
 
 
@@ -91,6 +92,7 @@ def main() -> int:
         llm_split_profile_path = sidecar_base.with_suffix(".llm_split.csv") if sidecar_base is not None else None
         subtitle_timing_profile_path = sidecar_base.with_suffix(".subtitle_timing.csv") if sidecar_base is not None else None
         boundary_timing_profile_path = sidecar_base.with_suffix(".boundary_timing.csv") if sidecar_base is not None else None
+        chapter_markers_path = sidecar_base.with_suffix(".youtube_chapters.json") if sidecar_base is not None else None
 
         print(f"Input:  {input_path}")
         print(f"Output: {output_path}")
@@ -169,7 +171,7 @@ def main() -> int:
 
             refiner = _build_refiner(config, glossary, api_usage, sidecar_base)
             try:
-                chain_markers: list[ExoMarker] = []
+                chapter_markers: list[ExoMarker] = []
                 mistranscription_markers: list[ExoMarker] = []
                 cleanup_cfg = config["cleanup"]
                 subtitle_cfg = config["subtitles"]
@@ -185,7 +187,6 @@ def main() -> int:
                     regroup_profile_path=regroup_profile_path if diagnostics_enabled else None,
                     llm_split_profile_path=llm_split_profile_path if sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"] else None,
                     llm_split_console=bool(sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]),
-                    chain_markers=chain_markers,
                     subtitle_timing_profile_path=subtitle_timing_profile_path if diagnostics_enabled else None,
                     boundary_timing_profile_path=boundary_timing_profile_path if diagnostics_enabled else None,
                     chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
@@ -196,6 +197,12 @@ def main() -> int:
                 if refiner is not None:
                     if final_text_path is not None:
                         _write_final_subtitle_text(final_text_path, subtitles)
+                    if args.workflow == "hosted" and config["additional_settings"]["youtube_chapters"]:
+                        chapter_markers = _build_youtube_chapter_markers(
+                            subtitles,
+                            refiner,
+                            chapter_markers_path if sidecars_enabled else None,
+                        )
                     if cleanup_cfg.get("skip_final_review"):
                         print("Skipping final mistranscription check.", flush=True)
                     else:
@@ -241,8 +248,7 @@ def main() -> int:
                 settings,
                 duration,
                 insert_initial_empty=True,
-                vad_markers=speech_regions_to_markers(backend_result.speech_regions),
-                chain_markers=chain_markers,
+                chapter_markers=chapter_markers,
                 mistranscription_markers=mistranscription_markers,
             )
             write_exo(output_path, content)
@@ -371,6 +377,67 @@ def _flag_possible_mistranscriptions(subtitles, refiner, output_path: Path) -> l
     print(f"Possible mistranscription markers: {len(markers)}", flush=True)
     print(f"Wrote possible mistranscriptions: {output_path}", flush=True)
     return markers
+
+
+def _build_youtube_chapter_markers(subtitles, refiner, output_path: Path | None) -> list[ExoMarker]:
+    if not subtitles:
+        return []
+    numbered = [
+        (index, sub.start_time, sub.end_time, sub.text)
+        for index, sub in enumerate(subtitles, start=1)
+    ]
+    try:
+        chapters = refiner.suggest_chapters(numbered)
+    except Exception as exc:
+        print(f"Warning: YouTube chapter generation failed; continuing without chapter markers. {exc}", flush=True)
+        return []
+
+    markers: list[ExoMarker] = []
+    diagnostics: list[dict[str, Any]] = []
+    for chapter in chapters:
+        start_index = chapter.start_subtitle_index - 1
+        end_index = chapter.end_subtitle_index - 1
+        if start_index < 0 or start_index >= len(subtitles) or end_index < start_index:
+            continue
+        end_index = min(end_index, len(subtitles) - 1)
+        start_subtitle = subtitles[start_index]
+        end_subtitle = subtitles[end_index]
+        title = chapter.title.strip()
+        if not title:
+            continue
+        marker = ExoMarker(start_subtitle.start_time, end_subtitle.end_time, title)
+        markers.append(marker)
+        diagnostics.append(
+            {
+                "start_subtitle_index": chapter.start_subtitle_index,
+                "end_subtitle_index": chapter.end_subtitle_index,
+                "start_time": marker.start_time,
+                "end_time": marker.end_time,
+                "title": chapter.title,
+                "previous_topic": chapter.previous_topic,
+                "next_topic": chapter.next_topic,
+            }
+        )
+
+    if output_path is not None:
+        _write_youtube_chapter_diagnostics(output_path, refiner, diagnostics)
+    if markers:
+        print(f"YouTube chapter markers: {len(markers)}", flush=True)
+        if output_path is not None:
+            print(f"Wrote YouTube chapter diagnostics: {output_path}", flush=True)
+    return markers
+
+
+def _write_youtube_chapter_diagnostics(output_path: Path, refiner, chapters: list[dict[str, Any]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "provider": getattr(refiner, "provider", ""),
+        "model": getattr(refiner, "model", ""),
+        "chapters": chapters,
+        "cuts": getattr(refiner, "last_youtube_chapter_cuts", []),
+        "raw_response": getattr(refiner, "last_youtube_chapters_raw", ""),
+    }
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _write_run_metadata(

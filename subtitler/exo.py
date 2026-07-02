@@ -118,6 +118,7 @@ def generate_exo_file(
     insert_initial_empty: bool = True,
     vad_markers: list[ExoMarker] | None = None,
     chain_markers: list[ExoMarker] | None = None,
+    chapter_markers: list[ExoMarker] | None = None,
     mistranscription_markers: list[ExoMarker] | None = None,
 ) -> str:
     total_frames = time_to_frame(total_duration, settings.rate)
@@ -151,14 +152,12 @@ audio_ch={settings.audio_ch}"""
     for start, end, text in frame_ranges:
         objects.append(generate_exo_object(index, start, end, text, settings, layer=1))
         index += 1
-    for start, end, text in _marker_frame_ranges(vad_markers or [], settings.rate):
+    _ = vad_markers, chain_markers
+    for start, end, text in _marker_frame_ranges(chapter_markers or [], settings.rate):
         objects.append(generate_exo_object(index, start, end, text, settings, layer=2))
         index += 1
-    for start, end, text in _marker_frame_ranges(chain_markers or [], settings.rate):
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=3))
-        index += 1
     for start, end, text in _marker_frame_ranges(mistranscription_markers or [], settings.rate):
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=4))
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=3))
         index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
 

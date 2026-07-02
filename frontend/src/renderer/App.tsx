@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type PointerEvent } from "react";
+import { ArrowLeft, Settings as SettingsIcon } from "lucide-react";
 import ModeSelector from "./components/ModeSelector";
 import ThemeSelector from "./components/ThemeSelector";
 import InputPanel from "./components/InputPanel";
@@ -7,6 +8,7 @@ import GlossaryPanel from "./components/GlossaryPanel";
 import RunPanel from "./components/RunPanel";
 import LogViewer from "./components/LogViewer";
 import OutputPanel from "./components/OutputPanel";
+import TooltipLabel from "./components/TooltipLabel";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
 import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, WorkflowConfig, WorkflowName } from "./lib/types";
@@ -47,9 +49,12 @@ export default function App() {
   const [analysis, setAnalysis] = useState<MediaAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
+  const [view, setView] = useState<"main" | "settings">("main");
+  const [inputWidth, setInputWidth] = useState(58);
+  const [logsHeight, setLogsHeight] = useState(24);
 
   const workflow = settings?.selectedWorkflow ?? "local";
-  const hostedReady = !isHostedWorkflow(workflow) || isHostedSelectionVerified(coreSettings, hostedVerification);
+  const hostedReady = !isHostedWorkflow(workflow) || isHostedSelectionVerified(coreSettings, hostedVerification) || isHostedSelectionConfigured(coreSettings, envStatus);
   const localReady = !isLocalWorkflow(workflow) || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
   const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && hostedReady && localReady);
 
@@ -293,14 +298,25 @@ export default function App() {
         result.gemini.cleanup31FlashLite && { provider: "gemini" as const, model: "gemini-3.1-flash-lite" }
       ].filter(Boolean) as Array<{ provider: "openai" | "gemini"; model: string }>;
       const hosted = coreSettings.hosted;
-      const selectedTranscription = transcriptionOptions.find((option) => option.provider === hosted.transcriptionProvider) ?? transcriptionOptions[0];
-      const selectedCleanup = cleanupOptions.find((option) => option.provider === hosted.cleanupProvider) ?? cleanupOptions[0];
+      const selectedTranscription = matchingHostedOption(transcriptionOptions, hosted.transcriptionProvider, hosted.transcriptionModel)
+        ?? transcriptionOptions.find((option) => option.provider === hosted.transcriptionProvider)
+        ?? transcriptionOptions[0];
+      const selectedFallbackTranscription = matchingHostedOption(
+        transcriptionOptions,
+        hosted.fallbackTranscriptionProvider,
+        hosted.fallbackTranscriptionModel
+      ) ?? transcriptionOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider) ?? transcriptionOptions[0];
+      const selectedCleanup = matchingHostedOption(cleanupOptions, hosted.cleanupProvider, hosted.cleanupModel)
+        ?? cleanupOptions.find((option) => option.provider === hosted.cleanupProvider)
+        ?? cleanupOptions[0];
       setCoreSettings({
         ...coreSettings,
         hosted: {
           ...hosted,
           transcriptionProvider: selectedTranscription?.provider ?? hosted.transcriptionProvider,
           transcriptionModel: selectedTranscription?.model ?? hosted.transcriptionModel,
+          fallbackTranscriptionProvider: selectedFallbackTranscription?.provider ?? hosted.fallbackTranscriptionProvider,
+          fallbackTranscriptionModel: selectedFallbackTranscription?.model ?? hosted.fallbackTranscriptionModel,
           cleanupProvider: selectedCleanup?.provider ?? hosted.cleanupProvider,
           cleanupModel: selectedCleanup?.model ?? hosted.cleanupModel
         }
@@ -450,6 +466,40 @@ export default function App() {
     }
   }
 
+  function startColumnResize(event: PointerEvent<HTMLDivElement>) {
+    const container = event.currentTarget.parentElement;
+    if (!container) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = container.getBoundingClientRect();
+    const move = (moveEvent: globalThis.PointerEvent) => {
+      const percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
+      setInputWidth(Math.min(72, Math.max(38, percent)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
+
+  function startLogResize(event: PointerEvent<HTMLDivElement>) {
+    const container = event.currentTarget.parentElement;
+    if (!container) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = container.getBoundingClientRect();
+    const move = (moveEvent: globalThis.PointerEvent) => {
+      const percent = ((rect.bottom - moveEvent.clientY) / rect.height) * 100;
+      setLogsHeight(Math.min(48, Math.max(14, percent)));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+  }
+
   const elapsed = useMemo(() => formatElapsed(elapsedMs), [elapsedMs]);
   if (!settings || !configs || !configPaths || !coreSettings) {
     return <div className="loading">Loading frontend state...</div>;
@@ -469,31 +519,14 @@ export default function App() {
             setSettings(next);
             void saveSettings(next);
           }} />
+          <button className="topbar-button" onClick={() => setView(view === "settings" ? "main" : "settings")}>
+            {view === "settings" ? <ArrowLeft size={16} /> : <SettingsIcon size={16} />}
+            {view === "settings" ? "Back" : "Settings"}
+          </button>
         </div>
       </header>
-      <div className="main-grid">
-        <div className="left-column">
-          <InputPanel
-            inputPath={inputPath}
-            audioTrack={coreSettings.audioTrack}
-            analysis={analysis}
-            analyzing={analyzing}
-            analysisError={analysisError}
-            onInput={handleInput}
-            onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
-          />
-          <OutputPanel
-            outputPath={outputPath}
-            sidecarDir={sidecarDir}
-            sidecarsEnabled={settings.sidecarsEnabled}
-            onOutput={setOutputPath}
-            onSidecar={setSidecarDir}
-            onSidecarsEnabled={(sidecarsEnabled) => {
-              const next = { ...settings, sidecarsEnabled };
-              setSettings(next);
-              void saveSettings(next);
-            }}
-          />
+      {view === "settings" ? (
+        <div className="settings-view">
           <SettingsPanel
             workflow={workflow}
             settings={coreSettings}
@@ -516,6 +549,8 @@ export default function App() {
             downloadingLlama={downloadingLlama}
             pythonPath={settings.pythonPath}
             pythonReady={pythonReady}
+            sidecarsEnabled={settings.sidecarsEnabled}
+            sidecarDir={sidecarDir}
             onChange={setCoreSettings}
             onPythonPath={(pythonPath) => {
               const next = { ...settings, pythonPath };
@@ -523,6 +558,12 @@ export default function App() {
               void saveSettings(next);
             }}
             onEnvFile={setEnvFile}
+            onSidecar={setSidecarDir}
+            onSidecarsEnabled={(sidecarsEnabled) => {
+              const next = { ...settings, sidecarsEnabled };
+              setSettings(next);
+              void saveSettings(next);
+            }}
             onVerifyHosted={verifyHosted}
             onModelsDirectory={(modelsDirectory) => {
               const next = { ...settings, modelsDirectory };
@@ -548,12 +589,37 @@ export default function App() {
             onRevertManagedLlama={(path) => useManagedLlama(path)}
           />
         </div>
-        <div className="right-column">
+      ) : (
+      <div className="main-workspace" style={{ "--logs-height": `${logsHeight}%` } as React.CSSProperties}>
+        <div className="primary-flow" style={{ "--input-width": `${inputWidth}%` } as React.CSSProperties}>
+          <InputPanel
+            inputPath={inputPath}
+            audioTrack={coreSettings.audioTrack}
+            analysis={analysis}
+            analyzing={analyzing}
+            analysisError={analysisError}
+            onInput={handleInput}
+            onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
+          />
+          <div className="resize-divider column-divider" role="separator" aria-orientation="vertical" title="Drag to resize input and right panels" onPointerDown={startColumnResize} />
+          <div className="flow-side">
+          <OutputPanel
+            outputPath={outputPath}
+            sidecarDir={sidecarDir}
+            sidecarsEnabled={settings.sidecarsEnabled}
+            onOutput={setOutputPath}
+          />
+          <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} onChange={setCoreSettings} />
           <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
-          <LogViewer logs={logs} onClear={() => setLogs("")} />
           <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} />
+          </div>
+        </div>
+        <div className="resize-divider log-divider" role="separator" aria-orientation="horizontal" title="Drag to resize logs" onPointerDown={startLogResize} />
+        <div className="logs-row">
+          <LogViewer logs={logs} onClear={() => setLogs("")} />
         </div>
       </div>
+      )}
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
   );
@@ -568,16 +634,16 @@ function formatElapsed(ms: number): string {
 
 function isHostedSelectionVerified(settings: CoreWorkflowSettings | null, verification: HostedModelVerification | null): boolean {
   if (!settings?.hosted || !verification) return false;
-  const transcription = settings.hosted.transcriptionProvider === "openai"
-    ? (
-      (verification.openai.transcription && settings.hosted.transcriptionModel === "gpt-4o-transcribe")
-      || (verification.openai.transcriptionMini && settings.hosted.transcriptionModel === "gpt-4o-mini-transcribe")
-    )
-    : (
-      (verification.gemini.transcription && settings.hosted.transcriptionModel === "gemini-3.5-flash")
-      || (verification.gemini.transcription31Pro && settings.hosted.transcriptionModel === "gemini-3.1-pro-preview")
-      || (verification.gemini.transcription31FlashLite && settings.hosted.transcriptionModel === "gemini-3.1-flash-lite")
-    );
+  const transcription = isVerifiedHostedTranscription(
+    settings.hosted.transcriptionProvider,
+    settings.hosted.transcriptionModel,
+    verification
+  );
+  const fallbackTranscription = isVerifiedHostedTranscription(
+    settings.hosted.fallbackTranscriptionProvider,
+    settings.hosted.fallbackTranscriptionModel,
+    verification
+  );
   const cleanup = settings.hosted.cleanupProvider === "openai"
     ? (settings.hosted.cleanupModel === "gpt-5.4-mini" ? verification.openai.cleanup : settings.hosted.cleanupModel === "gpt-5.5" && verification.openai.cleanup55)
     : (
@@ -585,5 +651,81 @@ function isHostedSelectionVerified(settings: CoreWorkflowSettings | null, verifi
       || (settings.hosted.cleanupModel === "gemini-3.1-pro-preview" && verification.gemini.cleanup31Pro)
       || (settings.hosted.cleanupModel === "gemini-3.1-flash-lite" && verification.gemini.cleanup31FlashLite)
     );
-  return transcription && cleanup;
+  return transcription && fallbackTranscription && cleanup;
+}
+
+function isVerifiedHostedTranscription(provider: "openai" | "gemini", model: string, verification: HostedModelVerification): boolean {
+  return provider === "openai"
+    ? (
+      (verification.openai.transcription && model === "gpt-4o-transcribe")
+      || (verification.openai.transcriptionMini && model === "gpt-4o-mini-transcribe")
+    )
+    : (
+      (verification.gemini.transcription && model === "gemini-3.5-flash")
+      || (verification.gemini.transcription31Pro && model === "gemini-3.1-pro-preview")
+      || (verification.gemini.transcription31FlashLite && model === "gemini-3.1-flash-lite")
+    );
+}
+
+function isHostedSelectionConfigured(settings: CoreWorkflowSettings | null, envStatus: EnvStatus): boolean {
+  if (!settings?.hosted || !envStatus.exists) return false;
+  const hosted = settings.hosted;
+  const transcriptionKeyReady = hosted.transcriptionProvider === "openai"
+    ? envStatus.keysPresent.OPENAI_API_KEY
+    : envStatus.keysPresent.GEMINI_API_KEY;
+  const fallbackTranscriptionKeyReady = hosted.fallbackTranscriptionProvider === "openai"
+    ? envStatus.keysPresent.OPENAI_API_KEY
+    : envStatus.keysPresent.GEMINI_API_KEY;
+  const cleanupKeyReady = hosted.cleanupProvider === "openai"
+    ? envStatus.keysPresent.OPENAI_API_KEY
+    : envStatus.keysPresent.GEMINI_API_KEY;
+  return transcriptionKeyReady && fallbackTranscriptionKeyReady && cleanupKeyReady && isApprovedHostedSelection(hosted);
+}
+
+function isApprovedHostedSelection(hosted: NonNullable<CoreWorkflowSettings["hosted"]>): boolean {
+  const approvedTranscription = hosted.transcriptionProvider === "openai"
+    ? ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
+    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
+  const approvedFallbackTranscription = hosted.fallbackTranscriptionProvider === "openai"
+    ? ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
+    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
+  const approvedCleanup = hosted.cleanupProvider === "openai"
+    ? ["gpt-5.4-mini", "gpt-5.5"]
+    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
+  return approvedTranscription.includes(hosted.transcriptionModel)
+    && approvedFallbackTranscription.includes(hosted.fallbackTranscriptionModel)
+    && approvedCleanup.includes(hosted.cleanupModel);
+}
+
+function matchingHostedOption<T extends { provider: "openai" | "gemini"; model: string }>(
+  options: T[],
+  provider: "openai" | "gemini",
+  model: string
+): T | undefined {
+  return options.find((option) => option.provider === provider && option.model === model);
+}
+
+function AdditionalSettingsPanel({ workflow, settings, onChange }: {
+  workflow: WorkflowName;
+  settings: CoreWorkflowSettings;
+  onChange(settings: CoreWorkflowSettings): void;
+}) {
+  const additionalSettings = settings.additionalSettings ?? { youtubeChapters: false };
+  return (
+    <section className="panel additional-settings-panel">
+      <div className="panel-title">Additional Settings</div>
+      {workflow === "hosted" ? (
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={additionalSettings.youtubeChapters}
+            onChange={(event) => onChange({ ...settings, additionalSettings: { ...additionalSettings, youtubeChapters: event.target.checked } })}
+          />
+          <TooltipLabel text="Use the hosted cleanup model to analyze the full final transcript and add YouTube-style chapter title markers to the EXO output.">YouTube chapter markers</TooltipLabel>
+        </label>
+      ) : (
+        <div className="additional-settings-empty">No additional settings</div>
+      )}
+    </section>
+  );
 }

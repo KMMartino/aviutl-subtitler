@@ -20,7 +20,6 @@ from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .models import AudioChunk, TranscriptChunk
 from .transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN, build_transcription_prompt, clean_transcript, _is_suspect_transcript
-from .vad import split_chunk_with_tighter_vad
 
 
 def require_api_key(name: str) -> str:
@@ -30,9 +29,45 @@ def require_api_key(name: str) -> str:
     return value
 
 
-def _hosted_transcription_timeout(chunk: AudioChunk) -> float:
+def _hosted_transcription_timeout(chunk: AudioChunk, model: str = "", timeout_scale: float = 1.0) -> float:
     duration = max(0.0, chunk.end - chunk.start)
-    return min(60.0, max(15.0, duration * 2.0))
+    model_scale = 2.0 if _is_heavy_transcription_model(model) else 1.0
+    return max(5.0, duration * model_scale * max(1.0, timeout_scale))
+
+
+def _is_heavy_transcription_model(model: str) -> bool:
+    normalized = model.lower()
+    return "pro" in normalized or normalized == "gpt-4o-transcribe"
+
+
+class MalformedTranscriptionResponse(TranscriptionError):
+    """A hosted transcription endpoint returned parseable but unusable transcript data."""
+
+
+class DeadTranscriptionRequest(TranscriptionError):
+    """A hosted transcription request exceeded its timeout or died before a usable response."""
+
+
+class FallbackTranscriber:
+    def __init__(self, primary: Any, fallback: Any | None) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.provider = getattr(primary, "provider", "")
+        self.model = getattr(primary, "model", "")
+
+    def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
+        try:
+            return self.primary.transcribe(chunk)
+        except (MalformedTranscriptionResponse, DeadTranscriptionRequest) as exc:
+            if self.fallback is None:
+                raise
+            reason = "dead request" if isinstance(exc, DeadTranscriptionRequest) else "malformed response"
+            print(
+                f"Warning: {reason} from {self.primary.provider} transcription for chunk {chunk.index}; "
+                f"falling back to {self.fallback.provider}:{self.fallback.model}. {exc}",
+                flush=True,
+            )
+            return self.fallback.transcribe(chunk)
 
 
 class GeminiTranscriber:
@@ -46,6 +81,7 @@ class GeminiTranscriber:
         glossary: list[GlossaryEntry] | None = None,
         api_key: str | None = None,
         max_transcription_split_depth: int = 2,
+        timeout_scale: float = 1.0,
     ) -> None:
         self.model = model
         self.temp_dir = temp_dir
@@ -53,32 +89,12 @@ class GeminiTranscriber:
         self.api_key = api_key or require_api_key("GEMINI_API_KEY")
         self.prompt = build_transcription_prompt(glossary)
         self.max_transcription_split_depth = max(0, max_transcription_split_depth)
+        self.timeout_scale = max(1.0, timeout_scale)
         verify_gemini_model_available(self.model, self.api_key)
 
     def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
-        return TranscriptChunk(chunk=chunk, text=self._transcribe_with_retry(chunk, depth=0))
-
-    def _transcribe_with_retry(self, chunk: AudioChunk, depth: int) -> str:
         text = self._transcribe_once(chunk)
-        if not text:
-            return ""
-        if not _is_external_suspect(text, chunk):
-            return text
-        if depth < self.max_transcription_split_depth:
-            subchunks = split_chunk_with_tighter_vad(chunk, sample_rate=16000, temp_dir=self.temp_dir, keep_temp=True)
-            if len(subchunks) >= 2:
-                print(
-                    f"Warning: suspect Gemini transcript for chunk {chunk.index} "
-                    f"[{chunk.start:.2f}-{chunk.end:.2f}s]; retrying as {len(subchunks)} subchunks.",
-                    flush=True,
-                )
-                return "".join(self._transcribe_with_retry(subchunk, depth + 1) for subchunk in subchunks)
-        print(
-            f"Warning: dropping suspect Gemini transcript for chunk {chunk.index} "
-            f"[{chunk.start:.2f}-{chunk.end:.2f}s].",
-            flush=True,
-        )
-        return ""
+        return TranscriptChunk(chunk=chunk, text=text)
 
     def _transcribe_once(self, chunk: AudioChunk) -> str:
         wav_path = chunk.wav_path or self.temp_dir / f"gemini_transcribe_{chunk.index:05d}.wav"
@@ -104,7 +120,9 @@ class GeminiTranscriber:
             payload,
             TranscriptionError,
             f"Gemini transcription failed for chunk {chunk.index}",
-            timeout_sec=_hosted_transcription_timeout(chunk),
+            timeout_sec=_hosted_transcription_timeout(chunk, self.model, self.timeout_scale),
+            malformed_error_type=MalformedTranscriptionResponse,
+            dead_request_error_type=DeadTranscriptionRequest,
         )
         text = clean_transcript(_gemini_text(data))
         self._record_usage(data, chunk)
@@ -112,7 +130,9 @@ class GeminiTranscriber:
             print(f"Warning: Gemini reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
             return ""
         if not text:
-            raise TranscriptionError(f"Gemini returned an empty transcript for chunk {chunk.index}")
+            raise MalformedTranscriptionResponse(f"Gemini returned an empty transcript for chunk {chunk.index}")
+        if _is_external_suspect(text, chunk):
+            raise MalformedTranscriptionResponse(f"Gemini returned a suspect transcript for chunk {chunk.index}")
         return text
 
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
@@ -149,6 +169,7 @@ class OpenAITranscriber:
         api_key: str | None = None,
         language: str = "ja",
         max_transcription_split_depth: int = 2,
+        timeout_scale: float = 1.0,
     ) -> None:
         self.model = model
         self.temp_dir = temp_dir
@@ -157,32 +178,12 @@ class OpenAITranscriber:
         self.prompt = build_transcription_prompt(glossary)
         self.language = language
         self.max_transcription_split_depth = max(0, max_transcription_split_depth)
+        self.timeout_scale = max(1.0, timeout_scale)
         verify_openai_model_available(self.model, self.api_key)
 
     def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
-        return TranscriptChunk(chunk=chunk, text=self._transcribe_with_retry(chunk, depth=0))
-
-    def _transcribe_with_retry(self, chunk: AudioChunk, depth: int) -> str:
         text = self._transcribe_once(chunk)
-        if not text:
-            return ""
-        if not _is_external_suspect(text, chunk):
-            return text
-        if depth < self.max_transcription_split_depth:
-            subchunks = split_chunk_with_tighter_vad(chunk, sample_rate=16000, temp_dir=self.temp_dir, keep_temp=True)
-            if len(subchunks) >= 2:
-                print(
-                    f"Warning: suspect OpenAI transcript for chunk {chunk.index} "
-                    f"[{chunk.start:.2f}-{chunk.end:.2f}s]; retrying as {len(subchunks)} subchunks.",
-                    flush=True,
-                )
-                return "".join(self._transcribe_with_retry(subchunk, depth + 1) for subchunk in subchunks)
-        print(
-            f"Warning: dropping suspect OpenAI transcript for chunk {chunk.index} "
-            f"[{chunk.start:.2f}-{chunk.end:.2f}s].",
-            flush=True,
-        )
-        return ""
+        return TranscriptChunk(chunk=chunk, text=text)
 
     def _transcribe_once(self, chunk: AudioChunk) -> str:
         wav_path = chunk.wav_path or self.temp_dir / f"openai_transcribe_{chunk.index:05d}.wav"
@@ -203,7 +204,9 @@ class OpenAITranscriber:
             wav_path,
             TranscriptionError,
             f"OpenAI transcription failed for chunk {chunk.index}",
-            timeout_sec=_hosted_transcription_timeout(chunk),
+            timeout_sec=_hosted_transcription_timeout(chunk, self.model, self.timeout_scale),
+            malformed_error_type=MalformedTranscriptionResponse,
+            dead_request_error_type=DeadTranscriptionRequest,
         )
         text = clean_transcript(str(data.get("text", "")))
         self._record_usage(data, chunk)
@@ -211,7 +214,9 @@ class OpenAITranscriber:
             print(f"Warning: OpenAI reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
             return ""
         if not text:
-            raise TranscriptionError(f"OpenAI returned an empty transcript for chunk {chunk.index}")
+            raise MalformedTranscriptionResponse(f"OpenAI returned an empty transcript for chunk {chunk.index}")
+        if _is_external_suspect(text, chunk):
+            raise MalformedTranscriptionResponse(f"OpenAI returned a suspect transcript for chunk {chunk.index}")
         return text
 
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
@@ -306,23 +311,31 @@ def _request_json_with_retries(
     message: str,
     headers: dict[str, str] | None = None,
     timeout_sec: float = 600.0,
+    malformed_error_type: type[Exception] | None = None,
+    dead_request_error_type: type[Exception] | None = None,
 ) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
     if headers:
         request_headers.update(headers)
-    max_attempts = 2
+    max_attempts = 1
     for attempt in range(max_attempts):
         request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if dead_request_error_type is not None and exc.code in {408, 504}:
+                raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
             if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
                 raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
             _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
         except Exception as exc:
+            if dead_request_error_type is not None and _is_dead_request_exception(exc):
+                raise dead_request_error_type(f"{message}: {exc}") from exc
             if attempt == max_attempts - 1:
                 raise error_type(f"{message}: {exc}") from exc
             _print_retry_warning(message, attempt, timeout_sec, str(exc))
@@ -339,8 +352,10 @@ def _request_multipart_with_retries(
     error_type: type[Exception],
     message: str,
     timeout_sec: float = 600.0,
+    malformed_error_type: type[Exception] | None = None,
+    dead_request_error_type: type[Exception] | None = None,
 ) -> dict[str, Any]:
-    max_attempts = 2
+    max_attempts = 1
     for attempt in range(max_attempts):
         boundary = f"----subtitler-{uuid.uuid4().hex}"
         body = _multipart_body(boundary, fields, file_field, file_path)
@@ -356,12 +371,18 @@ def _request_multipart_with_retries(
         try:
             with urllib.request.urlopen(request, timeout=timeout_sec) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if dead_request_error_type is not None and exc.code in {408, 504}:
+                raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
             if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
                 raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
             _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
         except Exception as exc:
+            if dead_request_error_type is not None and _is_dead_request_exception(exc):
+                raise dead_request_error_type(f"{message}: {exc}") from exc
             if attempt == max_attempts - 1:
                 raise error_type(f"{message}: {exc}") from exc
             _print_retry_warning(message, attempt, timeout_sec, str(exc))
@@ -375,6 +396,13 @@ def _print_retry_warning(message: str, attempt: int, timeout_sec: float, reason:
         f"or retryable error ({reason}). Resending request...",
         flush=True,
     )
+
+
+def _is_dead_request_exception(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text
 
 
 def _multipart_body(boundary: str, fields: dict[str, str], file_field: str, file_path: Path) -> bytes:

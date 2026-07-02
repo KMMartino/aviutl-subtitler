@@ -62,6 +62,15 @@ class ExoMarker:
 
 
 @dataclass
+class ChapterSuggestion:
+    start_subtitle_index: int
+    end_subtitle_index: int
+    title: str
+    previous_topic: str = ""
+    next_topic: str = ""
+
+
+@dataclass
 class MisTranscriptionFlag:
     line_number: int
     text: str

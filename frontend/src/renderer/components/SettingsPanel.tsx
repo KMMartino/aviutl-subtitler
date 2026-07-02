@@ -27,9 +27,13 @@ type Props = {
   downloadingLlama: boolean;
   pythonPath: string;
   pythonReady: boolean;
+  sidecarsEnabled: boolean;
+  sidecarDir: string;
   onChange(settings: CoreWorkflowSettings): void;
   onPythonPath(path: string): void;
   onEnvFile(path: string): void;
+  onSidecar(path: string): void;
+  onSidecarsEnabled(value: boolean): void;
   onVerifyHosted(): void;
   onModelsDirectory(path: string): void;
   onDownloadLocalModels(): void;
@@ -41,9 +45,17 @@ type Props = {
   onRevertManagedLlama(path: string): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, onChange, onPythonPath, onEnvFile, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onUseManagedLlama, onRevertManagedLlama }: Props) {
+export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onUseManagedLlama, onRevertManagedLlama }: Props) {
   const local = settings.local ?? { model: "", mmproj: "", llamaServer: "", cleanupModel: "", cleanupLlamaServer: "", transcriptionDraftModel: "", cleanupDraftModel: "" };
-  const hosted = settings.hosted ?? { transcriptionProvider: "gemini", transcriptionModel: "gemini-3.5-flash", cleanupProvider: "openai", cleanupModel: "gpt-5.4-mini", envFile: "" };
+  const hosted = settings.hosted ?? {
+    transcriptionProvider: "gemini",
+    transcriptionModel: "gemini-3.5-flash",
+    fallbackTranscriptionProvider: "openai",
+    fallbackTranscriptionModel: "gpt-4o-mini-transcribe",
+    cleanupProvider: "openai",
+    cleanupModel: "gpt-5.4-mini",
+    envFile: ""
+  };
   const anyLocalProfileInstalled = Object.values(localProfileStatuses).some((status) => status.installed);
   const selectedLocalProfileInstalled = Boolean(localModelStatus?.installed);
   const [localModelExpanded, setLocalModelExpanded] = useState(true);
@@ -62,6 +74,10 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   async function pickEnv() {
     const path = await window.subtitler.chooseFile();
     if (path) onEnvFile(path);
+  }
+  async function pickSidecar() {
+    const path = await window.subtitler.chooseDirectory();
+    if (path) onSidecar(path);
   }
   return (
     <section className="panel">
@@ -201,6 +217,13 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
             onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, transcriptionProvider: provider, transcriptionModel: model } })}
           />
           <HostedModelSelect
+            label="Fallback model"
+            tip="Used once when the transcription model returns a malformed response. This has mostly been seen with Gemini responses that are empty, malformed, or implausibly long."
+            options={hostedOptions(hostedVerification, "transcription")}
+            value={`${hosted.fallbackTranscriptionProvider}:${hosted.fallbackTranscriptionModel}`}
+            onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, fallbackTranscriptionProvider: provider, fallbackTranscriptionModel: model } })}
+          />
+          <HostedModelSelect
             label="Cleanup model"
             tip="Only verified supported cleanup models are offered: OpenAI GPT-5.4 mini or Gemini 3.5 Flash."
             options={hostedOptions(hostedVerification, "cleanup")}
@@ -214,7 +237,29 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           <label className="check"><input type="checkbox" checked={settings.cost?.estimateCostOnly ?? false} onChange={(event) => setCost("estimateCostOnly", event.target.checked)} /><TooltipLabel text="Perform audio preparation and speech selection, report the estimate, then stop before transcription and subtitle generation.">Estimate cost only</TooltipLabel></label>
         </div>
       )}
-      <label className="check"><input type="checkbox" checked={settings.diagnostics.profile} disabled={false} onChange={(event) => onChange({ ...settings, diagnostics: { profile: event.target.checked } })} /><TooltipLabel text="Write timing and profiling data into the sidecar directory. Has no effect when sidecar output is disabled.">Write diagnostics</TooltipLabel></label>
+      <div className="sidecar-settings">
+        <span className="field-label-line">
+          <TooltipLabel text="Sidecar files are auxiliary run outputs such as run JSON, final cleaned text, review notes, and optional diagnostics.">Sidecar files</TooltipLabel>
+          <label className="switch-label">
+            <input className="switch" type="checkbox" checked={sidecarsEnabled} onChange={(event) => onSidecarsEnabled(event.target.checked)} />
+            {sidecarsEnabled ? "On" : "Off"}
+          </label>
+        </span>
+        {sidecarsEnabled ? (
+          <>
+            <label>
+              <TooltipLabel text="Directory where sidecar files are written and opened from the Outputs panel.">Sidecar directory</TooltipLabel>
+              <div className="row">
+                <input value={sidecarDir} onChange={(event) => onSidecar(event.target.value)} />
+                <button className="icon-button" onClick={pickSidecar} title="Choose sidecar directory"><FolderOpen size={17} /></button>
+              </div>
+            </label>
+            <label className="check"><input type="checkbox" checked={settings.diagnostics.profile} onChange={(event) => onChange({ ...settings, diagnostics: { profile: event.target.checked } })} /><TooltipLabel text="Add timing and profiling diagnostics to the sidecar output set.">Write diagnostics</TooltipLabel></label>
+          </>
+        ) : (
+          <div className="disabled-field">Run JSON, final text, review notes, and diagnostics will not be written.</div>
+        )}
+      </div>
     </section>
   );
 }

@@ -23,9 +23,12 @@ export default function InputPanel(props: Props) {
     event.preventDefault();
     setDragging(false);
     const file = event.dataTransfer.files[0];
-    if (file) props.onInput(window.subtitler.filePath(file));
+    if (!file) return;
+    const path = window.subtitler.filePath(file);
+    if (path) props.onInput(path);
   }
   const tracks = props.analysis?.audioTracks ?? [];
+  const showPlaceholder = !props.analysis && !props.analyzing;
   return (
     <section className={`panel input-panel ${dragging ? "drop-active" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
       <div className="panel-title"><span><FileVideo size={18} /> Input</span><span className="drop-hint">Drop media here</span></div>
@@ -36,27 +39,22 @@ export default function InputPanel(props: Props) {
           <button className="icon-button" onClick={pickInput} title="Choose input file"><FolderOpen size={17} /></button>
         </div>
       </label>
-      {(props.analysis || props.analyzing) && (
-        <div className="media-preview">
-          <div className="thumbnail-frame">
-            {props.analysis?.thumbnailDataUrl
-              ? <img src={props.analysis.thumbnailDataUrl} alt="Selected media thumbnail" />
-              : props.analyzing
-                ? <LoaderCircle className="spin" size={24} />
-                : <FileVideo size={28} />}
-          </div>
-          <div className="media-facts">
-            {props.analyzing && !props.analysis ? <strong>Inspecting media...</strong> : props.analysis && <>
-              <strong>{formatDuration(props.analysis.durationSeconds)}</strong>
-              <span>{videoDescription(props.analysis)}</span>
-              <span>{props.analysis.audioTracks.length} audio track{props.analysis.audioTracks.length === 1 ? "" : "s"}</span>
-              <div className="track-list">
-                {props.analysis.audioTracks.map((track) => <small key={track.streamIndex}>{trackLabel(track)}</small>)}
-              </div>
-            </>}
-          </div>
+      <div className="media-preview">
+        <div className="thumbnail-frame">
+          {props.analysis?.thumbnailDataUrl
+            ? <img src={props.analysis.thumbnailDataUrl} alt="Selected media thumbnail" />
+            : props.analyzing
+              ? <LoaderCircle className="spin" size={24} />
+              : <FileVideo size={28} />}
         </div>
-      )}
+        <div className={`media-facts ${showPlaceholder ? "placeholder" : ""}`}>
+          {props.analyzing && !props.analysis ? <strong>Inspecting media...</strong> : props.analysis ? <>
+            <strong>{formatDuration(props.analysis.durationSeconds)}</strong>
+            <span>{videoDescription(props.analysis)}</span>
+            <span>{props.analysis.audioTracks.length} audio track{props.analysis.audioTracks.length === 1 ? "" : "s"}</span>
+          </> : <span>{props.inputPath ? "Waiting for media details" : "No media selected"}</span>}
+        </div>
+      </div>
       {props.analysisError && <div className="field-error">{props.analysisError}</div>}
       <label>
         <TooltipLabel text="Audio stream passed to FFmpeg. Track codec, language, and channel information is read automatically when media is selected.">Audio track</TooltipLabel>
@@ -71,7 +69,16 @@ export default function InputPanel(props: Props) {
 }
 
 function trackLabel(track: MediaAnalysis["audioTracks"][number]): string {
-  const details = [track.codec, track.channelLayout || (track.channels ? `${track.channels}ch` : ""), track.language, track.title].filter(Boolean);
+  const title = track.title.trim();
+  const titleIsRedundant = /^track\s*\d+$/i.test(title) || title.toLowerCase() === `track ${track.audioIndex + 1}`;
+  const sampleRate = track.sampleRate ? `${Math.round(track.sampleRate / 100) / 10} kHz` : "";
+  const details = [
+    track.codec,
+    track.channelLayout || (track.channels ? `${track.channels}ch` : ""),
+    sampleRate,
+    track.language,
+    title && !titleIsRedundant ? title : ""
+  ].filter(Boolean);
   return `Track ${track.audioIndex}: ${details.join(" | ")}`;
 }
 

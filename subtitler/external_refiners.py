@@ -13,7 +13,7 @@ from .api_usage import ApiUsageLedger
 from .errors import ModelLoadError
 from .external_transcribers import require_api_key, verify_gemini_model_available, verify_openai_model_available
 from .glossary import GlossaryEntry, format_glossary
-from .models import MisTranscriptionFlag, SplitPlanResult
+from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 from .text_refiner import (
     TextRefiner,
     _clean_response_line,
@@ -34,6 +34,8 @@ class HostedTextRefiner(TextRefiner):
         self.usage = usage
         self.mode = "full"
         self.last_mistranscription_raw = ""
+        self.last_youtube_chapters_raw = ""
+        self.last_youtube_chapter_cuts: list[dict[str, Any]] = []
 
     def refine(self, lines: list[str]) -> list[str]:
         if not lines:
@@ -177,6 +179,24 @@ class HostedTextRefiner(TextRefiner):
             return False
         return raw.strip().upper().startswith("MOVE")
 
+    def suggest_chapters(self, numbered_subtitles: list[tuple[int, float, float, str]]) -> list[ChapterSuggestion]:
+        if not numbered_subtitles:
+            return []
+        prompt = self._youtube_chapters_prompt(numbered_subtitles)
+        try:
+            raw = self._chat(prompt, max_tokens=2048, operation="youtube_chapters")
+        except Exception as exc:
+            print(f"Warning: YouTube chapter generation failed; continuing without chapter markers. {exc}", flush=True)
+            self.last_youtube_chapters_raw = ""
+            self.last_youtube_chapter_cuts = []
+            return []
+        self.last_youtube_chapters_raw = raw
+        chapters, cuts = parse_youtube_chapter_response(raw, numbered_subtitles)
+        self.last_youtube_chapter_cuts = cuts
+        if not chapters:
+            print("Warning: YouTube chapter generation returned no usable chapters.", flush=True)
+        return chapters
+
     def _base_rules(self) -> str:
         glossary_rule = "Keep technical terms exactly as written in the glossary."
         rules = [
@@ -232,6 +252,34 @@ class HostedTextRefiner(TextRefiner):
             f"Transcript lines:\n{lines}"
         )
 
+    def _youtube_chapters_prompt(self, numbered_subtitles: list[tuple[int, float, float, str]]) -> str:
+        lines = "\n".join(
+            f"{line_number}\t{start:.3f}\t{end:.3f}\t{text}"
+            for line_number, start, end, text in numbered_subtitles
+        )
+        return (
+            "Task:\n"
+            "Analyze the full final subtitle transcript and identify coherent YouTube-style chapters.\n\n"
+            "Rules:\n"
+            "- Use the entire transcript so chapter titles share a consistent through line.\n"
+            "- Return topic spans that cover the transcript in order.\n"
+            "- Titles must be short phrases suitable for YouTube chapter names.\n"
+            "- Prefer meaningful topic changes over frequent small cuts.\n"
+            "- Do not translate unless the transcript itself changes language.\n"
+            "- Output strict JSON only. No markdown, comments, or explanations.\n\n"
+            "Required JSON shape:\n"
+            "{\n"
+            "  \"chapters\": [\n"
+            "    {\"start_line\": 1, \"end_line\": 12, \"title\": \"Intro\"}\n"
+            "  ],\n"
+            "  \"cuts\": [\n"
+            "    {\"after_line\": 12, \"previous_topic\": \"Intro\", \"next_topic\": \"History\"}\n"
+            "  ]\n"
+            "}\n\n"
+            "Subtitle lines are tab-separated as line_number, start_seconds, end_seconds, text:\n"
+            f"{lines}"
+        )
+
     def _refine_one(self, line: str) -> str | None:
         try:
             raw = self._chat(self._prompt_one(line), operation="cleanup")
@@ -261,7 +309,108 @@ class HostedTextRefiner(TextRefiner):
 def _hosted_text_timeout(prompt: str, max_tokens: int) -> float:
     prompt_chars = len(prompt)
     estimated_seconds = prompt_chars / 60.0 + max_tokens / 25.0
-    return min(180.0, max(45.0, estimated_seconds))
+    return min(600.0, max(45.0, estimated_seconds))
+
+
+def parse_youtube_chapter_response(
+    raw: str,
+    numbered_subtitles: list[tuple[int, float, float, str]],
+) -> tuple[list[ChapterSuggestion], list[dict[str, Any]]]:
+    if not raw.strip() or not numbered_subtitles:
+        return [], []
+    try:
+        data = json.loads(_extract_json_object(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return [], []
+    if not isinstance(data, dict):
+        return [], []
+    raw_chapters = data.get("chapters")
+    if not isinstance(raw_chapters, list) or not raw_chapters:
+        return [], []
+
+    valid_indexes = [line_number for line_number, _, _, _ in numbered_subtitles]
+    min_index = min(valid_indexes)
+    max_index = max(valid_indexes)
+    chapters: list[ChapterSuggestion] = []
+    previous_end = min_index - 1
+    for raw_chapter in raw_chapters:
+        if not isinstance(raw_chapter, dict):
+            return [], []
+        try:
+            start = int(raw_chapter.get("start_line"))
+            end = int(raw_chapter.get("end_line"))
+        except (TypeError, ValueError):
+            return [], []
+        start = max(min_index, min(max_index, start))
+        end = max(min_index, min(max_index, end))
+        if end < start or start <= previous_end:
+            return [], []
+        if start > previous_end + 1:
+            start = previous_end + 1
+        title = _chapter_title(raw_chapter.get("title"), len(chapters) + 1)
+        chapters.append(ChapterSuggestion(start_subtitle_index=start, end_subtitle_index=end, title=title))
+        previous_end = end
+
+    if not chapters:
+        return [], []
+    if chapters[0].start_subtitle_index != min_index:
+        chapters[0].start_subtitle_index = min_index
+    if chapters[-1].end_subtitle_index < max_index:
+        chapters[-1].end_subtitle_index = max_index
+
+    cuts = _parse_chapter_cuts(data.get("cuts"))
+    by_after_line = {cut["after_line"]: cut for cut in cuts if isinstance(cut.get("after_line"), int)}
+    for chapter in chapters:
+        cut = by_after_line.get(chapter.end_subtitle_index)
+        if cut:
+            chapter.previous_topic = str(cut.get("previous_topic") or "").strip()
+            chapter.next_topic = str(cut.get("next_topic") or "").strip()
+    return chapters, cuts
+
+
+def _extract_json_object(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("no JSON object found")
+    return text[start : end + 1]
+
+
+def _chapter_title(value: Any, index: int) -> str:
+    title = str(value or "").strip()
+    title = " ".join(title.split())
+    if not title or len(title) > 60:
+        return f"Chapter {index}"
+    return title
+
+
+def _parse_chapter_cuts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    cuts: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            after_line = int(item.get("after_line"))
+        except (TypeError, ValueError):
+            continue
+        cuts.append(
+            {
+                "after_line": after_line,
+                "previous_topic": str(item.get("previous_topic") or "").strip(),
+                "next_topic": str(item.get("next_topic") or "").strip(),
+            }
+        )
+    return cuts
 
 
 class OpenAITextRefiner(HostedTextRefiner):

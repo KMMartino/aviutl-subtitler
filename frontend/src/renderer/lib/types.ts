@@ -130,6 +130,8 @@ export type CoreWorkflowSettings = {
   hosted?: {
     transcriptionProvider: "openai" | "gemini";
     transcriptionModel: string;
+    fallbackTranscriptionProvider: "openai" | "gemini";
+    fallbackTranscriptionModel: string;
     cleanupProvider: "openai" | "gemini";
     cleanupModel: string;
     envFile: string;
@@ -141,6 +143,9 @@ export type CoreWorkflowSettings = {
     maxEstimatedApiCostUsd: number;
     allowApiSpend: boolean;
     estimateCostOnly: boolean;
+  };
+  additionalSettings?: {
+    youtubeChapters: boolean;
   };
   cleanupWindowSubtitles?: number;
 };

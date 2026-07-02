@@ -14,7 +14,7 @@ from typing import TextIO
 
 from .errors import ModelLoadError
 from .glossary import GlossaryEntry, format_glossary
-from .models import MisTranscriptionFlag, SplitPlanResult
+from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 
 
 class TextRefiner:
@@ -39,6 +39,9 @@ class TextRefiner:
         )
 
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
+        return []
+
+    def suggest_chapters(self, numbered_subtitles: list[tuple[int, float, float, str]]) -> list[ChapterSuggestion]:
         return []
 
     def should_move_leading_phrase_left(self, previous_text: str, current_text: str, phrase: str) -> bool:

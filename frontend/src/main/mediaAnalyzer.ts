@@ -50,7 +50,7 @@ function createThumbnail(inputPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", [
       "-v", "error", "-ss", "0", "-i", inputPath, "-map", "0:v:0",
-      "-frames:v", "1", "-vf", "scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2",
+      "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=decrease",
       "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"
     ], { windowsHide: true });
     const chunks: Buffer[] = [];

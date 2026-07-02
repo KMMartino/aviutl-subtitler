@@ -49,6 +49,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     subtitles = _section(config, "subtitles")
     exo = _section(config, "exo")
     cost = _section(config, "cost")
+    additional_settings = _section(config, "additional_settings")
 
     _choice(backend.get("name"), {"existing-pipeline"}, "backend.name")
     _choice(backend.get("transcriber"), {"local-gemma", "gemini", "openai"}, "backend.transcriber")
@@ -75,6 +76,8 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _positive(exo.get("font_size"), "exo.font_size")
     _non_empty_string(exo.get("font"), "exo.font")
     _non_negative(cost.get("max_estimated_api_cost_usd"), "cost.max_estimated_api_cost_usd")
+    if not isinstance(additional_settings.get("youtube_chapters"), bool):
+        raise SubtitlerError("additional_settings.youtube_chapters must be a boolean")
 
     if workflow_cfg["mode"] == "long-stream":
         _int_min(workflow_cfg.get("long_stream_min_chunks"), 0, "workflow.long_stream_min_chunks")
@@ -84,6 +87,8 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
 
     expected_mode = "long-stream" if workflow.endswith("-long-stream") else "full"
     is_hosted = workflow.startswith("hosted")
+    if additional_settings["youtube_chapters"] and workflow != "hosted":
+        raise SubtitlerError("additional_settings.youtube_chapters is only supported by the hosted short workflow")
     valid_pairing = (
         backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"gemini", "openai"}
         if is_hosted
@@ -134,6 +139,16 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
                 f"Unsupported hosted transcription model for {backend['transcriber']}: "
                 f"{backend.get('transcription_model')}"
             )
+        fallback_transcriber = str(backend.get("fallback_transcriber") or "").strip()
+        fallback_model = str(backend.get("fallback_transcription_model") or "").strip()
+        if fallback_transcriber or fallback_model:
+            _choice(fallback_transcriber, {"gemini", "openai"}, "backend.fallback_transcriber")
+            _non_empty_string(fallback_model, "backend.fallback_transcription_model")
+            if fallback_model not in approved_transcription[fallback_transcriber]:
+                raise SubtitlerError(
+                    f"Unsupported hosted fallback transcription model for {fallback_transcriber}: "
+                    f"{fallback_model}"
+                )
         if cleanup.get("api_model") not in approved_cleanup[cleanup["backend"]]:
             raise SubtitlerError(
                 f"Unsupported hosted cleanup model for {cleanup['backend']}: {cleanup.get('api_model')}"
@@ -155,6 +170,8 @@ def _defaults() -> dict[str, Any]:
             "audio_prep_workers": 2,
             "transcription_workers": None,
             "transcription_max_split_depth": 2,
+            "fallback_transcriber": "",
+            "fallback_transcription_model": "",
             "spec_draft_model": "",
             "spec_draft_n_max": 3,
         },
@@ -218,6 +235,9 @@ def _defaults() -> dict[str, Any]:
             "max_estimated_api_cost_usd": 5.0,
             "allow_api_spend": False,
             "estimate_cost_only": False,
+        },
+        "additional_settings": {
+            "youtube_chapters": False,
         },
     }
 

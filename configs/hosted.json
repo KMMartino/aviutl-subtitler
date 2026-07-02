@@ -3,6 +3,8 @@
     "name": "existing-pipeline",
     "transcriber": "gemini",
     "transcription_model": "gemini-3.5-flash",
+    "fallback_transcriber": "openai",
+    "fallback_transcription_model": "gpt-4o-mini-transcribe",
     "language": "ja",
     "transcription_workers": 4
   },
@@ -30,5 +32,8 @@
   "diagnostics": {
     "profile": true,
     "llm_split_diagnostics": true
+  },
+  "additional_settings": {
+    "youtube_chapters": false
   }
 }
