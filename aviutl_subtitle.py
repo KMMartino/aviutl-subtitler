@@ -307,7 +307,7 @@ def _build_refiner(config: dict, glossary, api_usage: ApiUsageLedger, sidecar_ba
 def _default_output_path(input_path: Path, workflow: str) -> Path:
     suffix = {
         "local": "",
-        "hosted": "-hosted-gemini35-gpt54mini",
+        "hosted": "-hosted",
         "local-long-stream": "-long-stream-local",
         "hosted-long-stream": "-long-stream-hosted",
     }[workflow]

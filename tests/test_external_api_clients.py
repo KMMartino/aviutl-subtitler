@@ -8,7 +8,7 @@ import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
-from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json_with_retries
+from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json
 from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
@@ -31,7 +31,7 @@ class ExternalApiClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             with mock.patch("subtitler.external_transcribers.require_api_key", return_value="key"), mock.patch(
                 "subtitler.external_transcribers.verify_gemini_model_available"
-            ), mock.patch("subtitler.external_transcribers._request_json_with_retries", return_value=response):
+            ), mock.patch("subtitler.external_transcribers._request_json", return_value=response):
                 transcriber = GeminiTranscriber("gemini-2.5-flash", Path(temp_name), ledger)
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "どうも")
@@ -46,7 +46,7 @@ class ExternalApiClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             with mock.patch("subtitler.external_transcribers.require_api_key", return_value="key"), mock.patch(
                 "subtitler.external_transcribers.verify_gemini_model_available"
-            ), mock.patch("subtitler.external_transcribers._request_json_with_retries", return_value=response):
+            ), mock.patch("subtitler.external_transcribers._request_json", return_value=response):
                 transcriber = GeminiTranscriber("gemini-2.5-flash", Path(temp_name), ledger)
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "")
@@ -66,7 +66,7 @@ class ExternalApiClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             with mock.patch("subtitler.external_transcribers.require_api_key", return_value="key"), mock.patch(
                 "subtitler.external_transcribers.verify_openai_model_available"
-            ), mock.patch("subtitler.external_transcribers._request_multipart_with_retries", return_value=response):
+            ), mock.patch("subtitler.external_transcribers._request_multipart", return_value=response):
                 transcriber = OpenAITranscriber("gpt-4o-transcribe", Path(temp_name), ledger)
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "こんにちは")
@@ -101,7 +101,7 @@ class ExternalApiClientTests(unittest.TestCase):
     def test_transcription_timeout_request_can_be_classified_for_fallback(self) -> None:
         with mock.patch("subtitler.external_transcribers.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             with self.assertRaises(DeadTranscriptionRequest):
-                _request_json_with_retries(
+                _request_json(
                     "GET",
                     "https://example.test",
                     None,

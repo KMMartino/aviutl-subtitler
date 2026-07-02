@@ -9,7 +9,7 @@ class WorkflowCliTests(unittest.TestCase):
         input_path = Path("video.mkv")
 
         self.assertEqual(_default_output_path(input_path, "local"), Path("video.exo"))
-        self.assertEqual(_default_output_path(input_path, "hosted"), Path("video-hosted-gemini35-gpt54mini.exo"))
+        self.assertEqual(_default_output_path(input_path, "hosted"), Path("video-hosted.exo"))
         self.assertEqual(_default_output_path(input_path, "local-long-stream"), Path("video-long-stream-local.exo"))
         self.assertEqual(_default_output_path(input_path, "hosted-long-stream"), Path("video-long-stream-hosted.exo"))
 

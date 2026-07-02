@@ -1,15 +1,8 @@
 import fs from "node:fs";
 import type { HostedModelVerification } from "../renderer/lib/types";
+import { APPROVED_MODELS } from "../shared/hostedModelCatalog";
 
-export const APPROVED_MODELS = {
-  openaiTranscription: "gpt-4o-transcribe",
-  openaiTranscriptionMini: "gpt-4o-mini-transcribe",
-  openaiCleanup: "gpt-5.4-mini",
-  openaiCleanup55: "gpt-5.5",
-  gemini: "gemini-3.5-flash",
-  gemini31Pro: "gemini-3.1-pro-preview",
-  gemini31FlashLite: "gemini-3.1-flash-lite"
-} as const;
+export { APPROVED_MODELS };
 
 export async function verifyHostedModels(envFile: string): Promise<HostedModelVerification> {
   const keys = readEnvValues(envFile);

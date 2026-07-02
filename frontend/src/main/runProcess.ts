@@ -18,16 +18,23 @@ export function startRun(window: BrowserWindow, pythonPath: string, request: Run
     windowsHide: true
   });
   activeRun = { runId, process: child, startedAtMs, cancelled: false };
+  let finished = false;
+  const finish = (code: number | null, signal: string | null) => {
+    if (finished) return;
+    finished = true;
+    const elapsedMs = Date.now() - startedAtMs;
+    emit(window, { type: "exit", runId, code, signal, elapsedMs, cancelled: activeRun?.cancelled ?? false });
+    activeRun = null;
+  };
   emit(window, { type: "started", runId, commandPreview: command.preview, startedAt: new Date(startedAtMs).toISOString() });
 
   child.stdout.on("data", (data: Buffer) => emit(window, { type: "stdout", runId, text: data.toString("utf8") }));
   child.stderr.on("data", (data: Buffer) => emit(window, { type: "stderr", runId, text: data.toString("utf8") }));
-  child.on("error", (error) => emit(window, { type: "error", runId, message: error.message }));
-  child.on("exit", (code, signal) => {
-    const elapsedMs = Date.now() - startedAtMs;
-    emit(window, { type: "exit", runId, code, signal, elapsedMs, cancelled: activeRun?.cancelled ?? false });
-    activeRun = null;
+  child.on("error", (error) => {
+    emit(window, { type: "error", runId, message: error.message });
+    finish(null, null);
   });
+  child.on("close", finish);
   return { runId };
 }
 

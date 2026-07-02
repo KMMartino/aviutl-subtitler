@@ -116,8 +116,6 @@ def generate_exo_file(
     settings: ExoSettings,
     total_duration: float,
     insert_initial_empty: bool = True,
-    vad_markers: list[ExoMarker] | None = None,
-    chain_markers: list[ExoMarker] | None = None,
     chapter_markers: list[ExoMarker] | None = None,
     mistranscription_markers: list[ExoMarker] | None = None,
 ) -> str:
@@ -152,7 +150,6 @@ audio_ch={settings.audio_ch}"""
     for start, end, text in frame_ranges:
         objects.append(generate_exo_object(index, start, end, text, settings, layer=1))
         index += 1
-    _ = vad_markers, chain_markers
     for start, end, text in _marker_frame_ranges(chapter_markers or [], settings.rate):
         objects.append(generate_exo_object(index, start, end, text, settings, layer=2))
         index += 1

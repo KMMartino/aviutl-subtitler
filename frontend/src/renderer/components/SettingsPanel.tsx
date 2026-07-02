@@ -4,6 +4,7 @@ import type React from "react";
 import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, WorkflowName } from "../lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
 import TooltipLabel from "./TooltipLabel";
+import { hostedOptions as catalogHostedOptions, isHostedModelVerified, type HostedOption } from "../../shared/hostedModelCatalog";
 
 type Props = {
   workflow: WorkflowName;
@@ -394,74 +395,8 @@ function serverAdvice(state: CurrentLlamaServerState | null, valid: boolean, sel
   return "Current server path is manual and valid. Use managed server only if you want to switch.";
 }
 
-type HostedOption = {
-  provider: "openai" | "gemini";
-  model: string;
-  label: string;
-  emphasis: "quality" | "balanced" | "speed";
-  blurb: string;
-};
-
 function hostedOptions(result: HostedModelVerification | null, role: "transcription" | "cleanup"): HostedOption[] {
-  if (!result) return [];
-  const options: HostedOption[] = [];
-  if (result.openai[role]) {
-    options.push({
-      provider: "openai",
-      model: role === "transcription" ? "gpt-4o-transcribe" : "gpt-5.4-mini",
-      label: role === "transcription" ? "OpenAI GPT-4o Transcribe" : "OpenAI GPT-5.4 mini",
-      emphasis: role === "transcription" ? "quality" : "speed",
-      blurb: role === "transcription"
-        ? "Higher-accuracy OpenAI speech-to-text model. Medium speed, audio and text input, text output. Best OpenAI choice here when transcription quality matters."
-        : "Fast, lower-cost cleanup model for routine transcript correction and subtitle decisions. Less capable than GPT-5.5 on difficult context."
-    });
-  }
-  if (role === "transcription" && result.openai.transcriptionMini) {
-    options.push({
-      provider: "openai",
-      model: "gpt-4o-mini-transcribe",
-      label: "OpenAI GPT-4o mini Transcribe",
-      emphasis: "speed",
-      blurb: "Fast, lower-cost OpenAI speech-to-text model. Audio and text input, text output. A practical choice when throughput matters more than maximum accuracy."
-    });
-  }
-  if (role === "cleanup" && result.openai.cleanup55) {
-    options.push({
-      provider: "openai",
-      model: "gpt-5.5",
-      label: "OpenAI GPT-5.5",
-      emphasis: "quality",
-      blurb: "OpenAI's smarter cleanup option for difficult context and ambiguous corrections. More expensive than GPT-5.4 mini; it does not accept audio in this workflow."
-    });
-  }
-  if (result.gemini[role]) {
-    options.push({
-      provider: "gemini",
-      model: "gemini-3.5-flash",
-      label: "Gemini 3.5 Flash",
-      emphasis: "balanced",
-      blurb: "Balanced Gemini option with strong intelligence, speed, and cost. Accepts audio directly and can transcribe, timestamp, summarize, or reason about recordings."
-    });
-  }
-  if ((role === "cleanup" && result.gemini.cleanup31Pro) || (role === "transcription" && result.gemini.transcription31Pro)) {
-    options.push({
-      provider: "gemini",
-      model: "gemini-3.1-pro-preview",
-      label: "Gemini 3.1 Pro Preview",
-      emphasis: "quality",
-      blurb: "Google's highest-intelligence option in this selector. Accepts audio and can transcribe and analyze it, but is slower, more expensive, and currently a preview model."
-    });
-  }
-  if ((role === "cleanup" && result.gemini.cleanup31FlashLite) || (role === "transcription" && result.gemini.transcription31FlashLite)) {
-    options.push({
-      provider: "gemini",
-      model: "gemini-3.1-flash-lite",
-      label: "Gemini 3.1 Flash-Lite",
-      emphasis: "speed",
-      blurb: "Fastest and lowest-cost Gemini option here. Accepts audio and is explicitly documented for transcription, but has less reasoning depth than Pro or 3.5 Flash."
-    });
-  }
-  return options;
+  return result ? catalogHostedOptions(role).filter((option) => isHostedModelVerified(option.provider, option.model, role, result)) : [];
 }
 
 function HostedModelSelect({ label, tip, options, value, onChange }: { label: string; tip: string; options: HostedOption[]; value: string; onChange(provider: "openai" | "gemini", model: string): void }) {

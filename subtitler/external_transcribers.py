@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -80,7 +79,6 @@ class GeminiTranscriber:
         usage: ApiUsageLedger,
         glossary: list[GlossaryEntry] | None = None,
         api_key: str | None = None,
-        max_transcription_split_depth: int = 2,
         timeout_scale: float = 1.0,
     ) -> None:
         self.model = model
@@ -88,7 +86,6 @@ class GeminiTranscriber:
         self.usage = usage
         self.api_key = api_key or require_api_key("GEMINI_API_KEY")
         self.prompt = build_transcription_prompt(glossary)
-        self.max_transcription_split_depth = max(0, max_transcription_split_depth)
         self.timeout_scale = max(1.0, timeout_scale)
         verify_gemini_model_available(self.model, self.api_key)
 
@@ -113,7 +110,7 @@ class GeminiTranscriber:
             ],
             "generationConfig": {"temperature": 0.0},
         }
-        data = _request_json_with_retries(
+        data = _request_json(
             "POST",
             f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent"
             f"?key={urllib.parse.quote(self.api_key)}",
@@ -168,7 +165,6 @@ class OpenAITranscriber:
         glossary: list[GlossaryEntry] | None = None,
         api_key: str | None = None,
         language: str = "ja",
-        max_transcription_split_depth: int = 2,
         timeout_scale: float = 1.0,
     ) -> None:
         self.model = model
@@ -177,7 +173,6 @@ class OpenAITranscriber:
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
         self.prompt = build_transcription_prompt(glossary)
         self.language = language
-        self.max_transcription_split_depth = max(0, max_transcription_split_depth)
         self.timeout_scale = max(1.0, timeout_scale)
         verify_openai_model_available(self.model, self.api_key)
 
@@ -196,7 +191,7 @@ class OpenAITranscriber:
             "response_format": "json",
             "temperature": "0",
         }
-        data = _request_multipart_with_retries(
+        data = _request_multipart(
             "https://api.openai.com/v1/audio/transcriptions",
             self.api_key,
             fields,
@@ -243,7 +238,7 @@ class OpenAITranscriber:
 
 
 def verify_gemini_model_available(model: str, api_key: str) -> None:
-    data = _request_json_with_retries(
+    data = _request_json(
         "GET",
         f"https://generativelanguage.googleapis.com/v1beta/models?key={urllib.parse.quote(api_key)}",
         None,
@@ -258,7 +253,7 @@ def verify_gemini_model_available(model: str, api_key: str) -> None:
 
 
 def verify_openai_model_available(model: str, api_key: str) -> None:
-    data = _request_json_with_retries(
+    data = _request_json(
         "GET",
         "https://api.openai.com/v1/models",
         None,
@@ -303,7 +298,7 @@ def _is_untranscribable_audio_response(text: str) -> bool:
     return normalized == UNTRANSCRIBABLE_AUDIO_TOKEN
 
 
-def _request_json_with_retries(
+def _request_json(
     method: str,
     url: str,
     payload: dict[str, Any] | None,
@@ -318,32 +313,24 @@ def _request_json_with_retries(
     request_headers = {"Content-Type": "application/json"}
     if headers:
         request_headers.update(headers)
-    max_attempts = 1
-    for attempt in range(max_attempts):
-        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if dead_request_error_type is not None and exc.code in {408, 504}:
-                raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
-                raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
-        except Exception as exc:
-            if dead_request_error_type is not None and _is_dead_request_exception(exc):
-                raise dead_request_error_type(f"{message}: {exc}") from exc
-            if attempt == max_attempts - 1:
-                raise error_type(f"{message}: {exc}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, str(exc))
-        time.sleep(2**attempt)
-    raise error_type(message)
+    request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if dead_request_error_type is not None and exc.code in {408, 504}:
+            raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+        raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        if dead_request_error_type is not None and _is_dead_request_exception(exc):
+            raise dead_request_error_type(f"{message}: {exc}") from exc
+        raise error_type(f"{message}: {exc}") from exc
 
 
-def _request_multipart_with_retries(
+def _request_multipart(
     url: str,
     api_key: str,
     fields: dict[str, str],
@@ -355,47 +342,31 @@ def _request_multipart_with_retries(
     malformed_error_type: type[Exception] | None = None,
     dead_request_error_type: type[Exception] | None = None,
 ) -> dict[str, Any]:
-    max_attempts = 1
-    for attempt in range(max_attempts):
-        boundary = f"----subtitler-{uuid.uuid4().hex}"
-        body = _multipart_body(boundary, fields, file_field, file_path)
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except json.JSONDecodeError as exc:
-            raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if dead_request_error_type is not None and exc.code in {408, 504}:
-                raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == max_attempts - 1:
-                raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
-        except Exception as exc:
-            if dead_request_error_type is not None and _is_dead_request_exception(exc):
-                raise dead_request_error_type(f"{message}: {exc}") from exc
-            if attempt == max_attempts - 1:
-                raise error_type(f"{message}: {exc}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, str(exc))
-        time.sleep(2**attempt)
-    raise error_type(message)
-
-
-def _print_retry_warning(message: str, attempt: int, timeout_sec: float, reason: str) -> None:
-    print(
-        f"Warning: {message}; attempt {attempt + 1}/2 failed after timeout={timeout_sec:.1f}s "
-        f"or retryable error ({reason}). Resending request...",
-        flush=True,
+    boundary = f"----subtitler-{uuid.uuid4().hex}"
+    body = _multipart_body(boundary, fields, file_field, file_path)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
     )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if dead_request_error_type is not None and exc.code in {408, 504}:
+            raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+        raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
+    except Exception as exc:
+        if dead_request_error_type is not None and _is_dead_request_exception(exc):
+            raise dead_request_error_type(f"{message}: {exc}") from exc
+        raise error_type(f"{message}: {exc}") from exc
 
 
 def _is_dead_request_exception(exc: Exception) -> bool:

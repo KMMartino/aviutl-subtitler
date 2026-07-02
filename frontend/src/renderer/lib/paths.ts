@@ -31,7 +31,7 @@ export function defaultOutputPath(inputPath: string, workflow: WorkflowName): st
   const stem = basenameWithoutExt(inputPath);
   const suffix: Record<WorkflowName, string> = {
     local: "",
-    hosted: "-hosted-gemini35-gpt54mini",
+    hosted: "-hosted",
     "local-long-stream": "-long-stream-local",
     "hosted-long-stream": "-long-stream-hosted"
   };

@@ -13,6 +13,7 @@ import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
 import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
+import { isHostedModelApproved, isHostedModelVerified, verifiedHostedOptions } from "../shared/hostedModelCatalog";
 
 const emptyEnv: EnvStatus = { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false } };
 
@@ -214,7 +215,7 @@ export default function App() {
 
   async function saveSettings(next = settings, showNotice = true) {
     if (!next) return;
-    await window.subtitler.saveAppSettings({ ...next, lastInputPath: inputPath, lastSidecarDir: sidecarDir });
+    await window.subtitler.saveAppSettings({ ...next, lastSidecarDir: sidecarDir });
     if (showNotice) setNotice("Settings saved");
   }
 
@@ -283,20 +284,8 @@ export default function App() {
     try {
       const result = await window.subtitler.verifyHostedModels(settings.envFile);
       setHostedVerification(result);
-      const transcriptionOptions = [
-        result.openai.transcription && { provider: "openai" as const, model: "gpt-4o-transcribe" },
-        result.openai.transcriptionMini && { provider: "openai" as const, model: "gpt-4o-mini-transcribe" },
-        result.gemini.transcription && { provider: "gemini" as const, model: "gemini-3.5-flash" },
-        result.gemini.transcription31Pro && { provider: "gemini" as const, model: "gemini-3.1-pro-preview" },
-        result.gemini.transcription31FlashLite && { provider: "gemini" as const, model: "gemini-3.1-flash-lite" }
-      ].filter(Boolean) as Array<{ provider: "openai" | "gemini"; model: string }>;
-      const cleanupOptions = [
-        result.openai.cleanup && { provider: "openai" as const, model: "gpt-5.4-mini" },
-        result.openai.cleanup55 && { provider: "openai" as const, model: "gpt-5.5" },
-        result.gemini.cleanup && { provider: "gemini" as const, model: "gemini-3.5-flash" },
-        result.gemini.cleanup31Pro && { provider: "gemini" as const, model: "gemini-3.1-pro-preview" },
-        result.gemini.cleanup31FlashLite && { provider: "gemini" as const, model: "gemini-3.1-flash-lite" }
-      ].filter(Boolean) as Array<{ provider: "openai" | "gemini"; model: string }>;
+      const transcriptionOptions = verifiedHostedOptions(result, "transcription");
+      const cleanupOptions = verifiedHostedOptions(result, "cleanup");
       const hosted = coreSettings.hosted;
       const selectedTranscription = matchingHostedOption(transcriptionOptions, hosted.transcriptionProvider, hosted.transcriptionModel)
         ?? transcriptionOptions.find((option) => option.provider === hosted.transcriptionProvider)
@@ -425,28 +414,35 @@ export default function App() {
 
   async function startRun() {
     if (!settings || !configPaths || !coreSettings) return;
-    await persistWorkflowSettings(false);
-    setLogs("");
-    setRunState("running");
-    setElapsedMs(0);
-    const result = await window.subtitler.startRun({
-      workflow,
-      inputPath,
-      outputPath,
-      configPath: configPaths[workflow],
-      envFile: settings.envFile,
-      audioTrack: coreSettings.audioTrack,
-      sidecarDir: settings.sidecarsEnabled ? sidecarDir : undefined,
-      sidecarsEnabled: settings.sidecarsEnabled,
-      profile: coreSettings.diagnostics.profile
-    });
-    setActiveRunId(result.runId);
+    try {
+      await persistWorkflowSettings(false);
+      setLogs("");
+      setRunState("running");
+      setElapsedMs(0);
+      const result = await window.subtitler.startRun({
+        workflow,
+        inputPath,
+        outputPath,
+        configPath: configPaths[workflow],
+        envFile: settings.envFile,
+        audioTrack: coreSettings.audioTrack,
+        sidecarDir: settings.sidecarsEnabled ? sidecarDir : undefined,
+        sidecarsEnabled: settings.sidecarsEnabled,
+        profile: coreSettings.diagnostics.profile
+      });
+      setActiveRunId(result.runId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRunState("failed");
+      setActiveRunId("");
+      setLogs(message ? `${message}\n` : "");
+      setNotice(message || "Run failed to start");
+    }
   }
 
   async function cancelRun() {
     if (!activeRunId) return;
     await window.subtitler.cancelRun(activeRunId);
-    setRunState("cancelled");
   }
 
   function handleRunEvent(event: RunEvent) {
@@ -637,34 +633,21 @@ function isHostedSelectionVerified(settings: CoreWorkflowSettings | null, verifi
   const transcription = isVerifiedHostedTranscription(
     settings.hosted.transcriptionProvider,
     settings.hosted.transcriptionModel,
+    "transcription",
     verification
   );
   const fallbackTranscription = isVerifiedHostedTranscription(
     settings.hosted.fallbackTranscriptionProvider,
     settings.hosted.fallbackTranscriptionModel,
+    "transcription",
     verification
   );
-  const cleanup = settings.hosted.cleanupProvider === "openai"
-    ? (settings.hosted.cleanupModel === "gpt-5.4-mini" ? verification.openai.cleanup : settings.hosted.cleanupModel === "gpt-5.5" && verification.openai.cleanup55)
-    : (
-      (settings.hosted.cleanupModel === "gemini-3.5-flash" && verification.gemini.cleanup)
-      || (settings.hosted.cleanupModel === "gemini-3.1-pro-preview" && verification.gemini.cleanup31Pro)
-      || (settings.hosted.cleanupModel === "gemini-3.1-flash-lite" && verification.gemini.cleanup31FlashLite)
-    );
+  const cleanup = isVerifiedHostedTranscription(settings.hosted.cleanupProvider, settings.hosted.cleanupModel, "cleanup", verification);
   return transcription && fallbackTranscription && cleanup;
 }
 
-function isVerifiedHostedTranscription(provider: "openai" | "gemini", model: string, verification: HostedModelVerification): boolean {
-  return provider === "openai"
-    ? (
-      (verification.openai.transcription && model === "gpt-4o-transcribe")
-      || (verification.openai.transcriptionMini && model === "gpt-4o-mini-transcribe")
-    )
-    : (
-      (verification.gemini.transcription && model === "gemini-3.5-flash")
-      || (verification.gemini.transcription31Pro && model === "gemini-3.1-pro-preview")
-      || (verification.gemini.transcription31FlashLite && model === "gemini-3.1-flash-lite")
-    );
+function isVerifiedHostedTranscription(provider: "openai" | "gemini", model: string, role: "transcription" | "cleanup", verification: HostedModelVerification): boolean {
+  return isHostedModelVerified(provider, model, role, verification);
 }
 
 function isHostedSelectionConfigured(settings: CoreWorkflowSettings | null, envStatus: EnvStatus): boolean {
@@ -683,18 +666,9 @@ function isHostedSelectionConfigured(settings: CoreWorkflowSettings | null, envS
 }
 
 function isApprovedHostedSelection(hosted: NonNullable<CoreWorkflowSettings["hosted"]>): boolean {
-  const approvedTranscription = hosted.transcriptionProvider === "openai"
-    ? ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
-  const approvedFallbackTranscription = hosted.fallbackTranscriptionProvider === "openai"
-    ? ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
-  const approvedCleanup = hosted.cleanupProvider === "openai"
-    ? ["gpt-5.4-mini", "gpt-5.5"]
-    : ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"];
-  return approvedTranscription.includes(hosted.transcriptionModel)
-    && approvedFallbackTranscription.includes(hosted.fallbackTranscriptionModel)
-    && approvedCleanup.includes(hosted.cleanupModel);
+  return isHostedModelApproved(hosted.transcriptionProvider, hosted.transcriptionModel, "transcription")
+    && isHostedModelApproved(hosted.fallbackTranscriptionProvider, hosted.fallbackTranscriptionModel, "transcription")
+    && isHostedModelApproved(hosted.cleanupProvider, hosted.cleanupModel, "cleanup");
 }
 
 function matchingHostedOption<T extends { provider: "openai" | "gemini"; model: string }>(

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import AlignedChunk, AlignedToken, ExoMarker, Subtitle
+from .models import AlignedChunk, AlignedToken, Subtitle
 from .profiling import (
     BoundaryTimingProfile,
     LlmSplitProfile,
@@ -252,7 +252,6 @@ def build_grouped_subtitles(
     regroup_profile_path: Path | None = None,
     llm_split_profile_path: Path | None = None,
     llm_split_console: bool = False,
-    chain_markers: list[ExoMarker] | None = None,
     subtitle_timing_profile_path: Path | None = None,
     boundary_timing_profile_path: Path | None = None,
     chain_lead_in_sec: float = 0.20,
@@ -465,9 +464,6 @@ def build_grouped_subtitles(
         _write_subtitle_timing_profile(subtitle_timing_profile_path, subtitles)
     if boundary_timing_profile_path is not None:
         write_boundary_timing_profile(boundary_timing_profile_path, boundary_rows)
-    if chain_markers is not None:
-        chain_markers.clear()
-        chain_markers.extend(_build_chain_markers_from_subtitles(subtitles))
 
     if refiner is not None:
         _refine_subtitle_text(subtitles, refiner, max(1, cleanup_window_subtitles), max(1, cleanup_workers))
@@ -725,21 +721,6 @@ def _write_subtitle_timing_profile(path: Path, subtitles: list[Subtitle]) -> Non
         )
         previous = sub
     write_subtitle_timing_profile(path, rows)
-
-
-def _build_chain_markers_from_subtitles(subtitles: list[Subtitle]) -> list[ExoMarker]:
-    markers: list[ExoMarker] = []
-    by_chain: dict[int, list[Subtitle]] = {}
-    for sub in subtitles:
-        if sub.chain_index is None:
-            continue
-        by_chain.setdefault(sub.chain_index, []).append(sub)
-    for chain_subtitles in by_chain.values():
-        if len(chain_subtitles) <= 1:
-            continue
-        ordered = sorted(chain_subtitles, key=lambda item: (item.start_time, item.end_time))
-        markers.append(ExoMarker(ordered[0].start_time, ordered[-1].end_time))
-    return markers
 
 
 def _cleanup_group_for_subtitle(subtitle: Subtitle, chain: Chain) -> int | None:

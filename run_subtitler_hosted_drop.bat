@@ -17,7 +17,7 @@ if "%~1"=="" (
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
 
 set "INPUT=%~1"
-set "OUTPUT=%~dpn1-hosted-gemini35-gpt54mini.exo"
+set "OUTPUT=%~dpn1-hosted.exo"
 
 echo Input:  %INPUT%
 echo Output: %OUTPUT%

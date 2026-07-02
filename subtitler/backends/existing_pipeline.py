@@ -217,7 +217,6 @@ class ExistingPipelineBackend:
                     temp_dir=request.temp_dir,
                     usage=self.api_usage,
                     glossary=request.glossary,
-                    max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
                 ),
                 self._build_fallback_transcriber(request),
             )
@@ -229,7 +228,6 @@ class ExistingPipelineBackend:
                     usage=self.api_usage,
                     glossary=request.glossary,
                     language=request.language,
-                    max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
                 ),
                 self._build_fallback_transcriber(request),
             )
@@ -249,7 +247,6 @@ class ExistingPipelineBackend:
                 temp_dir=request.temp_dir,
                 usage=self.api_usage,
                 glossary=request.glossary,
-                max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
                 timeout_scale=2.0,
             )
         if name == "openai":
@@ -259,7 +256,6 @@ class ExistingPipelineBackend:
                 usage=self.api_usage,
                 glossary=request.glossary,
                 language=request.language,
-                max_transcription_split_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
                 timeout_scale=2.0,
             )
         raise SubtitlerError(f"Unknown hosted fallback transcriber: {name}")
