@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld("subtitler", {
   saveGlossary: (text: string) => ipcRenderer.invoke("glossary:save", text),
   pathExists: (path: string) => ipcRenderer.invoke("path:exists", path),
   pythonReady: (path: string) => ipcRenderer.invoke("runtime:python-status", path),
+  getRuntimeSetupStatus: () => ipcRenderer.invoke("runtime:setup-status"),
+  createManagedPythonEnv: () => ipcRenderer.invoke("runtime:create-managed-python"),
+  installPythonRequirements: () => ipcRenderer.invoke("runtime:install-python-requirements"),
+  downloadManagedFfmpeg: () => ipcRenderer.invoke("runtime:download-ffmpeg"),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),
   cancelRun: (runId: string) => ipcRenderer.invoke("run:cancel", runId),
   onRunEvent: (callback: (event: RunEvent) => void) => {

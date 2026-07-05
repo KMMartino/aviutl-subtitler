@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { AudioTrackInfo, MediaAnalysis } from "../renderer/lib/types";
+import { resolveFfmpegCommand } from "./ffmpegManager";
 
 type ProbeData = {
   format?: { duration?: string; format_name?: string };
@@ -18,7 +19,7 @@ type ProbeData = {
 
 export async function analyzeMedia(inputPath: string): Promise<MediaAnalysis> {
   const data = JSON.parse(await runText(
-    "ffprobe",
+    resolveFfmpegCommand("ffprobe"),
     ["-v", "error", "-show_entries", "format=duration,format_name:stream=index,codec_type,codec_name,width,height,sample_rate,channels,channel_layout:stream_tags=language,title", "-of", "json", inputPath]
   )) as ProbeData;
   const video = (data.streams ?? []).find((stream) => stream.codec_type === "video");
@@ -48,7 +49,7 @@ export async function analyzeMedia(inputPath: string): Promise<MediaAnalysis> {
 
 function createThumbnail(inputPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("ffmpeg", [
+    const child = spawn(resolveFfmpegCommand("ffmpeg"), [
       "-v", "error", "-ss", "0", "-i", inputPath, "-map", "0:v:0",
       "-frames:v", "1", "-vf", "scale=1280:720:force_original_aspect_ratio=decrease",
       "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"

@@ -76,7 +76,6 @@ class ForcedAligner:
         self.torch_threads = torch_threads
         self.alignment_model = None
         self.alignment_tokenizer = None
-        self._load_error: Exception | None = None
         self._load_model()
 
     def _resolve_device(self) -> str:
@@ -110,18 +109,19 @@ class ForcedAligner:
                 self.device,
                 model_path=self.model_name,
             )
+        except ModuleNotFoundError as exc:
+            if exc.name == "ctc_forced_aligner":
+                raise AlignmentError(
+                    "ctc_forced_aligner is required for alignment. Install Python requirements "
+                    "from Settings or run pip install -r requirements.txt."
+                ) from exc
+            raise
         except Exception as exc:
-            self._load_error = exc
+            raise AlignmentError(f"Alignment model could not be loaded: {exc}") from exc
 
     def align(self, item: TranscriptChunk) -> AlignedChunk:
         if not item.text.strip():
             return AlignedChunk(chunk=item.chunk, text=item.text, tokens=[], fallback=False)
-        if self._load_error is not None:
-            print(
-                "Warning: alignment model could not be loaded; using proportional timing. "
-                f"{self._load_error}"
-            )
-            return proportional_alignment(item, self.language)
         if self.alignment_model is None or self.alignment_tokenizer is None:
             raise AlignmentError("Alignment model was not initialized")
 
@@ -184,6 +184,13 @@ class ForcedAligner:
                 )
             if tokens:
                 return AlignedChunk(chunk=item.chunk, text=item.text, tokens=tokens, fallback=False)
+        except ModuleNotFoundError as exc:
+            if exc.name == "ctc_forced_aligner":
+                raise AlignmentError(
+                    "ctc_forced_aligner is required for alignment. Install Python requirements "
+                    "from Settings or run pip install -r requirements.txt."
+                ) from exc
+            raise
         except Exception as exc:
             if _is_ctc_too_long_error(exc):
                 raise AlignmentTooLongError(str(exc)) from exc

@@ -158,7 +158,7 @@ or use the public override:
 
 ## Electron Frontend
 
-The frontend is a development app, not a packaged installer.
+The frontend can run as a development app or be packaged as a Windows Electron app.
 
 ```powershell
 cd frontend
@@ -192,3 +192,21 @@ CUDA 12.4: NVIDIA Windows option
 Use **Use managed server** to copy the downloaded executable path into both transcription and cleanup server fields. Existing valid manual server paths are left alone unless you explicitly switch.
 
 Experimental MTP variants are available for all three tiers. They reuse downloaded target models and add matching Q8 MTP assistant files. Use a current llama.cpp build with `draft-mtp` support.
+
+## Packaging
+
+```powershell
+cd frontend
+npm run dist:dir
+npm run dist
+```
+
+Package outputs are written under `release\` at the project root. The installer bundles the Electron app and Python backend source, but not GGUF models, llama.cpp server binaries, user API keys, or generated media/subtitle files.
+
+Installed app state is stored under the Windows app data directory, normally:
+
+```text
+%APPDATA%\AviUtl Subtitler
+```
+
+See `PACKAGING.md` for the packaged runtime layout and smoke test checklist.

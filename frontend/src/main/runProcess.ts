@@ -2,20 +2,22 @@ import { BrowserWindow } from "electron";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import type { RunEvent, RunRequest } from "../renderer/lib/types";
-import { buildRunCommand, projectRoot } from "./python";
+import { buildRunCommand } from "./python";
+import type { RuntimePaths } from "./paths";
 
 let activeRun: { runId: string; process: ChildProcessWithoutNullStreams; startedAtMs: number; cancelled: boolean } | null = null;
 
-export function startRun(window: BrowserWindow, pythonPath: string, request: RunRequest): { runId: string } {
+export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath: string, request: RunRequest): { runId: string } {
   if (activeRun) {
     throw new Error("A run is already active");
   }
   const runId = crypto.randomUUID();
   const startedAtMs = Date.now();
-  const command = buildRunCommand(projectRoot(), pythonPath, request);
+  const command = buildRunCommand(paths, pythonPath, request);
   const child = spawn(command.command, command.args, {
-    cwd: projectRoot(),
-    windowsHide: true
+    cwd: command.cwd,
+    env: command.env,
+    windowsHide: true,
   });
   activeRun = { runId, process: child, startedAtMs, cancelled: false };
   let finished = false;

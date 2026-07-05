@@ -11,7 +11,10 @@
     "start": "concurrently \"npm run dev\" \"wait-on http://127.0.0.1:5173 && npm run electron\"",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "build": "vite build && npm run clean:electron && tsc -p tsconfig.node.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dist": "npm run build && electron-builder",
+    "dist:dir": "npm run build && electron-builder --dir",
+    "pack": "npm run dist:dir"
   },
   "dependencies": {
     "extract-zip": "^2.0.1",
@@ -26,9 +29,69 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
     "electron": "^33.2.1",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
     "vitest": "^4.1.8",
     "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.kmmartino.aviutl-subtitler",
+    "productName": "AviUtl Subtitler",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../aviutl_subtitle.py",
+        "to": "app-backend/aviutl_subtitle.py"
+      },
+      {
+        "from": "../subtitler",
+        "to": "app-backend/subtitler",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc"
+        ]
+      },
+      {
+        "from": "../configs",
+        "to": "app-backend/configs"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "app-backend/requirements.txt"
+      },
+      {
+        "from": "../.env.example",
+        "to": "app-backend/.env.example"
+      },
+      {
+        "from": "../README.md",
+        "to": "app-backend/README.md"
+      },
+      {
+        "from": "../WINDOWS_SETUP.md",
+        "to": "app-backend/WINDOWS_SETUP.md"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

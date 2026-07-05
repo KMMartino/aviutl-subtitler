@@ -21,6 +21,7 @@ export type AppSettings = {
   modelsDirectory: string;
   localModelProfile: string;
   llamaBackend: LlamaBackendId;
+  ffmpegMode?: "auto" | "managed" | "path";
 };
 
 export type LlamaBackendId = "vulkan" | "cuda-12";
@@ -92,6 +93,31 @@ export type EnvStatus = {
     OPENAI_API_KEY: boolean;
     GEMINI_API_KEY: boolean;
   };
+};
+
+export type PythonRuntimeStatus = {
+  selectedPath: string;
+  resolvedPath: string;
+  source: "selected" | "managed" | "path" | "missing";
+  ready: boolean;
+  version: string;
+  venvPath: string;
+  requirementsInstalled: boolean;
+  error: string;
+};
+
+export type FfmpegStatus = {
+  source: "path" | "managed" | "missing";
+  ffmpegPath: string;
+  ffprobePath: string;
+  version: string;
+  ready: boolean;
+  error: string;
+};
+
+export type RuntimeSetupStatus = {
+  python: PythonRuntimeStatus;
+  ffmpeg: FfmpegStatus;
 };
 
 export type HostedModelVerification = {

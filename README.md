@@ -121,7 +121,7 @@ Cleanup may also write:
 
 ## Electron Frontend
 
-The Electron frontend is a dev app that manages user configs, edits core paths, streams Python logs, and opens generated outputs.
+The Electron frontend manages user configs, edits core paths, streams Python logs, and opens generated outputs. It can run in development mode or be packaged as a Windows app.
 
 ```powershell
 cd frontend
@@ -158,3 +158,13 @@ Python runtime
 The frontend can install a managed `llama-server.exe` under `.frontend-state/tools/llama`. Use **Vulkan** for AMD and broad Windows compatibility, or **CUDA 12.4** for NVIDIA. Downloading a new managed server switches the workflow to it. The app keeps the current and previous managed server builds and prunes older ones, so **Revert server** can switch back to the previous retained build. Manual server paths are still supported, and `install_vulkan_llama.ps1` remains available.
 
 Each hardware tier also has an experimental **MTP** profile. MTP profiles reuse the standard models and add small matching assistant GGUFs for llama.cpp multi-token prediction. They require a recent llama.cpp build and may not improve every workload or GPU.
+
+Packaged builds are created with:
+
+```powershell
+cd frontend
+npm run dist:dir
+npm run dist
+```
+
+Build artifacts are written under `release/` at the project root. See `PACKAGING.md` for installed runtime paths and the smoke test checklist.

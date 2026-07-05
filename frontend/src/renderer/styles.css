@@ -321,6 +321,12 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 }
 .glossary-actions { display: flex; justify-content: space-between; gap: 8px; }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+.runtime-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.runtime-line {
+  display: grid; grid-template-columns: 16px 90px minmax(0, 1fr); align-items: center; gap: 7px;
+  min-height: 30px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--soft);
+}
+.runtime-line small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 
 @media (max-height: 760px) {
   .app { padding: 12px; }

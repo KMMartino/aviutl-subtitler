@@ -1,4 +1,4 @@
-import type { AppSettings, AppState, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, RunEvent, RunRequest, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
+import type { AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
 
 export {};
 
@@ -30,6 +30,10 @@ declare global {
       saveGlossary(text: string): Promise<void>;
       pathExists(path: string): Promise<boolean>;
       pythonReady(path: string): Promise<boolean>;
+      getRuntimeSetupStatus(): Promise<RuntimeSetupStatus>;
+      createManagedPythonEnv(): Promise<PythonRuntimeStatus>;
+      installPythonRequirements(): Promise<PythonRuntimeStatus>;
+      downloadManagedFfmpeg(): Promise<FfmpegStatus>;
       startRun(request: RunRequest): Promise<{ runId: string }>;
       cancelRun(runId: string): Promise<void>;
       onRunEvent(callback: (event: RunEvent) => void): () => void;

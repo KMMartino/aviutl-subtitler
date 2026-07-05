@@ -1,7 +1,7 @@
 import { AlertTriangle, Brain, CheckCircle, ChevronDown, CircleGauge, Download, FolderOpen, Info, RefreshCw, Settings, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, WorkflowName } from "../lib/types";
+import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
 import TooltipLabel from "./TooltipLabel";
 import { hostedOptions as catalogHostedOptions, isHostedModelVerified, type HostedOption } from "../../shared/hostedModelCatalog";
@@ -28,6 +28,7 @@ type Props = {
   downloadingLlama: boolean;
   pythonPath: string;
   pythonReady: boolean;
+  runtimeStatus: RuntimeSetupStatus | null;
   sidecarsEnabled: boolean;
   sidecarDir: string;
   onChange(settings: CoreWorkflowSettings): void;
@@ -44,9 +45,13 @@ type Props = {
   onDownloadLlama(): void;
   onUseManagedLlama(path: string): void;
   onRevertManagedLlama(path: string): void;
+  onRefreshRuntime(): void;
+  onCreateManagedPython(): void;
+  onInstallPythonRequirements(): void;
+  onDownloadFfmpeg(): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onUseManagedLlama, onRevertManagedLlama }: Props) {
+export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDownloadFfmpeg }: Props) {
   const local = settings.local ?? { model: "", mmproj: "", llamaServer: "", cleanupModel: "", cleanupLlamaServer: "", transcriptionDraftModel: "", cleanupDraftModel: "" };
   const hosted = settings.hosted ?? {
     transcriptionProvider: "gemini",
@@ -61,9 +66,11 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   const selectedLocalProfileInstalled = Boolean(localModelStatus?.installed);
   const [localModelExpanded, setLocalModelExpanded] = useState(true);
   const [pythonExpanded, setPythonExpanded] = useState(!pythonReady);
+  const [ffmpegExpanded, setFfmpegExpanded] = useState(!runtimeStatus?.ffmpeg.ready);
   const [serverExpanded, setServerExpanded] = useState(!pathStatus.llamaServer?.exists);
   useEffect(() => setLocalModelExpanded(!anyLocalProfileInstalled), [anyLocalProfileInstalled]);
   useEffect(() => setPythonExpanded(!pythonReady), [pythonReady]);
+  useEffect(() => setFfmpegExpanded(!runtimeStatus?.ffmpeg.ready), [runtimeStatus?.ffmpeg.ready]);
   useEffect(() => setServerExpanded(!pathStatus.llamaServer?.exists), [pathStatus.llamaServer?.exists]);
   function setCost(key: keyof NonNullable<CoreWorkflowSettings["cost"]>, value: number | boolean) {
     onChange({ ...settings, cost: { maxEstimatedApiCostUsd: 5, allowApiSpend: false, estimateCostOnly: false, ...settings.cost, [key]: value } });
@@ -176,7 +183,7 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
       )}
       <SetupSection
         title="Python runtime"
-        detail={pythonReady ? "Runtime responds to --version" : "Choose a Python runtime"}
+        detail={runtimeStatus?.python.ready ? `${runtimeStatus.python.source} · ${runtimeStatus.python.version}` : "Choose or create a Python runtime"}
         ready={pythonReady}
         expanded={pythonExpanded}
         onToggle={() => setPythonExpanded((value) => !value)}
@@ -191,6 +198,29 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           readyText="Runtime ready"
           missingText="Runtime not ready"
         />
+        <div className="runtime-actions">
+          <button onClick={onRefreshRuntime}><RefreshCw size={16} /> Refresh runtime</button>
+          <button onClick={onCreateManagedPython}><Download size={16} /> Create managed env</button>
+          <button onClick={onInstallPythonRequirements} disabled={!runtimeStatus?.python.ready}><Download size={16} /> Install requirements</button>
+        </div>
+        <RuntimeLine label="Resolved" value={runtimeStatus?.python.resolvedPath || "Not found"} ok={Boolean(runtimeStatus?.python.ready)} />
+        <RuntimeLine label="Requirements" value={runtimeStatus?.python.requirementsInstalled ? "Installed" : "Missing ctc_forced_aligner"} ok={Boolean(runtimeStatus?.python.requirementsInstalled)} />
+        {runtimeStatus?.python.error && <div className="disabled-field">{runtimeStatus.python.error}</div>}
+      </SetupSection>
+      <SetupSection
+        title="FFmpeg"
+        detail={runtimeStatus?.ffmpeg.ready ? `${runtimeStatus.ffmpeg.source} · ${runtimeStatus.ffmpeg.version}` : "Install FFmpeg or use managed download"}
+        ready={Boolean(runtimeStatus?.ffmpeg.ready)}
+        expanded={ffmpegExpanded}
+        onToggle={() => setFfmpegExpanded((value) => !value)}
+      >
+        <div className="runtime-actions">
+          <button onClick={onRefreshRuntime}><RefreshCw size={16} /> Refresh FFmpeg</button>
+          <button onClick={onDownloadFfmpeg}><Download size={16} /> Download FFmpeg</button>
+        </div>
+        <RuntimeLine label="ffmpeg" value={runtimeStatus?.ffmpeg.ffmpegPath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
+        <RuntimeLine label="ffprobe" value={runtimeStatus?.ffmpeg.ffprobePath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
+        {runtimeStatus?.ffmpeg.error && <div className="disabled-field">{runtimeStatus.ffmpeg.error}</div>}
       </SetupSection>
       {isHostedWorkflow(workflow) && (
         <div className="stack">
@@ -310,6 +340,16 @@ function SetupSection({ title, detail, ready, expanded, onToggle, children }: {
 
 function ManagedFile({ label, file }: { label: string; file: { path: string; exists: boolean } }) {
   return <div title={file.path}>{file.exists ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}<span>{label}</span></div>;
+}
+
+function RuntimeLine({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div className="runtime-line">
+      {ok ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
+      <span>{label}</span>
+      <small title={value}>{value}</small>
+    </div>
+  );
 }
 
 function ManagedServerInstall({ backends, selectedBackend, release, status, currentState, downloading, currentServerValid, onBackend, onCheck, onDownload, onUse, onRevert }: {

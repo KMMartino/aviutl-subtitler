@@ -2,97 +2,100 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, AppState, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { workflows } from "../renderer/lib/workflowLabels";
-import { defaultPythonPath, projectRoot } from "./python";
+import { defaultPythonPath } from "./python";
+import { runtimePaths, type RuntimePaths } from "./paths";
 
-const stateDirName = ".frontend-state";
-
-export function stateRoot(root = projectRoot()): string {
-  return path.join(root, stateDirName);
+export function stateRoot(paths = runtimePaths()): string {
+  return paths.stateRoot;
 }
 
-export function configsRoot(root = projectRoot()): string {
-  return path.join(stateRoot(root), "configs");
+export function configsRoot(paths = runtimePaths()): string {
+  return paths.userConfigRoot;
 }
 
-export function settingsPath(root = projectRoot()): string {
-  return path.join(stateRoot(root), "settings.json");
+export function settingsPath(paths = runtimePaths()): string {
+  return path.join(paths.stateRoot, "settings.json");
 }
 
-export function defaultSettings(root = projectRoot()): AppSettings {
+export function defaultSettings(paths = runtimePaths()): AppSettings {
   return {
-    pythonPath: defaultPythonPath(root),
-    envFile: path.join(root, ".env"),
+    pythonPath: defaultPythonPath(paths),
+    envFile: paths.envFile,
     lastInputPath: "",
     lastOutputDir: "",
     lastSidecarDir: "",
     selectedWorkflow: "local",
     sidecarsEnabled: true,
     theme: "graphite",
-    modelsDirectory: path.join(root, ".frontend-state", "models"),
+    modelsDirectory: paths.userModelsRoot,
     localModelProfile: "16gb-gpu-gemma",
-    llamaBackend: "vulkan"
+    llamaBackend: "vulkan",
+    ffmpegMode: "auto",
   };
 }
 
-export function ensureFrontendState(root = projectRoot()): void {
-  fs.mkdirSync(configsRoot(root), { recursive: true });
+export function ensureFrontendState(paths = runtimePaths()): void {
+  fs.mkdirSync(configsRoot(paths), { recursive: true });
+  if (!fs.existsSync(paths.envFile)) {
+    fs.writeFileSync(paths.envFile, "", "utf8");
+  }
   for (const workflow of workflows) {
-    const userPath = workflowConfigPath(workflow, root);
+    const userPath = workflowConfigPath(workflow, paths);
     if (!fs.existsSync(userPath)) {
-      fs.copyFileSync(path.join(root, "configs", `${workflow}.json`), userPath);
+      fs.copyFileSync(path.join(paths.bundledConfigRoot, `${workflow}.json`), userPath);
     }
   }
-  if (!fs.existsSync(settingsPath(root))) {
-    writeJson(settingsPath(root), defaultSettings(root));
+  if (!fs.existsSync(settingsPath(paths))) {
+    writeJson(settingsPath(paths), defaultSettings(paths));
   }
 }
 
-export function loadAppState(root = projectRoot()): AppState {
-  ensureFrontendState(root);
-  const settings = { ...defaultSettings(root), ...readJson<AppSettings>(settingsPath(root)) };
+export function loadAppState(paths = runtimePaths()): AppState {
+  ensureFrontendState(paths);
+  const settings = { ...defaultSettings(paths), ...readJson<AppSettings>(settingsPath(paths)) };
   if (settings.localModelProfile === "14gb-gpu-gemma") {
     settings.localModelProfile = "12gb-gpu-gemma";
-    writeJson(settingsPath(root), settings);
+    writeJson(settingsPath(paths), settings);
   }
   const configs = Object.fromEntries(
-    workflows.map((workflow) => [workflow, readWorkflowConfig(workflow, root)])
+    workflows.map((workflow) => [workflow, readWorkflowConfig(workflow, paths)])
   ) as Record<WorkflowName, WorkflowConfig>;
   const configPaths = Object.fromEntries(
-    workflows.map((workflow) => [workflow, workflowConfigPath(workflow, root)])
+    workflows.map((workflow) => [workflow, workflowConfigPath(workflow, paths)])
   ) as Record<WorkflowName, string>;
-  return { settings, configs, configPaths, projectRoot: root };
+  return { settings, configs, configPaths, projectRoot: paths.appResourceRoot };
 }
 
-export function saveAppSettings(settings: AppSettings, root = projectRoot()): void {
-  ensureFrontendState(root);
-  writeJson(settingsPath(root), settings);
+export function saveAppSettings(settings: AppSettings, paths = runtimePaths()): void {
+  ensureFrontendState(paths);
+  writeJson(settingsPath(paths), settings);
 }
 
-export function workflowConfigPath(workflow: WorkflowName, root = projectRoot()): string {
-  return path.join(configsRoot(root), `${workflow}.json`);
+export function workflowConfigPath(workflow: WorkflowName, paths = runtimePaths()): string {
+  return path.join(configsRoot(paths), `${workflow}.json`);
 }
 
-export function readWorkflowConfig(workflow: WorkflowName, root = projectRoot()): WorkflowConfig {
-  ensureFrontendState(root);
-  return readJson<WorkflowConfig>(workflowConfigPath(workflow, root));
+export function readWorkflowConfig(workflow: WorkflowName, paths = runtimePaths()): WorkflowConfig {
+  ensureFrontendState(paths);
+  return readJson<WorkflowConfig>(workflowConfigPath(workflow, paths));
 }
 
-export function saveWorkflowConfig(workflow: WorkflowName, config: WorkflowConfig, root = projectRoot()): void {
-  ensureFrontendState(root);
-  writeJson(workflowConfigPath(workflow, root), config);
+export function saveWorkflowConfig(workflow: WorkflowName, config: WorkflowConfig, paths = runtimePaths()): void {
+  ensureFrontendState(paths);
+  writeJson(workflowConfigPath(workflow, paths), config);
 }
 
-export function glossaryPath(root = projectRoot()): string {
-  return path.join(root, "glossary.txt");
+export function glossaryPath(paths = runtimePaths()): string {
+  return paths.glossaryFile;
 }
 
-export function readGlossary(root = projectRoot()): string {
-  const file = glossaryPath(root);
+export function readGlossary(paths = runtimePaths()): string {
+  const file = glossaryPath(paths);
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
 }
 
-export function saveGlossary(text: string, root = projectRoot()): void {
-  fs.writeFileSync(glossaryPath(root), text, "utf8");
+export function saveGlossary(text: string, paths = runtimePaths()): void {
+  fs.writeFileSync(glossaryPath(paths), text, "utf8");
 }
 
 function readJson<T>(file: string): T {

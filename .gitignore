@@ -62,6 +62,8 @@ testing-grounds/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-electron/
+frontend/release/
+release/
 frontend/.vite/
 frontend/.start-smoke.*.log
 Thumbs.db

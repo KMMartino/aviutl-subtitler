@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from subtitler.aligner import ctc_language_code, is_japanese_language, proportional_alignment
+from subtitler.aligner import ForcedAligner, ctc_language_code, is_japanese_language, proportional_alignment
+from subtitler.errors import AlignmentError
 from subtitler.models import AudioChunk, TranscriptChunk
 
 
@@ -25,6 +28,24 @@ class AlignmentLanguageTests(unittest.TestCase):
             self.assertTrue(is_japanese_language(language))
             self.assertEqual([token.text for token in aligned.tokens], ["あ", "い", "う"])
             self.assertTrue(all(token.kind == "char" for token in aligned.tokens))
+
+    def test_missing_ctc_aligner_fails_instead_of_falling_back(self):
+        def fail_ctc_import(name, *args, **kwargs):
+            if name == "ctc_forced_aligner":
+                raise ModuleNotFoundError("No module named 'ctc_forced_aligner'", name="ctc_forced_aligner")
+            return original_import(name, *args, **kwargs)
+
+        original_import = __import__
+        with patch("builtins.__import__", side_effect=fail_ctc_import):
+            with self.assertRaisesRegex(AlignmentError, "ctc_forced_aligner is required"):
+                ForcedAligner(
+                    model_name="unused",
+                    language="eng",
+                    device="cpu",
+                    split_size="word",
+                    temp_dir=Path("."),
+                    sample_rate=16000,
+                )
 
 
 @unittest.skipIf(preprocess_text is None, "ctc_forced_aligner is not installed")

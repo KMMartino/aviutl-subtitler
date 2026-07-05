@@ -1,18 +1,21 @@
 import path from "node:path";
 import fs from "node:fs";
 import type { RunRequest } from "../renderer/lib/types";
+import type { RuntimePaths } from "./paths";
+import { managedFfmpegBinDir } from "./ffmpegManager";
 
-export function projectRoot(): string {
-  return path.resolve(__dirname, "..", "..", "..");
+export function defaultPythonPath(paths: RuntimePaths): string {
+  const venvPython = path.join(paths.appResourceRoot, ".venv-win", "Scripts", "python.exe");
+  return fs.existsSync(venvPython) ? venvPython : "";
 }
 
-export function defaultPythonPath(root = projectRoot()): string {
-  const venvPython = path.join(root, ".venv-win", "Scripts", "python.exe");
-  return fs.existsSync(venvPython) ? venvPython : "python";
-}
-
-export function buildRunCommand(root: string, pythonPath: string, request: RunRequest): { command: string; args: string[]; preview: string } {
-  const script = path.join(root, "aviutl_subtitle.py");
+export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request: RunRequest): { command: string; args: string[]; preview: string; cwd: string; env: NodeJS.ProcessEnv } {
+  const script = path.join(paths.bundledBackendRoot, "aviutl_subtitle.py");
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUTF8: "1" };
+  const ffmpegBin = managedFfmpegBinDir(paths);
+  if (ffmpegBin) {
+    env.PATH = `${ffmpegBin}${path.delimiter}${env.PATH ?? ""}`;
+  }
   const args = [
     script,
     request.inputPath,
@@ -40,7 +43,9 @@ export function buildRunCommand(root: string, pythonPath: string, request: RunRe
   return {
     command: pythonPath,
     args,
-    preview: [pythonPath, ...args].map(quoteArg).join(" ")
+    preview: [pythonPath, ...args].map(quoteArg).join(" "),
+    cwd: paths.bundledBackendRoot,
+    env,
   };
 }
 

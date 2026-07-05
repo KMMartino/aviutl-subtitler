@@ -11,7 +11,7 @@ import OutputPanel from "./components/OutputPanel";
 import TooltipLabel from "./components/TooltipLabel";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, WorkflowConfig, WorkflowName } from "./lib/types";
+import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
 import { isHostedModelApproved, isHostedModelVerified, verifiedHostedOptions } from "../shared/hostedModelCatalog";
 
@@ -38,6 +38,7 @@ export default function App() {
   const [managedLlamaStatus, setManagedLlamaStatus] = useState<ManagedLlamaStatus | null>(null);
   const [currentLlamaState, setCurrentLlamaState] = useState<CurrentLlamaServerState | null>(null);
   const [downloadingLlama, setDownloadingLlama] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSetupStatus | null>(null);
   const [pythonReady, setPythonReady] = useState(false);
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
@@ -57,7 +58,9 @@ export default function App() {
   const workflow = settings?.selectedWorkflow ?? "local";
   const hostedReady = !isHostedWorkflow(workflow) || isHostedSelectionVerified(coreSettings, hostedVerification) || isHostedSelectionConfigured(coreSettings, envStatus);
   const localReady = !isLocalWorkflow(workflow) || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
-  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && hostedReady && localReady);
+  const ffmpegReady = Boolean(runtimeStatus?.ffmpeg.ready);
+  const pythonRequirementsReady = Boolean(runtimeStatus?.python.requirementsInstalled);
+  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && hostedReady && localReady);
 
   useEffect(() => {
     void loadInitialState();
@@ -122,8 +125,8 @@ export default function App() {
   useEffect(() => {
     if (!settings) return;
     let cancelled = false;
-    void window.subtitler.pythonReady(settings.pythonPath).then((ready) => {
-      if (!cancelled) setPythonReady(ready);
+    void refreshRuntimeStatus().then((status) => {
+      if (!cancelled && status) setPythonReady(status.python.ready && status.python.requirementsInstalled);
     });
     return () => {
       cancelled = true;
@@ -360,6 +363,51 @@ export default function App() {
     setManagedLlamaStatus(status);
   }
 
+  async function refreshRuntimeStatus() {
+    try {
+      const status = await window.subtitler.getRuntimeSetupStatus();
+      setRuntimeStatus(status);
+      setPythonReady(status.python.ready && status.python.requirementsInstalled);
+      return status;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+  async function createManagedPythonEnv() {
+    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ managed Python setup\n`);
+    try {
+      await window.subtitler.createManagedPythonEnv();
+      await refreshRuntimeStatus();
+      setNotice("Managed Python env created");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function installPythonRequirements() {
+    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Python requirements install\n`);
+    try {
+      await window.subtitler.installPythonRequirements();
+      await refreshRuntimeStatus();
+      setNotice("Python requirements installed");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function downloadFfmpeg() {
+    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ FFmpeg download\n`);
+    try {
+      await window.subtitler.downloadManagedFfmpeg();
+      await refreshRuntimeStatus();
+      setNotice("FFmpeg downloaded");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function checkLlamaRelease() {
     setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ llama.cpp server release check\n`);
     try {
@@ -545,6 +593,7 @@ export default function App() {
             downloadingLlama={downloadingLlama}
             pythonPath={settings.pythonPath}
             pythonReady={pythonReady}
+            runtimeStatus={runtimeStatus}
             sidecarsEnabled={settings.sidecarsEnabled}
             sidecarDir={sidecarDir}
             onChange={setCoreSettings}
@@ -583,6 +632,10 @@ export default function App() {
             onDownloadLlama={downloadLlama}
             onUseManagedLlama={useManagedLlama}
             onRevertManagedLlama={(path) => useManagedLlama(path)}
+            onRefreshRuntime={refreshRuntimeStatus}
+            onCreateManagedPython={createManagedPythonEnv}
+            onInstallPythonRequirements={installPythonRequirements}
+            onDownloadFfmpeg={downloadFfmpeg}
           />
         </div>
       ) : (
