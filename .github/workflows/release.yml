@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows distributables
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: frontend
+        run: npm test -- --run
+
+      - name: Build installer and portable app
+        working-directory: frontend
+        run: npm run dist
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $package = Get-Content "frontend/package.json" -Raw | ConvertFrom-Json
+          $version = $package.version
+          $releaseDir = Join-Path $PWD "release"
+          $installer = Join-Path $releaseDir "AviUtl Subtitler Setup $version.exe"
+          $portable = Join-Path $releaseDir "AviUtl Subtitler $version.exe"
+
+          if (!(Test-Path $installer)) {
+            throw "Installer artifact not found: $installer"
+          }
+          if (!(Test-Path $portable)) {
+            throw "Portable artifact not found: $portable"
+          }
+
+          $notes = @"
+          Windows distributables for AviUtl Subtitler $version.
+
+          Files:
+          - AviUtl Subtitler Setup $version.exe: installer version. Installs per-user and adds a Windows uninstall entry.
+          - AviUtl Subtitler $version.exe: portable version. Runs without installation.
+
+          The installer and portable app do not include large model files, llama.cpp server binaries, Python, FFmpeg, or user secrets. Those are managed from inside the app.
+          "@
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          Set-Content -Path $notesPath -Value $notes -Encoding UTF8
+
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $installer $portable --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $installer $portable --title "AviUtl Subtitler $env:RELEASE_TAG" --notes-file $notesPath
+          }

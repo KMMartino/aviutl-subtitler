@@ -1,8 +1,14 @@
 {
   "name": "subtitler-frontend",
   "version": "0.1.0",
-  "private": true,
   "description": "Electron frontend for the four-workflow subtitler",
+  "author": "Kai Martino",
+  "license": "SEE LICENSE IN ../LICENSE.txt",
+  "homepage": "https://github.com/KMMartino/aviutl-subtitler",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KMMartino/aviutl-subtitler.git"
+  },
   "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -79,6 +85,10 @@
       {
         "from": "../WINDOWS_SETUP.md",
         "to": "app-backend/WINDOWS_SETUP.md"
+      },
+      {
+        "from": "../LICENSE.txt",
+        "to": "app-backend/LICENSE.txt"
       }
     ],
     "win": {

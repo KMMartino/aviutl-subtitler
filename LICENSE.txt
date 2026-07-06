@@ -1,0 +1,45 @@
+AviUtl Subtitler Custom License
+
+Copyright (c) 2026 Kai Martino.
+
+Permission is granted to use AviUtl Subtitler for personal and commercial
+purposes, free of charge, subject to the terms below.
+
+Use
+----
+You may run and use the software for personal, hobby, educational,
+non-commercial, ad-supported, and commercial projects.
+
+Attribution
+-----------
+Attribution is appreciated for personal, hobby, educational, non-commercial,
+and ad-supported use.
+
+Attribution is required for commercial use of the software or for commercial
+projects that incorporate, bundle, automate, modify, or materially rely on the
+software.
+
+Redistribution
+--------------
+Do not mirror or redistribute unmodified official installers, portable builds,
+application bundles, or source archives. Link to the official project page or
+official release page instead.
+
+You may redistribute modified versions, forks, integrations, wrappers,
+plugins, or larger works that include or build on this software, including for
+commercial purposes, provided that:
+
+1. You give clear credit to "AviUtl Subtitler" and Kai Martino.
+2. You identify that your version or larger work is not the official release,
+   unless it has been explicitly approved by Kai Martino.
+3. You preserve this license notice in redistributed source code or in a
+   reasonable notice file accompanying redistributed binaries.
+
+No Warranty
+-----------
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
