@@ -210,11 +210,14 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .local-blocking-alert > span { display: grid; gap: 3px; }
 .local-blocking-alert strong { font-size: 14px; }
 .local-blocking-alert small { color: inherit; line-height: 1.4; }
-.setup-section { display: grid; gap: 8px; }
+.setup-section {
+  display: grid; gap: 0; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--soft);
+}
 .setup-summary {
   width: 100%; min-height: 48px; justify-content: space-between; padding: 8px 10px; text-align: left;
   display: flex; align-items: center; gap: 10px;
-  border: 1px solid var(--border); border-radius: 6px; background: var(--soft);
+  border: 0; border-radius: 0; background: transparent;
 }
 .setup-summary:hover:not(:disabled) { background: var(--secondary); }
 .setup-summary > span:first-child { display: grid; gap: 2px; min-width: 0; }
@@ -224,9 +227,9 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .chevron-open { transform: rotate(180deg); }
 .setup-content-outer {
   display: grid; grid-template-rows: 0fr; opacity: 0;
-  transition: grid-template-rows .18s ease, opacity .14s ease, padding-top .18s ease;
+  transition: grid-template-rows .18s ease, opacity .14s ease, padding .18s ease;
 }
-.setup-content-outer.expanded { grid-template-rows: 1fr; opacity: 1; padding-top: 2px; }
+.setup-content-outer.expanded { grid-template-rows: 1fr; opacity: 1; padding: 0 10px 10px; }
 .setup-content {
   min-height: 0; overflow: hidden;
   transform: translateY(-4px);
@@ -324,9 +327,15 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .runtime-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .runtime-line {
   display: grid; grid-template-columns: 16px 90px minmax(0, 1fr); align-items: center; gap: 7px;
-  min-height: 30px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--soft);
+  min-height: 30px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--control);
 }
 .runtime-line small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.runtime-feedback {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 30px; padding: 6px 8px; border-radius: 6px; font-size: 12px;
+}
+.runtime-feedback.ok { background: var(--success-bg); color: var(--success); }
+.runtime-feedback.error { background: var(--danger-bg); color: var(--danger); }
 
 @media (max-height: 760px) {
   .app { padding: 12px; }

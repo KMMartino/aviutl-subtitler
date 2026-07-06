@@ -1,6 +1,14 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { LOCAL_PROFILES, localModelPaths } from "./localModels";
+import { afterEach, describe, expect, it } from "vitest";
+import { deleteManagedLocalProfile, LOCAL_PROFILES, localModelPaths } from "./localModels";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
 
 describe("local model catalog", () => {
   it("defines the fixed 16 GB profile", () => {
@@ -35,4 +43,46 @@ describe("local model catalog", () => {
       expect(file.startsWith(root)).toBe(true);
     }
   });
+
+  it("deletes only app-managed model profile files", () => {
+    const root = makeTempRoot();
+    const managed = path.join(root, "managed-models");
+    const manual = path.join(root, "manual-models");
+    const managedPaths = localModelPaths(managed, "8gb-gpu-gemma");
+    const manualPaths = localModelPaths(manual, "8gb-gpu-gemma");
+    for (const file of Object.values(managedPaths).filter(Boolean)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "managed");
+    }
+    for (const file of Object.values(manualPaths).filter(Boolean)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "manual");
+    }
+
+    const status = deleteManagedLocalProfile(managed, "8gb-gpu-gemma", managed);
+
+    expect(status.installed).toBe(false);
+    expect(Object.values(managedPaths).filter(Boolean).some((file) => fs.existsSync(file))).toBe(false);
+    expect(Object.values(manualPaths).filter(Boolean).every((file) => fs.existsSync(file))).toBe(true);
+  });
+
+  it("refuses to delete local model files from a user-selected directory", () => {
+    const root = makeTempRoot();
+    const managed = path.join(root, "managed-models");
+    const manual = path.join(root, "manual-models");
+    const manualPaths = localModelPaths(manual, "8gb-gpu-gemma");
+    for (const file of Object.values(manualPaths).filter(Boolean)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, "manual");
+    }
+
+    expect(() => deleteManagedLocalProfile(manual, "8gb-gpu-gemma", managed)).toThrow(/outside the app-managed models directory/);
+    expect(Object.values(manualPaths).filter(Boolean).every((file) => fs.existsSync(file))).toBe(true);
+  });
 });
+
+function makeTempRoot(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "subtitler-models-"));
+  roots.push(root);
+  return root;
+}

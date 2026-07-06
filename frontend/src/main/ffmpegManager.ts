@@ -12,6 +12,7 @@ export type FfmpegStatus = {
   ffprobePath: string;
   version: string;
   ready: boolean;
+  managedInstalled: boolean;
   error: string;
 };
 
@@ -19,11 +20,12 @@ const ffmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentia
 
 export async function getFfmpegStatus(paths = runtimePaths()): Promise<FfmpegStatus> {
   const pathStatus = await pathFfmpegStatus();
-  if (pathStatus.ready) return pathStatus;
   const managed = managedFfmpegPaths(paths);
+  const managedInstalled = Boolean(managed.ffmpegPath && managed.ffprobePath);
+  if (pathStatus.ready) return { ...pathStatus, managedInstalled };
   if (managed.ffmpegPath && managed.ffprobePath) {
     const version = await commandVersion(managed.ffmpegPath).catch((error) => String(error));
-    return { source: "managed", ...managed, version: firstLine(version), ready: true, error: "" };
+    return { source: "managed", ...managed, version: firstLine(version), ready: true, managedInstalled, error: "" };
   }
   return {
     source: "missing",
@@ -31,6 +33,7 @@ export async function getFfmpegStatus(paths = runtimePaths()): Promise<FfmpegSta
     ffprobePath: "",
     version: "",
     ready: false,
+    managedInstalled,
     error: pathStatus.error || "FFmpeg and ffprobe were not found on PATH or in the managed tools directory.",
   };
 }
@@ -67,6 +70,12 @@ export async function downloadManagedFfmpeg(onLog: (text: string) => void = () =
   return status;
 }
 
+export async function deleteManagedFfmpeg(paths = runtimePaths()): Promise<FfmpegStatus> {
+  if (!isWithin(paths.userToolsRoot, paths.managedFfmpegRoot)) throw new Error("Refusing to delete FFmpeg outside the managed app tools directory.");
+  fs.rmSync(paths.managedFfmpegRoot, { recursive: true, force: true });
+  return getFfmpegStatus(paths);
+}
+
 export function resolveFfmpegCommand(binary: "ffmpeg" | "ffprobe", paths = runtimePaths()): string {
   if (commandExists("ffmpeg") && commandExists("ffprobe")) return binary;
   const managed = managedFfmpegPaths(paths);
@@ -89,9 +98,9 @@ function managedFfmpegPaths(paths: RuntimePaths): { ffmpegPath: string; ffprobeP
 async function pathFfmpegStatus(): Promise<FfmpegStatus> {
   try {
     const [ffmpegVersion] = await Promise.all([commandVersion("ffmpeg"), commandVersion("ffprobe")]);
-    return { source: "path", ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", version: firstLine(ffmpegVersion), ready: true, error: "" };
+    return { source: "path", ffmpegPath: "ffmpeg", ffprobePath: "ffprobe", version: firstLine(ffmpegVersion), ready: true, managedInstalled: false, error: "" };
   } catch (error) {
-    return { source: "missing", ffmpegPath: "", ffprobePath: "", version: "", ready: false, error: error instanceof Error ? error.message : String(error) };
+    return { source: "missing", ffmpegPath: "", ffprobePath: "", version: "", ready: false, managedInstalled: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -128,4 +137,9 @@ function findExecutable(root: string, name: string): string {
 
 function firstLine(value: string): string {
   return value.split(/\r?\n/).find(Boolean) ?? "";
+}
+
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }

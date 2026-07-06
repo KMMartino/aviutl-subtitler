@@ -1,4 +1,4 @@
-import type { AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
+import type { AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
 
 export {};
 
@@ -20,12 +20,16 @@ declare global {
       verifyHostedModels(envFile: string): Promise<HostedModelVerification>;
       listLocalProfiles(): Promise<LocalModelProfile[]>;
       getLocalModelStatus(modelsDirectory: string, profileId: string): Promise<LocalModelStatus>;
-      downloadLocalProfile(modelsDirectory: string, profileId: string): Promise<LocalModelStatus>;
+      downloadLocalProfile(modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface"): Promise<LocalModelStatus>;
+      deleteManagedLocalProfile(modelsDirectory: string, profileId: string): Promise<LocalModelStatus>;
+      getHuggingFaceDownloaderStatus(): Promise<HuggingFaceDownloaderStatus>;
+      installHuggingFaceDownloader(): Promise<HuggingFaceDownloaderStatus>;
       listLlamaBackends(): Promise<LlamaBackendOption[]>;
       checkLatestLlamaRelease(): Promise<LlamaReleaseCheck>;
       getManagedLlamaStatus(backend: LlamaBackendId, releaseTag?: string): Promise<ManagedLlamaStatus>;
       getCurrentLlamaServerState(serverPath: string): Promise<CurrentLlamaServerState>;
       downloadManagedLlamaServer(backend: LlamaBackendId): Promise<ManagedLlamaStatus>;
+      deleteManagedLlamaServer(backend: LlamaBackendId): Promise<ManagedLlamaStatus>;
       readGlossary(): Promise<string>;
       saveGlossary(text: string): Promise<void>;
       pathExists(path: string): Promise<boolean>;
@@ -33,7 +37,9 @@ declare global {
       getRuntimeSetupStatus(): Promise<RuntimeSetupStatus>;
       createManagedPythonEnv(): Promise<PythonRuntimeStatus>;
       installPythonRequirements(): Promise<PythonRuntimeStatus>;
+      deleteManagedPythonEnv(): Promise<PythonRuntimeStatus>;
       downloadManagedFfmpeg(): Promise<FfmpegStatus>;
+      deleteManagedFfmpeg(): Promise<FfmpegStatus>;
       startRun(request: RunRequest): Promise<{ runId: string }>;
       cancelRun(runId: string): Promise<void>;
       onRunEvent(callback: (event: RunEvent) => void): () => void;

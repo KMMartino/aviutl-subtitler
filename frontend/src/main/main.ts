@@ -16,11 +16,11 @@ import {
 import { cancelRun, startRun } from "./runProcess";
 import { analyzeMedia } from "./mediaAnalyzer";
 import { verifyHostedModels } from "./hostedModels";
-import { downloadLocalProfile, listLocalProfiles, localModelStatus } from "./localModels";
-import { checkLatestLlamaRelease, downloadManagedLlamaServer, getCurrentLlamaServerState, getManagedLlamaStatus, listLlamaBackends } from "./llamaServerManager";
+import { deleteManagedLocalProfile, downloadLocalProfile, getHuggingFaceDownloaderStatus, installHuggingFaceDownloader, listLocalProfiles, localModelStatus } from "./localModels";
+import { checkLatestLlamaRelease, deleteManagedLlamaBackend, downloadManagedLlamaServer, getCurrentLlamaServerState, getManagedLlamaStatus, listLlamaBackends } from "./llamaServerManager";
 import { runtimePaths } from "./paths";
-import { createManagedPythonEnv, getPythonRuntimeStatus, installPythonRequirements } from "./pythonRuntime";
-import { downloadManagedFfmpeg, getFfmpegStatus } from "./ffmpegManager";
+import { createManagedPythonEnv, deleteManagedPythonEnv, getPythonRuntimeStatus, installPythonRequirements } from "./pythonRuntime";
+import { deleteManagedFfmpeg, downloadManagedFfmpeg, getFfmpegStatus } from "./ffmpegManager";
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -78,9 +78,14 @@ function registerIpc(): void {
   ipcMain.handle("env:status", (_event, envFile: string) => getEnvStatus(envFile));
   ipcMain.handle("env:verify-hosted-models", (_event, envFile: string) => verifyHostedModels(envFile));
   ipcMain.handle("local-models:list", () => listLocalProfiles());
-  ipcMain.handle("local-models:status", (_event, modelsDirectory: string, profileId: string) => localModelStatus(modelsDirectory, profileId));
-  ipcMain.handle("local-models:download", (_event, modelsDirectory: string, profileId: string) => downloadLocalProfile(modelsDirectory, profileId, (text) => {
+  ipcMain.handle("local-models:status", (_event, modelsDirectory: string, profileId: string) => localModelStatus(modelsDirectory, profileId, paths().userModelsRoot));
+  ipcMain.handle("local-models:download", (_event, modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface") => downloadLocalProfile(modelsDirectory, profileId, (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "local-model-download", text });
+  }, paths().userModelsRoot, mode ?? "direct", paths()));
+  ipcMain.handle("local-models:delete-managed", (_event, modelsDirectory: string, profileId: string) => deleteManagedLocalProfile(modelsDirectory, profileId, paths().userModelsRoot));
+  ipcMain.handle("local-models:hf-downloader-status", () => getHuggingFaceDownloaderStatus(paths()));
+  ipcMain.handle("local-models:install-hf-downloader", () => installHuggingFaceDownloader(paths(), (text) => {
+    requireWindow().webContents.send("run:event", { type: "stdout", runId: "hf-downloader-install", text });
   }));
   ipcMain.handle("llama:list-backends", () => listLlamaBackends());
   ipcMain.handle("llama:check-latest", () => checkLatestLlamaRelease());
@@ -89,6 +94,7 @@ function registerIpc(): void {
   ipcMain.handle("llama:download", (_event, backend) => downloadManagedLlamaServer(paths().stateRoot, backend, (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "llama-server-download", text });
   }));
+  ipcMain.handle("llama:delete-managed", (_event, backend) => deleteManagedLlamaBackend(paths().stateRoot, backend));
   ipcMain.handle("glossary:read", () => readGlossary());
   ipcMain.handle("glossary:save", (_event, text: string) => saveGlossary(text));
   ipcMain.handle("path:exists", (_event, value: string) => Boolean(value && fs.existsSync(value)));
@@ -107,9 +113,11 @@ function registerIpc(): void {
   ipcMain.handle("runtime:install-python-requirements", () => installPythonRequirements((text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "python-runtime", text });
   }));
+  ipcMain.handle("runtime:delete-managed-python", () => deleteManagedPythonEnv());
   ipcMain.handle("runtime:download-ffmpeg", () => downloadManagedFfmpeg((text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "ffmpeg-download", text });
   }));
+  ipcMain.handle("runtime:delete-ffmpeg", () => deleteManagedFfmpeg());
   ipcMain.handle("media:analyze", (_event, inputPath: string) => analyzeMedia(inputPath));
   ipcMain.handle("run:start", async (_event, request) => {
     const appState = loadAppState();

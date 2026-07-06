@@ -11,7 +11,7 @@ import OutputPanel from "./components/OutputPanel";
 import TooltipLabel from "./components/TooltipLabel";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./lib/types";
+import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
 import { isHostedModelApproved, isHostedModelVerified, verifiedHostedOptions } from "../shared/hostedModelCatalog";
 
@@ -33,12 +33,17 @@ export default function App() {
   const [localProfileStatuses, setLocalProfileStatuses] = useState<Record<string, LocalModelStatus>>({});
   const [localProfiles, setLocalProfiles] = useState<LocalModelProfile[]>([]);
   const [downloadingModels, setDownloadingModels] = useState(false);
+  const [managedDeleteAction, setManagedDeleteAction] = useState("");
+  const [hfDownloaderStatus, setHfDownloaderStatus] = useState<HuggingFaceDownloaderStatus | null>(null);
+  const [installingHfDownloader, setInstallingHfDownloader] = useState(false);
   const [llamaBackends, setLlamaBackends] = useState<LlamaBackendOption[]>([]);
   const [llamaRelease, setLlamaRelease] = useState<LlamaReleaseCheck | null>(null);
   const [managedLlamaStatus, setManagedLlamaStatus] = useState<ManagedLlamaStatus | null>(null);
   const [currentLlamaState, setCurrentLlamaState] = useState<CurrentLlamaServerState | null>(null);
   const [downloadingLlama, setDownloadingLlama] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSetupStatus | null>(null);
+  const [runtimeAction, setRuntimeAction] = useState("");
+  const [runtimeFeedback, setRuntimeFeedback] = useState<{ section: "python" | "ffmpeg"; text: string; ok: boolean } | null>(null);
   const [pythonReady, setPythonReady] = useState(false);
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
@@ -66,6 +71,7 @@ export default function App() {
     void loadInitialState();
     void window.subtitler.listLocalProfiles().then(setLocalProfiles);
     void window.subtitler.listLlamaBackends().then(setLlamaBackends);
+    void refreshHfDownloaderStatus();
     return window.subtitler.onRunEvent(handleRunEvent);
   }, []);
 
@@ -326,12 +332,34 @@ export default function App() {
     setLocalModelStatus(byProfile[profileId] ?? null);
   }
 
+  async function refreshHfDownloaderStatus() {
+    try {
+      setHfDownloaderStatus(await window.subtitler.getHuggingFaceDownloaderStatus());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function installHfDownloader() {
+    setInstallingHfDownloader(true);
+    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Hugging Face downloader package install\n`);
+    try {
+      const status = await window.subtitler.installHuggingFaceDownloader();
+      setHfDownloaderStatus(status);
+      setNotice("Hugging Face downloader packages installed");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setInstallingHfDownloader(false);
+    }
+  }
+
   async function downloadLocalModels() {
     if (!settings) return;
     setDownloadingModels(true);
     setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Hugging Face model download\n`);
     try {
-      const status = await window.subtitler.downloadLocalProfile(settings.modelsDirectory, settings.localModelProfile);
+      const status = await window.subtitler.downloadLocalProfile(settings.modelsDirectory, settings.localModelProfile, settings.modelDownloadMode ?? "direct");
       setLocalModelStatus(status);
       setLocalProfileStatuses((current) => ({ ...current, [status.profile]: status }));
       if (coreSettings?.local) {
@@ -358,53 +386,142 @@ export default function App() {
     }
   }
 
+  async function deleteLocalModels() {
+    if (!settings || !localModelStatus?.managed) return;
+    if (!window.confirm("Delete this app-managed model profile from disk? User-selected model folders will not be touched.")) return;
+    setManagedDeleteAction("models");
+    try {
+      const status = await window.subtitler.deleteManagedLocalProfile(settings.modelsDirectory, settings.localModelProfile);
+      setLocalModelStatus(status);
+      setLocalProfileStatuses((current) => ({ ...current, [status.profile]: status }));
+      await refreshLocalModels(settings.modelsDirectory, settings.localModelProfile);
+      setNotice("Managed model profile deleted");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setManagedDeleteAction("");
+    }
+  }
+
   async function refreshManagedLlama(backend: LlamaBackendId, releaseTag?: string) {
     const status = await window.subtitler.getManagedLlamaStatus(backend, releaseTag);
     setManagedLlamaStatus(status);
   }
 
-  async function refreshRuntimeStatus() {
+  async function refreshRuntimeStatus(action = "", feedbackSection?: "python" | "ffmpeg") {
+    if (action) {
+      setRuntimeAction(action);
+      setRuntimeFeedback(null);
+    }
     try {
       const status = await window.subtitler.getRuntimeSetupStatus();
       setRuntimeStatus(status);
       setPythonReady(status.python.ready && status.python.requirementsInstalled);
+      if (feedbackSection) {
+        const text = feedbackSection === "python" ? "Python runtime status refreshed" : "FFmpeg status refreshed";
+        setRuntimeFeedback({ section: feedbackSection, text, ok: true });
+        setNotice(text);
+      }
       return status;
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const text = error instanceof Error ? error.message : String(error);
+      if (feedbackSection) setRuntimeFeedback({ section: feedbackSection, text, ok: false });
+      setNotice(text);
       return null;
+    } finally {
+      if (action) setRuntimeAction("");
     }
   }
 
   async function createManagedPythonEnv() {
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ managed Python setup\n`);
+    setRuntimeAction("create-python");
+    setRuntimeFeedback(null);
+    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ managed Python venv setup\n`);
     try {
       await window.subtitler.createManagedPythonEnv();
       await refreshRuntimeStatus();
-      setNotice("Managed Python env created");
+      setRuntimeFeedback({ section: "python", text: "Managed Python venv created", ok: true });
+      setNotice("Managed Python venv created");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "python", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
+    }
+  }
+
+  async function deleteManagedPythonEnv() {
+    if (!runtimeStatus?.python.managedInstalled) return;
+    if (!window.confirm("Delete the app-managed Python venv from disk? User-selected Python installs will not be touched.")) return;
+    setRuntimeAction("delete-python");
+    setRuntimeFeedback(null);
+    try {
+      await window.subtitler.deleteManagedPythonEnv();
+      await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "python", text: "Managed Python venv deleted", ok: true });
+      setNotice("Managed Python venv deleted");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "python", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
     }
   }
 
   async function installPythonRequirements() {
+    setRuntimeAction("install-python");
+    setRuntimeFeedback(null);
     setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Python requirements install\n`);
     try {
       await window.subtitler.installPythonRequirements();
       await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "python", text: "Python requirements installed", ok: true });
       setNotice("Python requirements installed");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "python", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
     }
   }
 
   async function downloadFfmpeg() {
+    setRuntimeAction("download-ffmpeg");
+    setRuntimeFeedback(null);
     setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ FFmpeg download\n`);
     try {
       await window.subtitler.downloadManagedFfmpeg();
       await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "ffmpeg", text: "FFmpeg downloaded", ok: true });
       setNotice("FFmpeg downloaded");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
+    }
+  }
+
+  async function deleteManagedFfmpeg() {
+    if (!runtimeStatus?.ffmpeg.managedInstalled) return;
+    if (!window.confirm("Delete app-managed FFmpeg from disk? FFmpeg on PATH will not be touched.")) return;
+    setRuntimeAction("delete-ffmpeg");
+    setRuntimeFeedback(null);
+    try {
+      await window.subtitler.deleteManagedFfmpeg();
+      await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "ffmpeg", text: "Managed FFmpeg deleted", ok: true });
+      setNotice("Managed FFmpeg deleted");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
     }
   }
 
@@ -440,6 +557,25 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       setDownloadingLlama(false);
+    }
+  }
+
+  async function deleteManagedLlama() {
+    if (!settings || !managedLlamaStatus?.installed) return;
+    if (!window.confirm("Delete this app-managed llama-server backend from disk? Manual server paths will not be touched.")) return;
+    setManagedDeleteAction("llama");
+    try {
+      const status = await window.subtitler.deleteManagedLlamaServer(settings.llamaBackend);
+      setManagedLlamaStatus(status);
+      if (coreSettings?.local) {
+        await refreshPathStatus(coreSettings);
+        setCurrentLlamaState(await window.subtitler.getCurrentLlamaServerState(coreSettings.local.llamaServer));
+      }
+      setNotice("Managed llama-server deleted");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setManagedDeleteAction("");
     }
   }
 
@@ -585,6 +721,10 @@ export default function App() {
             localProfileStatuses={localProfileStatuses}
             selectedLocalProfile={settings.localModelProfile}
             downloadingModels={downloadingModels}
+            deletingManaged={managedDeleteAction}
+            modelDownloadMode={settings.modelDownloadMode ?? "direct"}
+            hfDownloaderStatus={hfDownloaderStatus}
+            installingHfDownloader={installingHfDownloader}
             llamaBackends={llamaBackends}
             selectedLlamaBackend={settings.llamaBackend}
             llamaRelease={llamaRelease}
@@ -594,6 +734,8 @@ export default function App() {
             pythonPath={settings.pythonPath}
             pythonReady={pythonReady}
             runtimeStatus={runtimeStatus}
+            runtimeAction={runtimeAction}
+            runtimeFeedback={runtimeFeedback}
             sidecarsEnabled={settings.sidecarsEnabled}
             sidecarDir={sidecarDir}
             onChange={setCoreSettings}
@@ -616,6 +758,13 @@ export default function App() {
               void saveSettings(next);
             }}
             onDownloadLocalModels={downloadLocalModels}
+            onDeleteLocalModels={deleteLocalModels}
+            onModelDownloadMode={(modelDownloadMode) => {
+              const next = { ...settings, modelDownloadMode };
+              setSettings(next);
+              void saveSettings(next);
+            }}
+            onInstallHfDownloader={installHfDownloader}
             onLocalProfile={(localModelProfile) => {
               const next = { ...settings, localModelProfile };
               setSettings(next);
@@ -630,12 +779,15 @@ export default function App() {
             }}
             onCheckLlamaRelease={checkLlamaRelease}
             onDownloadLlama={downloadLlama}
+            onDeleteLlama={deleteManagedLlama}
             onUseManagedLlama={useManagedLlama}
             onRevertManagedLlama={(path) => useManagedLlama(path)}
             onRefreshRuntime={refreshRuntimeStatus}
             onCreateManagedPython={createManagedPythonEnv}
             onInstallPythonRequirements={installPythonRequirements}
+            onDeleteManagedPython={deleteManagedPythonEnv}
             onDownloadFfmpeg={downloadFfmpeg}
+            onDeleteFfmpeg={deleteManagedFfmpeg}
           />
         </div>
       ) : (

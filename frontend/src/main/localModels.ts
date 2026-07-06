@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
-import type { LocalModelProfile, LocalModelStatus } from "../renderer/lib/types";
+import { Readable, Transform } from "node:stream";
+import type { HuggingFaceDownloaderStatus, LocalModelProfile, LocalModelStatus } from "../renderer/lib/types";
+import type { RuntimePaths } from "./paths";
 
 type ModelFile = { repo: string; filename: string; sourcePath?: string; folder: string; bytes: number };
 type ProfileDefinition = LocalModelProfile & {
@@ -114,17 +116,20 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
 
 let downloading = false;
 
+export type ModelDownloadMode = "direct" | "huggingface";
+
 export function listLocalProfiles(): LocalModelProfile[] {
   return LOCAL_PROFILES.map(({ files: _files, ...profile }) => profile);
 }
 
-export function localModelStatus(modelsDirectory: string, profileId: string): LocalModelStatus {
+export function localModelStatus(modelsDirectory: string, profileId: string, managedModelsRoot = ""): LocalModelStatus {
   const profile = getProfile(profileId);
   const paths = localModelPaths(modelsDirectory, profileId);
   return {
     profile: profile.id,
     installed: Object.values(paths).filter(Boolean).every((file) => fs.existsSync(file)),
     downloading,
+    managed: Boolean(managedModelsRoot) && samePath(modelsDirectory, managedModelsRoot),
     files: {
       transcription: { path: paths.transcription, exists: fs.existsSync(paths.transcription) },
       projector: { path: paths.projector, exists: fs.existsSync(paths.projector) },
@@ -136,11 +141,63 @@ export function localModelStatus(modelsDirectory: string, profileId: string): Lo
   };
 }
 
-export async function downloadLocalProfile(modelsDirectory: string, profileId: string, onLog: (text: string) => void = () => undefined): Promise<LocalModelStatus> {
+export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths): Promise<HuggingFaceDownloaderStatus> {
+  const pythonPath = managedPythonPath(paths);
+  if (!fs.existsSync(pythonPath)) {
+    return {
+      ready: false,
+      pythonPath,
+      version: "",
+      xetReady: false,
+      error: "Managed Python venv is required before installing Hugging Face downloader packages.",
+    };
+  }
+  const script = [
+    "import importlib.util, huggingface_hub",
+    "xet = importlib.util.find_spec('hf_xet') is not None",
+    "print(huggingface_hub.__version__ + '|' + str(xet))",
+  ].join("; ");
+  try {
+    const output = await runCommand(pythonPath, ["-c", script]);
+    const [version, xetReady] = output.trim().split("|");
+    return { ready: true, pythonPath, version, xetReady: xetReady === "True", error: "" };
+  } catch (error) {
+    return {
+      ready: false,
+      pythonPath,
+      version: "",
+      xetReady: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function installHuggingFaceDownloader(paths: RuntimePaths, onLog: (text: string) => void = () => undefined): Promise<HuggingFaceDownloaderStatus> {
+  const pythonPath = managedPythonPath(paths);
+  if (!fs.existsSync(pythonPath)) throw new Error("Managed Python venv does not exist. Create it in Python runtime settings first.");
+  onLog("$ python -m pip install --upgrade huggingface_hub[hf_xet] hf_xet\n");
+  await runCommand(pythonPath, ["-m", "pip", "install", "--upgrade", "huggingface_hub[hf_xet]", "hf_xet"], onLog);
+  return getHuggingFaceDownloaderStatus(paths);
+}
+
+export async function downloadLocalProfile(
+  modelsDirectory: string,
+  profileId: string,
+  onLog: (text: string) => void = () => undefined,
+  managedModelsRoot = "",
+  mode: ModelDownloadMode = "direct",
+  paths?: RuntimePaths,
+): Promise<LocalModelStatus> {
   if (downloading) throw new Error("A local model download is already running");
   downloading = true;
   try {
     const profile = getProfile(profileId);
+    if (mode === "huggingface") {
+      if (!paths) throw new Error("Runtime paths are required for Hugging Face downloads.");
+      const status = await getHuggingFaceDownloaderStatus(paths);
+      if (!status.ready) throw new Error(status.error || "Hugging Face downloader packages are not installed.");
+      onLog(`[huggingface] using huggingface_hub ${status.version}${status.xetReady ? " with hf_xet" : ""}\n`);
+    }
     for (const file of Object.values(profile.files)) {
       const target = path.join(modelsDirectory, file.folder, file.filename);
       if (fs.existsSync(target)) {
@@ -148,21 +205,68 @@ export async function downloadLocalProfile(modelsDirectory: string, profileId: s
         continue;
       }
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      const temporary = `${target}.part`;
       const sourcePath = (file.sourcePath ?? file.filename).split("/").map(encodeURIComponent).join("/");
-      const url = `https://huggingface.co/${file.repo}/resolve/main/${sourcePath}?download=true`;
-      onLog(`[huggingface] downloading ${file.repo}/${sourcePath}\n`);
-      const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(30 * 60 * 1000) });
-      if (!response.ok || !response.body) throw new Error(`Download failed for ${file.filename}: HTTP ${response.status}`);
-      await pipeline(Readable.fromWeb(response.body as never), fs.createWriteStream(temporary));
-      fs.renameSync(temporary, target);
+      if (mode === "huggingface" && paths) {
+        await downloadWithHuggingFaceHub(paths, file.repo, file.sourcePath ?? file.filename, path.dirname(target), target, onLog);
+      } else {
+        const temporary = `${target}.part`;
+        const url = `https://huggingface.co/${file.repo}/resolve/main/${sourcePath}?download=true`;
+        onLog(`[huggingface] downloading ${file.repo}/${sourcePath}\n`);
+        const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(4 * 60 * 60 * 1000) });
+        if (!response.ok || !response.body) throw new Error(`Download failed for ${file.filename}: HTTP ${response.status}`);
+        await pipeline(
+          Readable.fromWeb(response.body as never),
+          progressLogger(file.filename, Number(response.headers.get("content-length")) || file.bytes, onLog),
+          fs.createWriteStream(temporary)
+        );
+        fs.renameSync(temporary, target);
+      }
       onLog(`[huggingface] saved ${target}\n`);
     }
     onLog("[huggingface] model profile download complete\n");
-    return localModelStatus(modelsDirectory, profileId);
+    return localModelStatus(modelsDirectory, profileId, managedModelsRoot);
   } finally {
     downloading = false;
   }
+}
+
+async function downloadWithHuggingFaceHub(
+  paths: RuntimePaths,
+  repo: string,
+  sourcePath: string,
+  localDir: string,
+  target: string,
+  onLog: (text: string) => void,
+): Promise<void> {
+  const script = [
+    "import os, shutil, sys",
+    "from huggingface_hub import hf_hub_download",
+    "repo, filename, local_dir, target = sys.argv[1:5]",
+    "path = hf_hub_download(repo_id=repo, filename=filename, local_dir=local_dir)",
+    "os.makedirs(os.path.dirname(target), exist_ok=True)",
+    "if os.path.abspath(path) != os.path.abspath(target):",
+    "    shutil.move(path, target)",
+    "print(target)",
+  ].join("\n");
+  onLog(`[huggingface] downloading with Hugging Face downloader ${repo}/${sourcePath}\n`);
+  await runCommand(managedPythonPath(paths), ["-c", script, repo, sourcePath, localDir, target], onLog, {
+    HF_XET_HIGH_PERFORMANCE: "1",
+  });
+}
+
+export function deleteManagedLocalProfile(modelsDirectory: string, profileId: string, managedModelsRoot: string): LocalModelStatus {
+  if (!samePath(modelsDirectory, managedModelsRoot)) {
+    throw new Error("Refusing to delete models outside the app-managed models directory.");
+  }
+  const root = path.resolve(managedModelsRoot);
+  for (const file of Object.values(localModelPaths(modelsDirectory, profileId)).filter(Boolean)) {
+    const target = path.resolve(file);
+    if (!isWithinOrSame(root, target)) throw new Error(`Refusing to delete unmanaged model path: ${file}`);
+    fs.rmSync(target, { force: true });
+    fs.rmSync(`${target}.part`, { force: true });
+    pruneEmptyParents(path.dirname(target), root);
+  }
+  return localModelStatus(modelsDirectory, profileId, managedModelsRoot);
 }
 
 export function localModelPaths(modelsDirectory: string, profileId: string) {
@@ -185,4 +289,76 @@ function getProfile(profileId: string): ProfileDefinition {
   const profile = LOCAL_PROFILES.find((item) => item.id === profileId);
   if (!profile) throw new Error(`Unknown local model profile: ${profileId}`);
   return profile;
+}
+
+function progressLogger(filename: string, totalBytes: number, onLog: (text: string) => void): Transform {
+  let downloaded = 0;
+  let lastPercent = -1;
+  let lastLog = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      downloaded += chunk.length;
+      const now = Date.now();
+      const percent = totalBytes > 0 ? Math.floor((downloaded / totalBytes) * 100) : 0;
+      if ((percent !== lastPercent && percent % 5 === 0) || now - lastLog > 10_000) {
+        lastPercent = percent;
+        lastLog = now;
+        onLog(`[huggingface] ${filename}: ${formatBytes(downloaded)} / ${formatBytes(totalBytes)} (${percent}%)\n`);
+      }
+      callback(null, chunk);
+    }
+  });
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "?";
+  const gib = bytes / 1024 / 1024 / 1024;
+  if (gib >= 1) return `${gib.toFixed(2)} GiB`;
+  return `${(bytes / 1024 / 1024).toFixed(0)} MiB`;
+}
+
+function managedPythonPath(paths: RuntimePaths): string {
+  return path.join(paths.managedPythonRoot, ".venv", "Scripts", "python.exe");
+}
+
+function runCommand(command: string, args: string[], onLog: (text: string) => void = () => undefined, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true, env: { ...process.env, ...extraEnv } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stdout += text;
+      onLog(text);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr += text;
+      onLog(text);
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 ? resolve(stdout || stderr) : reject(new Error(stderr.trim() || `${command} failed`)));
+  });
+}
+
+function samePath(left: string, right: string): boolean {
+  return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+}
+
+function isWithinOrSame(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function pruneEmptyParents(start: string, stopAt: string): void {
+  let current = path.resolve(start);
+  const stop = path.resolve(stopAt);
+  while (isWithinOrSame(stop, current) && current !== stop) {
+    try {
+      fs.rmdirSync(current);
+    } catch {
+      return;
+    }
+    current = path.dirname(current);
+  }
 }

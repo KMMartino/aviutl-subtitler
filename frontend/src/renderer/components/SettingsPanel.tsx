@@ -1,7 +1,7 @@
-import { AlertTriangle, Brain, CheckCircle, ChevronDown, CircleGauge, Download, FolderOpen, Info, RefreshCw, Settings, Zap } from "lucide-react";
+import { AlertTriangle, Brain, CheckCircle, ChevronDown, CircleGauge, Download, FolderOpen, Info, RefreshCw, Settings, Trash2, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
+import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
 import TooltipLabel from "./TooltipLabel";
 import { hostedOptions as catalogHostedOptions, isHostedModelVerified, type HostedOption } from "../../shared/hostedModelCatalog";
@@ -20,6 +20,10 @@ type Props = {
   localProfileStatuses: Record<string, LocalModelStatus>;
   selectedLocalProfile: string;
   downloadingModels: boolean;
+  deletingManaged: string;
+  modelDownloadMode: "direct" | "huggingface";
+  hfDownloaderStatus: HuggingFaceDownloaderStatus | null;
+  installingHfDownloader: boolean;
   llamaBackends: LlamaBackendOption[];
   selectedLlamaBackend: LlamaBackendId;
   llamaRelease: LlamaReleaseCheck | null;
@@ -29,6 +33,8 @@ type Props = {
   pythonPath: string;
   pythonReady: boolean;
   runtimeStatus: RuntimeSetupStatus | null;
+  runtimeAction: string;
+  runtimeFeedback: { section: "python" | "ffmpeg"; text: string; ok: boolean } | null;
   sidecarsEnabled: boolean;
   sidecarDir: string;
   onChange(settings: CoreWorkflowSettings): void;
@@ -39,19 +45,25 @@ type Props = {
   onVerifyHosted(): void;
   onModelsDirectory(path: string): void;
   onDownloadLocalModels(): void;
+  onDeleteLocalModels(): void;
+  onModelDownloadMode(mode: "direct" | "huggingface"): void;
+  onInstallHfDownloader(): void;
   onLocalProfile(profile: string): void;
   onLlamaBackend(value: LlamaBackendId): void;
   onCheckLlamaRelease(): void;
   onDownloadLlama(): void;
+  onDeleteLlama(): void;
   onUseManagedLlama(path: string): void;
   onRevertManagedLlama(path: string): void;
-  onRefreshRuntime(): void;
+  onRefreshRuntime(action?: string, feedbackSection?: "python" | "ffmpeg"): void;
   onCreateManagedPython(): void;
   onInstallPythonRequirements(): void;
+  onDeleteManagedPython(): void;
   onDownloadFfmpeg(): void;
+  onDeleteFfmpeg(): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDownloadFfmpeg }: Props) {
+export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg }: Props) {
   const local = settings.local ?? { model: "", mmproj: "", llamaServer: "", cleanupModel: "", cleanupLlamaServer: "", transcriptionDraftModel: "", cleanupDraftModel: "" };
   const hosted = settings.hosted ?? {
     transcriptionProvider: "gemini",
@@ -67,10 +79,13 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   const [localModelExpanded, setLocalModelExpanded] = useState(true);
   const [pythonExpanded, setPythonExpanded] = useState(!pythonReady);
   const [ffmpegExpanded, setFfmpegExpanded] = useState(!runtimeStatus?.ffmpeg.ready);
+  const [envExpanded, setEnvExpanded] = useState(!envStatus.exists);
   const [serverExpanded, setServerExpanded] = useState(!pathStatus.llamaServer?.exists);
+  const runtimeBusy = Boolean(runtimeAction);
   useEffect(() => setLocalModelExpanded(!anyLocalProfileInstalled), [anyLocalProfileInstalled]);
   useEffect(() => setPythonExpanded(!pythonReady), [pythonReady]);
   useEffect(() => setFfmpegExpanded(!runtimeStatus?.ffmpeg.ready), [runtimeStatus?.ffmpeg.ready]);
+  useEffect(() => setEnvExpanded(!envStatus.exists), [envStatus.exists]);
   useEffect(() => setServerExpanded(!pathStatus.llamaServer?.exists), [pathStatus.llamaServer?.exists]);
   function setCost(key: keyof NonNullable<CoreWorkflowSettings["cost"]>, value: number | boolean) {
     onChange({ ...settings, cost: { maxEstimatedApiCostUsd: 5, allowApiSpend: false, estimateCostOnly: false, ...settings.cost, [key]: value } });
@@ -131,10 +146,37 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
               <span><CircleGauge size={15} /> {selectedProfile(localProfiles, selectedLocalProfile)?.vramGb ?? "?"} GB VRAM</span>
               <span className="tooltip" tabIndex={0}><Info size={15} /><span className="tooltip-content">{localProfileBlurb(selectedLocalProfile)}</span></span>
             </div>
-            <button onClick={onDownloadLocalModels} disabled={downloadingModels || localModelStatus?.installed}>
-              {downloadingModels ? <LoadingDots /> : <Download size={16} />}
-              {downloadingModels ? "Downloading models..." : localModelStatus?.installed ? "Models installed" : "Download model profile"}
-            </button>
+            <label>
+              <TooltipLabel text="Direct HTTPS works without Python packages. Hugging Face downloader may be faster, but requires the managed Python venv and extra Hugging Face packages.">Download method</TooltipLabel>
+              <select value={modelDownloadMode} onChange={(event) => onModelDownloadMode(event.target.value as "direct" | "huggingface")}>
+                <option value="direct">Direct HTTPS</option>
+                <option value="huggingface">Hugging Face downloader</option>
+              </select>
+            </label>
+            {modelDownloadMode === "huggingface" && (
+              <>
+                <RuntimeLine
+                  label="HF packages"
+                  value={hfDownloaderStatus?.ready ? `Ready${hfDownloaderStatus.xetReady ? " with hf_xet" : ""}` : "Not installed"}
+                  ok={Boolean(hfDownloaderStatus?.ready)}
+                />
+                <button onClick={onInstallHfDownloader} disabled={installingHfDownloader || downloadingModels}>
+                  {installingHfDownloader ? <LoadingDots /> : <Download size={16} />}
+                  {installingHfDownloader ? "Installing packages..." : "Install HF downloader packages"}
+                </button>
+              </>
+            )}
+            <div className="button-row">
+              <button onClick={onDownloadLocalModels} disabled={downloadingModels || deletingManaged === "models" || localModelStatus?.installed || (modelDownloadMode === "huggingface" && !hfDownloaderStatus?.ready)}>
+                {downloadingModels ? <LoadingDots /> : <Download size={16} />}
+                {downloadingModels ? "Downloading models..." : localModelStatus?.installed ? "Models installed" : "Download model profile"}
+              </button>
+              <button onClick={onDeleteLocalModels} disabled={downloadingModels || deletingManaged === "models" || !localModelStatus?.installed || !localModelStatus?.managed}>
+                {deletingManaged === "models" ? <LoadingDots /> : <Trash2 size={16} />}
+                {deletingManaged === "models" ? "Deleting..." : "Delete managed files"}
+              </button>
+            </div>
+            <div className="managed-server-note">Download progress appears in the logs on the main panel. Large model downloads can take a long time, especially when Hugging Face is busy; running them overnight may be more practical. The Hugging Face downloader may be faster, but it requires the managed Python venv plus additional packages installed from this section.</div>
           </div>
           <label>
             <TooltipLabel text="Directory managed by the application for downloaded GGUF models and multimodal projectors.">Models directory</TooltipLabel>
@@ -171,10 +213,12 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
               status={managedLlamaStatus}
               currentState={currentLlamaState}
               downloading={downloadingLlama}
+              deleting={deletingManaged === "llama"}
               currentServerValid={Boolean(pathStatus.llamaServer?.exists)}
               onBackend={onLlamaBackend}
               onCheck={onCheckLlamaRelease}
               onDownload={onDownloadLlama}
+              onDelete={onDeleteLlama}
               onUse={onUseManagedLlama}
               onRevert={onRevertManagedLlama}
             />
@@ -190,7 +234,7 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
       >
         <PathInput
           label="Python executable"
-          tip="Python executable used to run the subtitle engine. The app prefers .venv-win/Scripts/python.exe; change this only when your environment is elsewhere."
+          tip="Python executable used to run the subtitle engine. The app prefers .venv-win/Scripts/python.exe; change this only when your venv is elsewhere."
           value={pythonPath}
           status={{ path: pythonPath, exists: pythonReady }}
           onChange={onPythonPath}
@@ -199,10 +243,24 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           missingText="Runtime not ready"
         />
         <div className="runtime-actions">
-          <button onClick={onRefreshRuntime}><RefreshCw size={16} /> Refresh runtime</button>
-          <button onClick={onCreateManagedPython}><Download size={16} /> Create managed env</button>
-          <button onClick={onInstallPythonRequirements} disabled={!runtimeStatus?.python.ready}><Download size={16} /> Install requirements</button>
+          <button onClick={() => onRefreshRuntime("refresh-python", "python")} disabled={runtimeBusy}>
+            {runtimeAction === "refresh-python" ? <LoadingDots /> : <RefreshCw size={16} />}
+            {runtimeAction === "refresh-python" ? "Refreshing..." : "Refresh runtime"}
+          </button>
+          <button onClick={onCreateManagedPython} disabled={runtimeBusy}>
+            {runtimeAction === "create-python" ? <LoadingDots /> : <Download size={16} />}
+            {runtimeAction === "create-python" ? "Creating venv..." : "Create managed venv"}
+          </button>
+          <button onClick={onInstallPythonRequirements} disabled={runtimeBusy || !runtimeStatus?.python.ready}>
+            {runtimeAction === "install-python" ? <LoadingDots /> : <Download size={16} />}
+            {runtimeAction === "install-python" ? "Installing..." : "Install requirements"}
+          </button>
+          <button onClick={onDeleteManagedPython} disabled={runtimeBusy || !runtimeStatus?.python.managedInstalled}>
+            {runtimeAction === "delete-python" ? <LoadingDots /> : <Trash2 size={16} />}
+            {runtimeAction === "delete-python" ? "Deleting..." : "Delete managed venv"}
+          </button>
         </div>
+        {runtimeFeedback?.section === "python" && <RuntimeFeedback feedback={runtimeFeedback} />}
         <RuntimeLine label="Resolved" value={runtimeStatus?.python.resolvedPath || "Not found"} ok={Boolean(runtimeStatus?.python.ready)} />
         <RuntimeLine label="Requirements" value={runtimeStatus?.python.requirementsInstalled ? "Installed" : "Missing ctc_forced_aligner"} ok={Boolean(runtimeStatus?.python.requirementsInstalled)} />
         {runtimeStatus?.python.error && <div className="disabled-field">{runtimeStatus.python.error}</div>}
@@ -215,20 +273,38 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
         onToggle={() => setFfmpegExpanded((value) => !value)}
       >
         <div className="runtime-actions">
-          <button onClick={onRefreshRuntime}><RefreshCw size={16} /> Refresh FFmpeg</button>
-          <button onClick={onDownloadFfmpeg}><Download size={16} /> Download FFmpeg</button>
+          <button onClick={() => onRefreshRuntime("refresh-ffmpeg", "ffmpeg")} disabled={runtimeBusy}>
+            {runtimeAction === "refresh-ffmpeg" ? <LoadingDots /> : <RefreshCw size={16} />}
+            {runtimeAction === "refresh-ffmpeg" ? "Refreshing..." : "Refresh FFmpeg"}
+          </button>
+          <button onClick={onDownloadFfmpeg} disabled={runtimeBusy}>
+            {runtimeAction === "download-ffmpeg" ? <LoadingDots /> : <Download size={16} />}
+            {runtimeAction === "download-ffmpeg" ? "Downloading..." : "Download FFmpeg"}
+          </button>
+          <button onClick={onDeleteFfmpeg} disabled={runtimeBusy || !runtimeStatus?.ffmpeg.managedInstalled}>
+            {runtimeAction === "delete-ffmpeg" ? <LoadingDots /> : <Trash2 size={16} />}
+            {runtimeAction === "delete-ffmpeg" ? "Deleting..." : "Delete managed FFmpeg"}
+          </button>
         </div>
+        {runtimeFeedback?.section === "ffmpeg" && <RuntimeFeedback feedback={runtimeFeedback} />}
         <RuntimeLine label="ffmpeg" value={runtimeStatus?.ffmpeg.ffmpegPath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
         <RuntimeLine label="ffprobe" value={runtimeStatus?.ffmpeg.ffprobePath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
         {runtimeStatus?.ffmpeg.error && <div className="disabled-field">{runtimeStatus.ffmpeg.error}</div>}
       </SetupSection>
       {isHostedWorkflow(workflow) && (
-        <div className="stack">
+        <>
+        <SetupSection
+          title="API keys"
+          detail={envStatus.exists ? "API key file selected" : "Choose a .env file for hosted models"}
+          ready={envStatus.exists}
+          expanded={envExpanded}
+          onToggle={() => setEnvExpanded((value) => !value)}
+        >
           <label>
-            <TooltipLabel text="Environment file containing GEMINI_API_KEY and OPENAI_API_KEY. Secret values remain in the main process and are never displayed.">Env file</TooltipLabel>
+            <TooltipLabel text="Environment file containing GEMINI_API_KEY and OPENAI_API_KEY. Secret values remain in the main process and are never displayed.">.env file</TooltipLabel>
             <div className="row">
               <input value={envFile} onChange={(event) => onEnvFile(event.target.value)} />
-              <button className="icon-button" onClick={pickEnv} title="Choose env file"><FolderOpen size={17} /></button>
+              <button className="icon-button" onClick={pickEnv} title="Choose .env file"><FolderOpen size={17} /></button>
             </div>
           </label>
           <div className="status-grid">
@@ -240,6 +316,8 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
             <RefreshCw size={16} className={verifyingHosted ? "spin" : ""} /> {verifyingHosted ? "Checking APIs" : "Verify API models"}
           </button>
           {hostedVerification && <VerificationSummary result={hostedVerification} />}
+        </SetupSection>
+        <div className="stack">
           <HostedModelSelect
             label="Transcription model"
             tip="Only verified supported transcription models are offered: OpenAI GPT-4o Transcribe or Gemini 3.5 Flash."
@@ -267,6 +345,7 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           </div>
           <label className="check"><input type="checkbox" checked={settings.cost?.estimateCostOnly ?? false} onChange={(event) => setCost("estimateCostOnly", event.target.checked)} /><TooltipLabel text="Perform audio preparation and speech selection, report the estimate, then stop before transcription and subtitle generation.">Estimate cost only</TooltipLabel></label>
         </div>
+        </>
       )}
       <div className="sidecar-settings">
         <span className="field-label-line">
@@ -352,17 +431,28 @@ function RuntimeLine({ label, value, ok }: { label: string; value: string; ok: b
   );
 }
 
-function ManagedServerInstall({ backends, selectedBackend, release, status, currentState, downloading, currentServerValid, onBackend, onCheck, onDownload, onUse, onRevert }: {
+function RuntimeFeedback({ feedback }: { feedback: { text: string; ok: boolean } }) {
+  return (
+    <div className={feedback.ok ? "runtime-feedback ok" : "runtime-feedback error"}>
+      {feedback.ok ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
+      <span>{feedback.text}</span>
+    </div>
+  );
+}
+
+function ManagedServerInstall({ backends, selectedBackend, release, status, currentState, downloading, deleting, currentServerValid, onBackend, onCheck, onDownload, onDelete, onUse, onRevert }: {
   backends: LlamaBackendOption[];
   selectedBackend: LlamaBackendId;
   release: LlamaReleaseCheck | null;
   status: ManagedLlamaStatus | null;
   currentState: CurrentLlamaServerState | null;
   downloading: boolean;
+  deleting: boolean;
   currentServerValid: boolean;
   onBackend(value: LlamaBackendId): void;
   onCheck(): void;
   onDownload(): void;
+  onDelete(): void;
   onUse(path: string): void;
   onRevert(path: string): void;
 }) {
@@ -398,15 +488,19 @@ function ManagedServerInstall({ backends, selectedBackend, release, status, curr
         {serverAdvice(currentState, currentServerValid, selectedIsCurrent)}
       </div>
       <div className="button-row">
-        <button type="button" onClick={onCheck}>Check latest</button>
-        <button type="button" onClick={onDownload} disabled={downloading}>
+        <button type="button" onClick={onCheck} disabled={deleting}>Check latest</button>
+        <button type="button" onClick={onDownload} disabled={downloading || deleting}>
           {downloading ? <LoadingDots /> : <Download size={16} />}
           {downloading ? "Downloading server..." : "Download server"}
         </button>
-        <button type="button" className={!currentServerValid && status?.installed ? "primary-inline" : ""} disabled={!status?.installed || selectedIsCurrent} onClick={() => status?.serverPath && onUse(status.serverPath)}>
+        <button type="button" onClick={onDelete} disabled={downloading || deleting || !status?.installed}>
+          {deleting ? <LoadingDots /> : <Trash2 size={16} />}
+          {deleting ? "Deleting..." : "Delete managed server"}
+        </button>
+        <button type="button" className={!currentServerValid && status?.installed ? "primary-inline" : ""} disabled={deleting || !status?.installed || selectedIsCurrent} onClick={() => status?.serverPath && onUse(status.serverPath)}>
           {selectedIsCurrent ? "Managed server active" : "Use managed server"}
         </button>
-        <button type="button" disabled={!currentState?.previous?.installed} onClick={() => currentState?.previous?.serverPath && onRevert(currentState.previous.serverPath)}>
+        <button type="button" disabled={deleting || !currentState?.previous?.installed} onClick={() => currentState?.previous?.serverPath && onRevert(currentState.previous.serverPath)}>
           Revert server
         </button>
       </div>

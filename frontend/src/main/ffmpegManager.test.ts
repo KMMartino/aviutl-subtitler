@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { managedFfmpegBinDir, resolveFfmpegCommand } from "./ffmpegManager";
+import { deleteManagedFfmpeg, managedFfmpegBinDir, resolveFfmpegCommand } from "./ffmpegManager";
 import type { RuntimePaths } from "./paths";
 
 const roots: string[] = [];
@@ -35,6 +35,21 @@ describe("ffmpeg manager", () => {
     expect(resolveFfmpegCommand("ffmpeg", paths)).toBe("ffmpeg");
     expect(resolveFfmpegCommand("ffprobe", paths)).toBe("ffprobe");
     expect(managedFfmpegBinDir(paths)).toBe("");
+  });
+
+  it("deletes only the managed ffmpeg directory", async () => {
+    const paths = makePaths();
+    const managedFile = path.join(paths.managedFfmpegRoot, "current", "ffmpeg", "bin", "ffmpeg.exe");
+    const siblingFile = path.join(paths.userToolsRoot, "other-tool", "tool.exe");
+    fs.mkdirSync(path.dirname(managedFile), { recursive: true });
+    fs.mkdirSync(path.dirname(siblingFile), { recursive: true });
+    fs.writeFileSync(managedFile, "");
+    fs.writeFileSync(siblingFile, "");
+
+    await deleteManagedFfmpeg(paths);
+
+    expect(fs.existsSync(paths.managedFfmpegRoot)).toBe(false);
+    expect(fs.existsSync(siblingFile)).toBe(true);
   });
 });
 

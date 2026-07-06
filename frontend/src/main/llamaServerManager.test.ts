@@ -6,6 +6,7 @@ import {
   findLlamaServerExe,
   getManagedLlamaStatus,
   getCurrentLlamaServerState,
+  deleteManagedLlamaBackend,
   listLlamaBackends,
   managedLlamaInstallDir,
   matchReleaseAsset,
@@ -110,6 +111,18 @@ describe("llama server manager", () => {
     expect(fs.existsSync(managedLlamaInstallDir(root, "vulkan", "b9670"))).toBe(true);
     expect(fs.existsSync(managedLlamaInstallDir(root, "vulkan", "b9669"))).toBe(true);
     expect(fs.existsSync(managedLlamaInstallDir(root, "vulkan", "b9668"))).toBe(false);
+  });
+
+  it("deletes only the selected managed backend installs", () => {
+    const root = makeTempRoot();
+    createManagedServer(root, "vulkan", "b9670");
+    const cuda = createManagedServer(root, "cuda-12", "b9670");
+
+    const status = deleteManagedLlamaBackend(root, "vulkan");
+
+    expect(status.installed).toBe(false);
+    expect(fs.existsSync(managedLlamaInstallDir(root, "vulkan", "b9670"))).toBe(false);
+    expect(fs.existsSync(cuda)).toBe(true);
   });
 });
 

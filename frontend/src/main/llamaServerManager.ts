@@ -120,6 +120,13 @@ export function getCurrentLlamaServerState(root: string, serverPath: string): Cu
   };
 }
 
+export function deleteManagedLlamaBackend(root: string, backend: LlamaBackendId): ManagedLlamaStatus {
+  const backendRoot = path.join(managedLlamaRoot(root), backend);
+  if (!isWithin(managedLlamaRoot(root), backendRoot)) throw new Error("Refusing to delete llama-server outside the managed app tools directory.");
+  fs.rmSync(backendRoot, { recursive: true, force: true });
+  return getManagedLlamaStatus(root, backend);
+}
+
 export async function downloadManagedLlamaServer(
   root: string,
   backend: LlamaBackendId,
@@ -255,6 +262,11 @@ function previousInstalledStatus(root: string, backend: LlamaBackendId, currentR
 
 function isManagedServerPath(root: string, serverPath: string): boolean {
   const relative = path.relative(managedLlamaRoot(root), serverPath);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
   return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 

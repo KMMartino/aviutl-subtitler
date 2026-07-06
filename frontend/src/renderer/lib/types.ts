@@ -22,6 +22,7 @@ export type AppSettings = {
   localModelProfile: string;
   llamaBackend: LlamaBackendId;
   ffmpegMode?: "auto" | "managed" | "path";
+  modelDownloadMode?: "direct" | "huggingface";
 };
 
 export type LlamaBackendId = "vulkan" | "cuda-12";
@@ -68,6 +69,7 @@ export type LocalModelStatus = {
   profile: string;
   installed: boolean;
   downloading: boolean;
+  managed: boolean;
   files: {
     transcription: { path: string; exists: boolean };
     projector: { path: string; exists: boolean };
@@ -87,6 +89,14 @@ export type LocalModelProfile = {
   experimental: boolean;
 };
 
+export type HuggingFaceDownloaderStatus = {
+  ready: boolean;
+  pythonPath: string;
+  version: string;
+  xetReady: boolean;
+  error: string;
+};
+
 export type EnvStatus = {
   exists: boolean;
   keysPresent: {
@@ -102,6 +112,7 @@ export type PythonRuntimeStatus = {
   ready: boolean;
   version: string;
   venvPath: string;
+  managedInstalled: boolean;
   requirementsInstalled: boolean;
   error: string;
 };
@@ -112,6 +123,7 @@ export type FfmpegStatus = {
   ffprobePath: string;
   version: string;
   ready: boolean;
+  managedInstalled: boolean;
   error: string;
 };
 

@@ -12,27 +12,30 @@ export type PythonRuntimeStatus = {
   ready: boolean;
   version: string;
   venvPath: string;
+  managedInstalled: boolean;
   requirementsInstalled: boolean;
   error: string;
 };
 
 export async function getPythonRuntimeStatus(settingsPythonPath = "", paths = runtimePaths()): Promise<PythonRuntimeStatus> {
   const venvPath = managedVenvPath(paths);
+  const managedInstalled = fs.existsSync(managedPythonPath(paths));
   const selected = settingsPythonPath.trim();
   if (selected) {
-    return statusForPython(selected, "selected", selected, venvPath, true);
+    return statusForPython(selected, "selected", selected, venvPath, managedInstalled, true);
   }
   const managedPython = managedPythonPath(paths);
   if (fs.existsSync(managedPython)) {
-    return statusForPython(managedPython, "managed", selected, venvPath, requirementsMarkerExists(paths));
+    return statusForPython(managedPython, "managed", selected, venvPath, managedInstalled, requirementsMarkerExists(paths));
   }
-  return statusForPython("python", "path", selected, venvPath, true).catch((error) => ({
+  return statusForPython("python", "path", selected, venvPath, managedInstalled, true).catch((error) => ({
     selectedPath: selected,
     resolvedPath: "",
     source: "missing",
     ready: false,
     version: "",
     venvPath,
+    managedInstalled,
     requirementsInstalled: false,
     error: error instanceof Error ? error.message : String(error),
   }));
@@ -62,6 +65,13 @@ export async function installPythonRequirements(onLog: (text: string) => void = 
   return getPythonRuntimeStatus("", paths);
 }
 
+export async function deleteManagedPythonEnv(paths = runtimePaths()): Promise<PythonRuntimeStatus> {
+  const venvPath = managedVenvPath(paths);
+  if (!isWithin(paths.managedPythonRoot, venvPath)) throw new Error("Refusing to delete a Python venv outside the managed app directory.");
+  fs.rmSync(venvPath, { recursive: true, force: true });
+  return getPythonRuntimeStatus("", paths);
+}
+
 function managedVenvPath(paths: RuntimePaths): string {
   return path.join(paths.managedPythonRoot, ".venv");
 }
@@ -83,6 +93,7 @@ async function statusForPython(
   source: PythonRuntimeStatus["source"],
   selectedPath: string,
   venvPath: string,
+  managedInstalled: boolean,
   requirementsInstalled: boolean,
 ): Promise<PythonRuntimeStatus> {
   try {
@@ -96,11 +107,12 @@ async function statusForPython(
       ready: true,
       version,
       venvPath,
+      managedInstalled,
       requirementsInstalled: dependenciesInstalled,
       error: dependencyCheck.ready ? "" : dependencyCheck.error,
     };
   } catch (error) {
-    return { selectedPath, resolvedPath: pythonPath, source: "missing", ready: false, version: "", venvPath, requirementsInstalled: false, error: error instanceof Error ? error.message : String(error) };
+    return { selectedPath, resolvedPath: pythonPath, source: "missing", ready: false, version: "", venvPath, managedInstalled, requirementsInstalled: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -143,4 +155,9 @@ function runCommand(command: string, args: string[], onLog: (text: string) => vo
 
 function firstLine(value: string): string {
   return value.split(/\r?\n/).find(Boolean) ?? "";
+}
+
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
 }

@@ -31,6 +31,7 @@ export function defaultSettings(paths = runtimePaths()): AppSettings {
     localModelProfile: "16gb-gpu-gemma",
     llamaBackend: "vulkan",
     ffmpegMode: "auto",
+    modelDownloadMode: "direct",
   };
 }
 
