@@ -18,7 +18,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "build": "vite build && npm run clean:electron && tsc -p tsconfig.node.json",
     "test": "vitest run",
-    "dist": "npm run build && electron-builder",
+    "dist": "npm run build && electron-builder --publish never",
     "dist:dir": "npm run build && electron-builder --dir",
     "pack": "npm run dist:dir"
   },
