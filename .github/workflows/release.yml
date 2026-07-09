@@ -46,25 +46,38 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $package = Get-Content "frontend/package.json" -Raw | ConvertFrom-Json
-          $version = $package.version
-          $releaseDir = Join-Path $PWD "release"
-          $installer = Join-Path $releaseDir "AviUtl Subtitler Setup $version.exe"
-          $portable = Join-Path $releaseDir "AviUtl Subtitler $version.exe"
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+.*$') {
+            throw "Release tag must look like v0.1.1, got: $env:RELEASE_TAG"
+          }
 
-          if (!(Test-Path $installer)) {
-            throw "Installer artifact not found: $installer"
+          $releaseDir = Join-Path $PWD "release"
+          $installerSource = Get-ChildItem $releaseDir -Filter "SubUtl Setup *.exe" |
+            Where-Object { $_.Name -notlike "*.blockmap" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $portableSource = Join-Path $releaseDir "SubUtl.exe"
+
+          if ($null -eq $installerSource) {
+            throw "Installer artifact not found under: $releaseDir"
           }
-          if (!(Test-Path $portable)) {
-            throw "Portable artifact not found: $portable"
+          if (!(Test-Path $portableSource)) {
+            throw "Portable artifact not found: $portableSource"
           }
+
+          $assetDir = Join-Path $env:RUNNER_TEMP "release-assets"
+          New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
+          $installer = Join-Path $assetDir "SubUtlSetup$version.exe"
+          $portable = Join-Path $assetDir "SubUtl$version.exe"
+          Copy-Item -LiteralPath $installerSource.FullName -Destination $installer -Force
+          Copy-Item -LiteralPath $portableSource -Destination $portable -Force
 
           $notes = @"
           Windows distributables for AviUtl Subtitler $version.
 
           Files:
-          - AviUtl Subtitler Setup $version.exe: installer version. Installs per-user and adds a Windows uninstall entry.
-          - AviUtl Subtitler $version.exe: portable version. Runs without installation.
+          - SubUtlSetup$version.exe: installer version. Installs per-user and adds a Windows uninstall entry.
+          - SubUtl$version.exe: portable version. Runs without installation.
 
           The installer and portable app do not include large model files, llama.cpp server binaries, Python, FFmpeg, or user secrets. Those are managed from inside the app.
           "@

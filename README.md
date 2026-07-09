@@ -168,3 +168,23 @@ npm run dist
 ```
 
 Build artifacts are written under `release/` at the project root. See `PACKAGING.md` for installed runtime paths and the smoke test checklist.
+
+## Releases
+
+Windows releases are published by pushing a version tag:
+
+```powershell
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The release workflow derives the release version from the tag text after `v`, so `v0.1.1` publishes `0.1.1` assets even if `frontend/package.json` has not been edited for that tag.
+
+GitHub Release assets use short names with no spaces:
+
+```text
+SubUtlSetup0.1.1.exe  installer version
+SubUtl0.1.1.exe       portable version
+```
+
+The installer and portable app do not bundle model files, llama.cpp server binaries, Python, FFmpeg, or user secrets. Those are managed from inside the app.

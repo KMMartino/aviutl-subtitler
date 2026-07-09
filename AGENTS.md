@@ -47,16 +47,18 @@ After the user has completed actual usage testing and approves pushing, push the
 
 Normal commits to `main` should run CI only. Do not publish a distributable for every commit.
 
-To publish a Windows release, make sure `frontend/package.json` has the intended version, then push a matching tag:
+To publish a Windows release, push a version tag:
 
 ```powershell
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
+The release workflow derives the asset version from the tag text after `v`.
+
 The release workflow builds on `windows-latest` and uploads two GitHub Release assets:
 
-- `AviUtl Subtitler Setup <version>.exe`: installer version.
-- `AviUtl Subtitler <version>.exe`: portable version, meant to run without installation.
+- `SubUtlSetup<version>.exe`: installer version.
+- `SubUtl<version>.exe`: portable version, meant to run without installation.
 
 The installer and portable builds intentionally do not bundle model files, llama.cpp server binaries, Python, FFmpeg, or user secrets.
