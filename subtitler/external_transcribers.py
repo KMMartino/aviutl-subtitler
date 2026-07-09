@@ -15,6 +15,7 @@ from typing import Any
 from .api_costs import GEMINI_AUDIO_TOKENS_PER_SECOND, OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
 from .api_usage import ApiUsageLedger
 from .audio import write_wav_segment
+from .config import openai_model_available, openai_transcription_aliases
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .models import AudioChunk, TranscriptChunk
@@ -174,7 +175,7 @@ class OpenAITranscriber:
         self.prompt = build_transcription_prompt(glossary)
         self.language = language
         self.timeout_scale = max(1.0, timeout_scale)
-        verify_openai_model_available(self.model, self.api_key)
+        self._available_model = verify_openai_model_available(self.model, self.api_key)
 
     def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
         text = self._transcribe_once(chunk)
@@ -191,20 +192,19 @@ class OpenAITranscriber:
             "response_format": "json",
             "temperature": "0",
         }
-        data = _request_multipart(
-            "https://api.openai.com/v1/audio/transcriptions",
-            self.api_key,
-            fields,
-            "file",
-            wav_path,
-            TranscriptionError,
-            f"OpenAI transcription failed for chunk {chunk.index}",
-            timeout_sec=_hosted_transcription_timeout(chunk, self.model, self.timeout_scale),
-            malformed_error_type=MalformedTranscriptionResponse,
-            dead_request_error_type=DeadTranscriptionRequest,
-        )
+        try:
+            data = self._request_transcription(chunk, wav_path, fields)
+            usage_model = self.model
+        except TranscriptionError as exc:
+            alias = self._retry_alias_after_model_error(exc)
+            if alias is None:
+                raise
+            retry_fields = dict(fields)
+            retry_fields["model"] = alias
+            data = self._request_transcription(chunk, wav_path, retry_fields)
+            usage_model = alias
         text = clean_transcript(str(data.get("text", "")))
-        self._record_usage(data, chunk)
+        self._record_usage(data, chunk, usage_model)
         if _is_untranscribable_audio_response(text):
             print(f"Warning: OpenAI reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
             return ""
@@ -214,7 +214,31 @@ class OpenAITranscriber:
             raise MalformedTranscriptionResponse(f"OpenAI returned a suspect transcript for chunk {chunk.index}")
         return text
 
-    def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
+    def _request_transcription(self, chunk: AudioChunk, wav_path: Path, fields: dict[str, str]) -> dict[str, Any]:
+        return _request_multipart(
+            "https://api.openai.com/v1/audio/transcriptions",
+            self.api_key,
+            fields,
+            "file",
+            wav_path,
+            TranscriptionError,
+            f"OpenAI transcription failed for chunk {chunk.index}",
+            timeout_sec=_hosted_transcription_timeout(chunk, str(fields.get("model") or self.model), self.timeout_scale),
+            malformed_error_type=MalformedTranscriptionResponse,
+            dead_request_error_type=DeadTranscriptionRequest,
+        )
+
+    def _retry_alias_after_model_error(self, exc: Exception) -> str | None:
+        message = str(exc).lower()
+        if not any(marker in message for marker in ("model", "not found", "does not exist", "invalid_model")):
+            return None
+        if self._available_model == self.model:
+            return None
+        if self._available_model not in openai_transcription_aliases(self.model):
+            return None
+        return self._available_model
+
+    def _record_usage(self, data: dict[str, Any], chunk: AudioChunk, model: str | None = None) -> None:
         usage = data.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -226,7 +250,7 @@ class OpenAITranscriber:
             fallback_cost = max(0.0, chunk.end - chunk.start) / 60.0 * OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
         self.usage.add(
             provider=self.provider,
-            model=self.model,
+            model=model or self.model,
             operation="transcription",
             chunk_index=chunk.index,
             input_tokens=input_tokens,
@@ -252,7 +276,7 @@ def verify_gemini_model_available(model: str, api_key: str) -> None:
         raise ModelLoadError(f"Gemini model is not available: {model}. Available Flash models: {flash}")
 
 
-def verify_openai_model_available(model: str, api_key: str) -> None:
+def verify_openai_model_available(model: str, api_key: str) -> str:
     data = _request_json(
         "GET",
         "https://api.openai.com/v1/models",
@@ -263,9 +287,11 @@ def verify_openai_model_available(model: str, api_key: str) -> None:
         timeout_sec=30.0,
     )
     names = [str(item.get("id", "")) for item in data.get("data", [])]
-    if model not in names:
+    available = openai_model_available(model, names)
+    if available is None:
         matching = ", ".join(name for name in names if model.split("-")[0] in name or "gpt" in name) or "none"
         raise ModelLoadError(f"OpenAI model is not available: {model}. Matching models: {matching}")
+    return available
 
 
 def _gemini_text(data: dict[str, Any]) -> str:

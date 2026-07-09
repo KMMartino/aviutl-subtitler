@@ -76,6 +76,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_new_approved_transcription_models_are_allowed(self):
         for backend, model in (
             ("openai", "gpt-4o-mini-transcribe"),
+            ("openai", "gpt-4o-mini-transcribe-2025-12-15"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -87,8 +88,8 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
     def test_approved_fallback_transcription_models_are_allowed(self):
         config = load_workflow_config("hosted")
-        config["backend"]["fallback_transcriber"] = "openai"
-        config["backend"]["fallback_transcription_model"] = "gpt-4o-mini-transcribe"
+        config["backend"]["fallback_transcriber"] = "gemini"
+        config["backend"]["fallback_transcription_model"] = "gemini-3.1-pro-preview"
 
         validate_workflow_config(config, workflow="hosted", check_paths=False)
 

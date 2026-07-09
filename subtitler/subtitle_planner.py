@@ -254,6 +254,7 @@ def build_grouped_subtitles(
     llm_split_console: bool = False,
     subtitle_timing_profile_path: Path | None = None,
     boundary_timing_profile_path: Path | None = None,
+    cleanup_diff_path: Path | None = None,
     chain_lead_in_sec: float = 0.20,
     cleanup_window_subtitles: int = 1,
     cleanup_workers: int = 1,
@@ -466,7 +467,13 @@ def build_grouped_subtitles(
         write_boundary_timing_profile(boundary_timing_profile_path, boundary_rows)
 
     if refiner is not None:
-        _refine_subtitle_text(subtitles, refiner, max(1, cleanup_window_subtitles), max(1, cleanup_workers))
+        _refine_subtitle_text(
+            subtitles,
+            refiner,
+            max(1, cleanup_window_subtitles),
+            max(1, cleanup_workers),
+            cleanup_diff_path,
+        )
     return subtitles
 
 
@@ -732,8 +739,9 @@ def _cleanup_group_for_subtitle(subtitle: Subtitle, chain: Chain) -> int | None:
         probe_time = (first.start + first.end) / 2
     for chunk in chain.chunks:
         if chunk.chunk.start <= probe_time <= chunk.chunk.end:
-            return chunk.chunk.index
-    return chain.chunks[0].chunk.index
+            return chunk.chunk.vad_group_index if chunk.chunk.vad_group_index is not None else chunk.chunk.index
+    first = chain.chunks[0].chunk
+    return first.vad_group_index if first.vad_group_index is not None else first.index
 
 
 def _cleanup_group_key(subtitle: Subtitle) -> int | None:
@@ -762,9 +770,47 @@ def _refine_window(refiner: TextRefiner, subtitles: list[Subtitle], start: int, 
     return start, refiner.refine(original)
 
 
-def _refine_subtitle_text(subtitles: list[Subtitle], refiner: TextRefiner, window_size: int, workers: int = 1) -> None:
+def _record_cleanup_change(changes: list[tuple[int, str, str]], index: int, before: str, after: str) -> None:
+    if before == after:
+        return
+    changes.append((index, before, after))
+
+
+def _write_cleanup_diff(path: Path, changes: list[tuple[int, str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for index, before, after in sorted(changes, key=lambda item: item[0]):
+        rank, reason = _cleanup_change_rank(before, after)
+        lines.extend([f"{index}.", f"rank:   {rank} ({reason})", f"before: {before}", f"after:  {after}", ""])
+    text = "\n".join(lines).rstrip()
+    path.write_text((text + "\n") if text else "NO CHANGES\n", encoding="utf-8")
+
+
+def _cleanup_change_rank(before: str, after: str) -> tuple[str, str]:
+    before_compact = _normalized_text(before)
+    after_compact = _normalized_text(after)
+    removed = before_compact
+    for filler in ("えー", "え", "あー", "あ", "うーん", "あの", "その", "まあ", "ま"):
+        removed = removed.replace(filler, "")
+    punctuation_normalized = re.sub(r"[、。,.，．]", "", before_compact) == re.sub(r"[、。,.，．]", "", after_compact)
+    if after_compact == removed or punctuation_normalized:
+        return "low", "filler/punctuation cleanup"
+    delta = abs(len(after_compact) - len(before_compact))
+    if delta <= max(4, len(before_compact) // 5):
+        return "medium", "small wording change"
+    return "high", "large text change"
+
+
+def _refine_subtitle_text(
+    subtitles: list[Subtitle],
+    refiner: TextRefiner,
+    window_size: int,
+    workers: int = 1,
+    cleanup_diff_path: Path | None = None,
+) -> None:
     total = len(subtitles)
     windows = _cleanup_windows(subtitles, window_size)
+    changes: list[tuple[int, str, str]] = []
     if workers > 1 and len(windows) > 1:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {}
@@ -776,9 +822,12 @@ def _refine_subtitle_text(subtitles: list[Subtitle], refiner: TextRefiner, windo
                 _, refined = future.result()
                 window = subtitles[start:end]
                 if len(refined) == len(window):
-                    for sub, text in zip(window, refined):
+                    for offset, (sub, text) in enumerate(zip(window, refined), start=start + 1):
                         if text.strip():
+                            _record_cleanup_change(changes, offset, sub.text, text.strip())
                             sub.text = text.strip()
+        if cleanup_diff_path is not None:
+            _write_cleanup_diff(cleanup_diff_path, changes)
         return
 
     for start, end in windows:
@@ -786,6 +835,9 @@ def _refine_subtitle_text(subtitles: list[Subtitle], refiner: TextRefiner, windo
         print(f"Cleaning subtitles {start + 1}-{end}/{total}...", flush=True)
         refined = refiner.refine([sub.text for sub in window])
         if len(refined) == len(window):
-            for sub, text in zip(window, refined):
+            for offset, (sub, text) in enumerate(zip(window, refined), start=start + 1):
                 if text.strip():
+                    _record_cleanup_change(changes, offset, sub.text, text.strip())
                     sub.text = text.strip()
+    if cleanup_diff_path is not None:
+        _write_cleanup_diff(cleanup_diff_path, changes)

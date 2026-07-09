@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
-import type { HuggingFaceDownloaderStatus, LocalModelProfile, LocalModelStatus } from "../renderer/lib/types";
+import type { HuggingFaceDownloaderStatus, LocalModelProfile, LocalModelStatus, PythonRuntimeStatus } from "../renderer/lib/types";
 import type { RuntimePaths } from "./paths";
 
 type ModelFile = { repo: string; filename: string; sourcePath?: string; folder: string; bytes: number };
@@ -28,7 +28,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 8,
     summary: "E2B Q5 transcription and E2B Q6 cleanup",
     downloadBytes: 3356035200 + 985654080 + 4501719168,
-    cleanupWindowSubtitles: 10,
+    cleanupWindowSubtitles: 64,
     experimental: false,
     files: {
       transcription: { repo: e2bRepo, filename: "gemma-4-E2B-it-Q5_K_M.gguf", folder: "gemma-4-e2b", bytes: 3356035200 },
@@ -42,7 +42,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 12,
     summary: "E4B Q6 transcription and 12B Q5 cleanup",
     downloadBytes: 7074927776 + 990372672 + 8413574560,
-    cleanupWindowSubtitles: 20,
+    cleanupWindowSubtitles: 128,
     experimental: false,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -56,7 +56,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 16,
     summary: "E4B Q6 transcription and 12B Q6 cleanup",
     downloadBytes: 7074927776 + 990372672 + 10685011360,
-    cleanupWindowSubtitles: 32,
+    cleanupWindowSubtitles: 256,
     experimental: false,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -70,7 +70,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 8,
     summary: "Experimental E2B profile with multi-token prediction",
     downloadBytes: 3356035200 + 985654080 + 4501719168 + 97817664,
-    cleanupWindowSubtitles: 10,
+    cleanupWindowSubtitles: 64,
     experimental: true,
     files: {
       transcription: { repo: e2bRepo, filename: "gemma-4-E2B-it-Q5_K_M.gguf", folder: "gemma-4-e2b", bytes: 3356035200 },
@@ -86,7 +86,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 12,
     summary: "Experimental E4B/12B profile with multi-token prediction",
     downloadBytes: 7074927776 + 990372672 + 8413574560 + 98653248 + 465109248,
-    cleanupWindowSubtitles: 20,
+    cleanupWindowSubtitles: 128,
     experimental: true,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -102,7 +102,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 16,
     summary: "Experimental E4B/12B profile with multi-token prediction",
     downloadBytes: 7074927776 + 990372672 + 10685011360 + 98653248 + 465109248,
-    cleanupWindowSubtitles: 32,
+    cleanupWindowSubtitles: 256,
     experimental: true,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -141,15 +141,20 @@ export function localModelStatus(modelsDirectory: string, profileId: string, man
   };
 }
 
-export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths): Promise<HuggingFaceDownloaderStatus> {
-  const pythonPath = managedPythonPath(paths);
-  if (!fs.existsSync(pythonPath)) {
+export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths, python?: PythonRuntimeStatus): Promise<HuggingFaceDownloaderStatus> {
+  const resolvedPythonPath = python && python.source !== "missing" ? python.resolvedPath : "";
+  const resolvedPythonSource = python && python.source !== "missing" ? python.source : "missing";
+  const pythonPath = resolvedPythonPath || fallbackManagedPythonPath(paths);
+  const pythonSource = resolvedPythonPath ? resolvedPythonSource : pythonPath ? "managed" : "missing";
+  if (!pythonPath) {
     return {
       ready: false,
+      pythonReady: false,
       pythonPath,
+      pythonSource,
       version: "",
       xetReady: false,
-      error: "Managed Python venv is required before installing Hugging Face downloader packages.",
+      error: "Python is required for the faster Hugging Face downloader.",
     };
   }
   const script = [
@@ -160,11 +165,13 @@ export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths): Promi
   try {
     const output = await runCommand(pythonPath, ["-c", script]);
     const [version, xetReady] = output.trim().split("|");
-    return { ready: true, pythonPath, version, xetReady: xetReady === "True", error: "" };
+    return { ready: true, pythonReady: true, pythonPath, pythonSource, version, xetReady: xetReady === "True", error: "" };
   } catch (error) {
     return {
       ready: false,
+      pythonReady: true,
       pythonPath,
+      pythonSource,
       version: "",
       xetReady: false,
       error: error instanceof Error ? error.message : String(error),
@@ -172,12 +179,12 @@ export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths): Promi
   }
 }
 
-export async function installHuggingFaceDownloader(paths: RuntimePaths, onLog: (text: string) => void = () => undefined): Promise<HuggingFaceDownloaderStatus> {
-  const pythonPath = managedPythonPath(paths);
-  if (!fs.existsSync(pythonPath)) throw new Error("Managed Python venv does not exist. Create it in Python runtime settings first.");
+export async function installHuggingFaceDownloader(paths: RuntimePaths, python?: PythonRuntimeStatus, onLog: (text: string) => void = () => undefined): Promise<HuggingFaceDownloaderStatus> {
+  const pythonPath = python && python.source !== "missing" ? python.resolvedPath : fallbackManagedPythonPath(paths);
+  if (!pythonPath) throw new Error("Python is required for the faster Hugging Face downloader. Create or select a Python runtime first.");
   onLog("$ python -m pip install --upgrade huggingface_hub[hf_xet] hf_xet\n");
   await runCommand(pythonPath, ["-m", "pip", "install", "--upgrade", "huggingface_hub[hf_xet]", "hf_xet"], onLog);
-  return getHuggingFaceDownloaderStatus(paths);
+  return getHuggingFaceDownloaderStatus(paths, python);
 }
 
 export async function downloadLocalProfile(
@@ -187,6 +194,7 @@ export async function downloadLocalProfile(
   managedModelsRoot = "",
   mode: ModelDownloadMode = "direct",
   paths?: RuntimePaths,
+  python?: PythonRuntimeStatus,
 ): Promise<LocalModelStatus> {
   if (downloading) throw new Error("A local model download is already running");
   downloading = true;
@@ -194,7 +202,7 @@ export async function downloadLocalProfile(
     const profile = getProfile(profileId);
     if (mode === "huggingface") {
       if (!paths) throw new Error("Runtime paths are required for Hugging Face downloads.");
-      const status = await getHuggingFaceDownloaderStatus(paths);
+      const status = await getHuggingFaceDownloaderStatus(paths, python);
       if (!status.ready) throw new Error(status.error || "Hugging Face downloader packages are not installed.");
       onLog(`[huggingface] using huggingface_hub ${status.version}${status.xetReady ? " with hf_xet" : ""}\n`);
     }
@@ -207,7 +215,7 @@ export async function downloadLocalProfile(
       fs.mkdirSync(path.dirname(target), { recursive: true });
       const sourcePath = (file.sourcePath ?? file.filename).split("/").map(encodeURIComponent).join("/");
       if (mode === "huggingface" && paths) {
-        await downloadWithHuggingFaceHub(paths, file.repo, file.sourcePath ?? file.filename, path.dirname(target), target, onLog);
+        await downloadWithHuggingFaceHub(statusPythonPath(paths, python), file.repo, file.sourcePath ?? file.filename, path.dirname(target), target, onLog);
       } else {
         const temporary = `${target}.part`;
         const url = `https://huggingface.co/${file.repo}/resolve/main/${sourcePath}?download=true`;
@@ -231,7 +239,7 @@ export async function downloadLocalProfile(
 }
 
 async function downloadWithHuggingFaceHub(
-  paths: RuntimePaths,
+  pythonPath: string,
   repo: string,
   sourcePath: string,
   localDir: string,
@@ -249,7 +257,7 @@ async function downloadWithHuggingFaceHub(
     "print(target)",
   ].join("\n");
   onLog(`[huggingface] downloading with Hugging Face downloader ${repo}/${sourcePath}\n`);
-  await runCommand(managedPythonPath(paths), ["-c", script, repo, sourcePath, localDir, target], onLog, {
+  await runCommand(pythonPath, ["-c", script, repo, sourcePath, localDir, target], onLog, {
     HF_XET_HIGH_PERFORMANCE: "1",
   });
 }
@@ -319,6 +327,15 @@ function formatBytes(bytes: number): string {
 
 function managedPythonPath(paths: RuntimePaths): string {
   return path.join(paths.managedPythonRoot, ".venv", "Scripts", "python.exe");
+}
+
+function fallbackManagedPythonPath(paths: RuntimePaths): string {
+  const pythonPath = managedPythonPath(paths);
+  return fs.existsSync(pythonPath) ? pythonPath : "";
+}
+
+function statusPythonPath(paths: RuntimePaths, python?: PythonRuntimeStatus): string {
+  return python && python.source !== "missing" ? python.resolvedPath : managedPythonPath(paths);
 }
 
 function runCommand(command: string, args: string[], onLog: (text: string) => void = () => undefined, extraEnv: NodeJS.ProcessEnv = {}): Promise<string> {

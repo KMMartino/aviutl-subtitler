@@ -13,7 +13,7 @@ import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
 import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
-import { isHostedModelApproved, isHostedModelVerified, verifiedHostedOptions } from "../shared/hostedModelCatalog";
+import { isHostedModelApproved, isHostedModelVerified, recommendedFallbackTranscription, verifiedHostedOptions } from "../shared/hostedModelCatalog";
 
 const emptyEnv: EnvStatus = { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false } };
 
@@ -134,6 +134,7 @@ export default function App() {
     void refreshRuntimeStatus().then((status) => {
       if (!cancelled && status) setPythonReady(status.python.ready && status.python.requirementsInstalled);
     });
+    void refreshHfDownloaderStatus();
     return () => {
       cancelled = true;
     };
@@ -306,11 +307,17 @@ export default function App() {
       const selectedTranscription = matchingHostedOption(transcriptionOptions, hosted.transcriptionProvider, hosted.transcriptionModel)
         ?? transcriptionOptions.find((option) => option.provider === hosted.transcriptionProvider)
         ?? transcriptionOptions[0];
+      const recommendedFallback = selectedTranscription
+        ? recommendedFallbackTranscription(selectedTranscription.provider, selectedTranscription.model)
+        : recommendedFallbackTranscription(hosted.transcriptionProvider, hosted.transcriptionModel);
       const selectedFallbackTranscription = matchingHostedOption(
         transcriptionOptions,
         hosted.fallbackTranscriptionProvider,
         hosted.fallbackTranscriptionModel
-      ) ?? transcriptionOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider) ?? transcriptionOptions[0];
+      ) ?? matchingHostedOption(transcriptionOptions, recommendedFallback.provider, recommendedFallback.model)
+        ?? transcriptionOptions.find((option) => option.provider === recommendedFallback.provider)
+        ?? transcriptionOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider)
+        ?? transcriptionOptions[0];
       const selectedCleanup = matchingHostedOption(cleanupOptions, hosted.cleanupProvider, hosted.cleanupModel)
         ?? cleanupOptions.find((option) => option.provider === hosted.cleanupProvider)
         ?? cleanupOptions[0];
@@ -348,6 +355,11 @@ export default function App() {
   }
 
   async function installHfDownloader() {
+    if (hfDownloaderStatus?.ready) return;
+    if (hfDownloaderStatus?.pythonReady && hfDownloaderStatus.pythonSource !== "managed") {
+      const target = hfDownloaderStatus.pythonPath || "the active Python runtime";
+      if (!window.confirm(`Install Hugging Face downloader packages into this non-managed Python runtime?\n\n${target}`)) return;
+    }
     setInstallingHfDownloader(true);
     setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Hugging Face downloader package install\n`);
     try {
@@ -424,6 +436,7 @@ export default function App() {
       const status = await window.subtitler.getRuntimeSetupStatus();
       setRuntimeStatus(status);
       setPythonReady(status.python.ready && status.python.requirementsInstalled);
+      void refreshHfDownloaderStatus();
       if (feedbackSection) {
         const text = feedbackSection === "python" ? "Python runtime status refreshed" : "FFmpeg status refreshed";
         setRuntimeFeedback({ section: feedbackSection, text, ok: true });
@@ -447,6 +460,7 @@ export default function App() {
     try {
       await window.subtitler.createManagedPythonEnv();
       await refreshRuntimeStatus();
+      await refreshHfDownloaderStatus();
       setRuntimeFeedback({ section: "python", text: "Managed Python venv created", ok: true });
       setNotice("Managed Python venv created");
     } catch (error) {
@@ -466,6 +480,7 @@ export default function App() {
     try {
       await window.subtitler.deleteManagedPythonEnv();
       await refreshRuntimeStatus();
+      await refreshHfDownloaderStatus();
       setRuntimeFeedback({ section: "python", text: "Managed Python venv deleted", ok: true });
       setNotice("Managed Python venv deleted");
     } catch (error) {
@@ -484,6 +499,7 @@ export default function App() {
     try {
       await window.subtitler.installPythonRequirements();
       await refreshRuntimeStatus();
+      await refreshHfDownloaderStatus();
       setRuntimeFeedback({ section: "python", text: "Python requirements installed", ok: true });
       setNotice("Python requirements installed");
     } catch (error) {

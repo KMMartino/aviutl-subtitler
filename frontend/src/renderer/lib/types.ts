@@ -91,7 +91,9 @@ export type LocalModelProfile = {
 
 export type HuggingFaceDownloaderStatus = {
   ready: boolean;
+  pythonReady: boolean;
   pythonPath: string;
+  pythonSource: PythonRuntimeStatus["source"];
   version: string;
   xetReady: boolean;
   error: string;

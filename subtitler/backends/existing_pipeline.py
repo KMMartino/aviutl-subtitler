@@ -26,7 +26,7 @@ from subtitler.transcription_backend import (
     TranscriptToken,
     TranscriptionRequest,
 )
-from subtitler.vad import segment_speech, select_high_activation_chunks
+from subtitler.vad import segment_speech_with_groups, select_high_activation_chunks
 
 
 FAILED_TRANSCRIPTION_TEXT = "transcription failed"
@@ -34,6 +34,10 @@ FAILED_TRANSCRIPTION_TEXT = "transcription failed"
 
 def default_align_workers() -> int:
     return max(1, (os.cpu_count() or 4) // 4)
+
+
+def _cleanup_group_max_sec(media_duration_sec: float) -> float:
+    return max(60.0, min(max(0.0, media_duration_sec) / 2.0, 600.0))
 
 
 @dataclass
@@ -70,22 +74,29 @@ class ExistingPipelineBackend:
         alignment_cfg = self.config["alignment"]
 
         print("Running Silero VAD...")
-        chunks = segment_speech(
+        cleanup_group_max_sec = _cleanup_group_max_sec(request.duration_sec)
+        chunks, vad_groups = segment_speech_with_groups(
             samples=request.metadata["samples"],
             sample_rate=request.sample_rate,
             max_chunk_sec=float(vad_cfg["max_chunk_sec"]),
             min_speech_sec=float(vad_cfg["min_speech_sec"]),
             min_silence_ms=int(vad_cfg["min_silence_ms"]),
             speech_pad_ms=int(vad_cfg["speech_pad_ms"]),
+            cleanup_group_max_sec=cleanup_group_max_sec,
             temp_dir=request.temp_dir,
             keep_temp=True,
             progress_callback=request.metadata.get("stage_progress_reporter"),
         )
-        print(f"VAD chunks: {len(chunks)}")
+        print(
+            f"VAD chunks: {len(chunks)} fine, {len(vad_groups)} cleanup group(s) "
+            f"(cleanup_group_max_sec={cleanup_group_max_sec:.2f})",
+            flush=True,
+        )
         selection = build_speech_selection(workflow_cfg, chunks, request.duration_sec)
 
         if request.profile_enabled and request.sidecar_base is not None:
             write_vad_selection(request.sidecar_base.with_suffix(".vad_selection.csv"), chunks, selection.selected_chunks)
+            write_vad_selection(request.sidecar_base.with_suffix(".vad_groups.csv"), vad_groups, vad_groups)
 
         estimated_api_cost = estimate_backend_run_cost(self.config, selection.selected_speech_seconds)
         print(
@@ -339,6 +350,7 @@ def build_speech_selection(workflow_cfg: dict[str, Any], chunks: list[AudioChunk
             activation=chunk.vad_activation,
             peak=chunk.vad_peak,
             source="silero",
+            metadata={"vad_group_index": chunk.vad_group_index},
         )
         for chunk in chunks
     ]
@@ -378,11 +390,12 @@ def select_transcription_chunks(workflow_cfg: dict[str, Any], chunks: list[Audio
 def write_vad_selection(path: Path, chunks: list[AudioChunk], selected_chunks: list[AudioChunk]) -> None:
     selected_ids = {chunk.index for chunk in selected_chunks}
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["chunk_index,start,end,duration_sec,vad_activation,vad_peak,selected_for_transcription"]
+    lines = ["chunk_index,vad_group_index,start,end,duration_sec,vad_activation,vad_peak,selected_for_transcription"]
     for chunk in sorted(chunks, key=lambda item: (item.start, item.end)):
         duration = max(0.0, chunk.end - chunk.start)
         lines.append(
-            f"{chunk.index},{chunk.start:.6f},{chunk.end:.6f},{duration:.6f},"
+            f"{chunk.index},{chunk.vad_group_index if chunk.vad_group_index is not None else ''},"
+            f"{chunk.start:.6f},{chunk.end:.6f},{duration:.6f},"
             f"{chunk.vad_activation:.6f},{chunk.vad_peak:.6f},{str(chunk.index in selected_ids).lower()}"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

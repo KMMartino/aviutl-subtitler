@@ -198,6 +198,128 @@ def segment_speech(
     spans = _merge_speech_timestamps(
         speech, sample_rate, max_chunk_sec, min_silence_ms, speech_pad_ms, len(samples)
     )
+    return _chunks_from_spans(
+        spans,
+        samples,
+        sample_rate,
+        speech_probs,
+        window_size_samples,
+        temp_dir,
+        keep_temp,
+    )
+
+
+def segment_speech_with_groups(
+    samples: Any,
+    sample_rate: int,
+    max_chunk_sec: float,
+    min_speech_sec: float,
+    min_silence_ms: int,
+    speech_pad_ms: int,
+    cleanup_group_max_sec: float,
+    temp_dir: Path | None = None,
+    keep_temp: bool = False,
+    progress_callback: Callable[[str, float], None] | None = None,
+) -> tuple[list[AudioChunk], list[AudioChunk]]:
+    """Run fine VAD and tag chunks with cleanup groups split at the largest gaps."""
+    try:
+        import torch
+        from silero_vad import load_silero_vad
+    except ImportError as exc:
+        raise VadError("silero-vad and torch are required for VAD") from exc
+
+    if sample_rate != 16000:
+        raise VadError("Silero VAD input must be 16 kHz")
+    try:
+        model = load_silero_vad()
+        audio_tensor = torch.from_numpy(samples)
+        speech_probs, window_size_samples = _speech_probabilities(
+            audio_tensor,
+            model,
+            sample_rate,
+            (lambda progress: progress_callback("inference", progress)) if progress_callback else None,
+        )
+        fine_speech = _speech_timestamps_from_probabilities(
+            speech_probs,
+            window_size_samples,
+            sample_rate,
+            len(samples),
+            max_chunk_sec,
+            min_speech_sec,
+            min_silence_ms,
+            speech_pad_ms,
+        )
+    except Exception as exc:
+        raise VadError("Silero VAD failed") from exc
+
+    fine_spans = _merge_speech_timestamps(
+        fine_speech, sample_rate, max_chunk_sec, min_silence_ms, speech_pad_ms, len(samples)
+    )
+    fine_chunks = _chunks_from_spans(
+        fine_spans,
+        samples,
+        sample_rate,
+        speech_probs,
+        window_size_samples,
+        temp_dir=temp_dir,
+        keep_temp=keep_temp,
+    )
+    groups = assign_vad_groups_by_largest_gaps(fine_chunks, max_group_sec=max(cleanup_group_max_sec, max_chunk_sec))
+    return fine_chunks, groups
+
+
+def assign_vad_groups_by_largest_gaps(chunks: list[AudioChunk], max_group_sec: float) -> list[AudioChunk]:
+    ordered = sorted(chunks, key=lambda item: (item.start, item.end, item.index))
+    if not ordered:
+        return []
+    groups: list[list[AudioChunk]] = [ordered]
+    while True:
+        oversized = [
+            (index, group[-1].end - group[0].start)
+            for index, group in enumerate(groups)
+            if len(group) > 1 and group[-1].end - group[0].start > max_group_sec
+        ]
+        if not oversized:
+            break
+        group_index, _ = max(oversized, key=lambda item: item[1])
+        group = groups[group_index]
+        split_after = max(
+            range(len(group) - 1),
+            key=lambda index: group[index + 1].start - group[index].end,
+        )
+        left = group[: split_after + 1]
+        right = group[split_after + 1 :]
+        groups[group_index : group_index + 1] = [left, right]
+
+    group_chunks: list[AudioChunk] = []
+    for group_index, group in enumerate(groups):
+        for chunk in group:
+            chunk.vad_group_index = group_index
+        first = group[0]
+        last = group[-1]
+        group_chunks.append(
+            AudioChunk(
+                index=group_index,
+                start=first.start,
+                end=last.end,
+                samples=[],
+                vad_activation=sum(chunk.vad_activation for chunk in group) / len(group),
+                vad_peak=max(chunk.vad_peak for chunk in group),
+                vad_group_index=group_index,
+            )
+        )
+    return group_chunks
+
+
+def _chunks_from_spans(
+    spans: list[tuple[int, int]],
+    samples: Any,
+    sample_rate: int,
+    speech_probs: list[float],
+    window_size_samples: int,
+    temp_dir: Path | None,
+    keep_temp: bool,
+) -> list[AudioChunk]:
     chunks: list[AudioChunk] = []
     for index, (start_sample, end_sample) in enumerate(spans):
         chunk_samples = samples[start_sample:end_sample]
@@ -217,6 +339,7 @@ def segment_speech(
                 wav_path=wav_path,
                 vad_activation=activation,
                 vad_peak=peak,
+                vad_group_index=index,
             )
         )
     return chunks

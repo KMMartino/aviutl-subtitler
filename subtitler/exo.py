@@ -29,8 +29,42 @@ def generate_exo_object(
     text: str,
     settings: ExoSettings,
     layer: int = 1,
+    font_size: int | None = None,
+    text_color: str | None = None,
+    y_position: float | None = None,
+    include_animation: bool = False,
 ) -> str:
     encoded_text = encode_text_for_exo(text)
+    size = font_size if font_size is not None else settings.font_size
+    color = text_color if text_color is not None else settings.text_color
+    y = y_position if y_position is not None else settings.y_position
+    animation = ""
+    standard_index = 6
+    if include_animation:
+        animation = f"""[{index}.6]
+_name=アニメーション効果
+track0=0.20
+track1=105.00
+track2=0.00
+track3=0.00
+check0=100
+type=6
+filter=0
+name=
+param=
+[{index}.7]
+_name=アニメーション効果
+track0=-0.20
+track1=105.00
+track2=0.00
+track3=0.00
+check0=100
+type=6
+filter=0
+name=
+param=
+"""
+        standard_index = 8
     return f"""[{index}]
 start={start_frame}
 end={end_frame}
@@ -39,7 +73,7 @@ overlay=1
 camera=0
 [{index}.0]
 _name=テキスト
-サイズ={settings.font_size}
+サイズ={size}
 表示速度=0.0
 文字毎に個別オブジェクト=0
 移動座標上に表示する=0
@@ -54,7 +88,7 @@ align=7
 spacing_x=0
 spacing_y=0
 precision=1
-color={settings.text_color}
+color={color}
 color2=00ffff
 font={settings.font}
 text={encoded_text}
@@ -100,10 +134,10 @@ _disable=1
 ぼかし=50
 color=ffffff
 file=
-[{index}.6]
+{animation}[{index}.{standard_index}]
 _name=標準描画
 X=0.0
-Y={settings.y_position}
+Y={y}
 Z=0.0
 拡大率=100.00
 透明度=0.0
@@ -148,15 +182,36 @@ audio_ch={settings.audio_ch}"""
     objects = []
     index = 0
     for start, end, text in frame_ranges:
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=1))
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=1, include_animation=True))
         index += 1
     for start, end, text in _marker_frame_ranges(chapter_markers or [], settings.rate):
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=2))
-        index += 1
-    for start, end, text in _marker_frame_ranges(mistranscription_markers or [], settings.rate):
         objects.append(generate_exo_object(index, start, end, text, settings, layer=3))
         index += 1
+    for start, end, text in _marker_frame_ranges(mistranscription_markers or [], settings.rate):
+        objects.append(
+            generate_exo_object(
+                index,
+                start,
+                end,
+                text,
+                settings,
+                layer=2,
+                font_size=max(24, int(settings.font_size * 0.55)),
+                text_color=_diagnostic_text_color(text),
+                y_position=max(40.0, settings.y_position - settings.font_size * 1.25),
+            )
+        )
+        index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
+
+
+def _diagnostic_text_color(text: str) -> str:
+    lowered = text.lower()
+    if "high" in lowered:
+        return "ff0000"
+    if "medium" in lowered:
+        return "ff9900"
+    return "ffff00"
 
 
 def _marker_frame_ranges(markers: list[ExoMarker], fps: int) -> list[tuple[int, int, str]]:

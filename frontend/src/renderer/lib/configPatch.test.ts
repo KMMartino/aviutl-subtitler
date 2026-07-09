@@ -91,4 +91,19 @@ describe("config patching", () => {
     expect(next.backend.fallback_transcriber).toBe("openai");
     expect(next.backend.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
   });
+
+  it("defaults hosted fallback transcription to the recommended model pair", () => {
+    const core = extractCoreSettings({
+      audio: { track: 1 },
+      backend: {
+        transcriber: "gemini",
+        transcription_model: "gemini-3.5-flash"
+      },
+      cleanup: { backend: "openai", api_model: "gpt-5.4-mini" },
+      diagnostics: { profile: true }
+    });
+
+    expect(core.hosted?.fallbackTranscriptionProvider).toBe("gemini");
+    expect(core.hosted?.fallbackTranscriptionModel).toBe("gemini-3.1-pro-preview");
+  });
 });

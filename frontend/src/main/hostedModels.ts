@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import type { HostedModelVerification } from "../renderer/lib/types";
-import { APPROVED_MODELS } from "../shared/hostedModelCatalog";
+import { APPROVED_MODELS, OPENAI_TRANSCRIPTION_MODEL_ALIASES } from "../shared/hostedModelCatalog";
 
 export { APPROVED_MODELS };
 
@@ -23,11 +23,12 @@ async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["opena
     if (!response.ok) throw new Error(await responseMessage(response));
     const body = await response.json() as { data?: Array<{ id?: string }> };
     const names = new Set((body.data ?? []).map((model) => String(model.id ?? "")));
+    const hasAlias = (model: string) => (OPENAI_TRANSCRIPTION_MODEL_ALIASES[model] ?? [model]).some((alias) => names.has(alias));
     return {
       keyPresent: true,
       error: "",
-      transcription: names.has(APPROVED_MODELS.openaiTranscription),
-      transcriptionMini: names.has(APPROVED_MODELS.openaiTranscriptionMini),
+      transcription: hasAlias(APPROVED_MODELS.openaiTranscription),
+      transcriptionMini: hasAlias(APPROVED_MODELS.openaiTranscriptionMini),
       cleanup: names.has(APPROVED_MODELS.openaiCleanup),
       cleanup55: names.has(APPROVED_MODELS.openaiCleanup55)
     };

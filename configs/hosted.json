@@ -3,8 +3,8 @@
     "name": "existing-pipeline",
     "transcriber": "gemini",
     "transcription_model": "gemini-3.5-flash",
-    "fallback_transcriber": "openai",
-    "fallback_transcription_model": "gpt-4o-mini-transcribe",
+    "fallback_transcriber": "gemini",
+    "fallback_transcription_model": "gemini-3.1-pro-preview",
     "language": "ja",
     "transcription_workers": 4
   },
@@ -21,9 +21,9 @@
   "cleanup": {
     "backend": "openai",
     "api_model": "gpt-5.4-mini",
-    "window_subtitles": 8,
+    "window_subtitles": 256,
     "workers": 8,
-    "skip_final_review": true,
+    "skip_final_review": false,
     "llm_split_planning": true
   },
   "subtitles": {

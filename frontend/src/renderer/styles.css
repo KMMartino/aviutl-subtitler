@@ -123,7 +123,7 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .icon-button { width: 36px; height: 36px; padding: 0; }
 .check, .switch-label { display: inline-flex; align-items: center; gap: 7px; width: fit-content; justify-self: start; color: var(--muted); cursor: pointer; }
 .check input, input.switch { width: auto; }.compact { font-size: 12px; }
-.additional-settings-panel { gap: 8px; padding: 11px; }
+.additional-settings-panel { flex: 0 0 auto; min-height: 78px; gap: 8px; padding: 11px; }
 .additional-settings-panel .panel-title { min-height: 22px; }
 .additional-settings-empty { color: var(--muted); font-size: 12px; }
 .field-group { display: grid; gap: 5px; font-size: 13px; color: var(--muted); }
@@ -269,7 +269,7 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .log-panel .panel-title { min-height: 24px; }
 .log-panel pre { margin: 0; height: 100%; min-height: 0; overflow: auto; white-space: pre-wrap; background: var(--log-bg); color: var(--log-text); border-radius: 6px; padding: 10px; font: 12px/1.45 Consolas, "Cascadia Mono", monospace; }
 .output-path { min-height: 34px; padding: 8px; border-radius: 6px; background: var(--soft); overflow-wrap: anywhere; }
-.output-panel { align-content: start; }
+.output-panel { flex: 0 0 auto; min-height: 118px; align-content: start; }
 .collapsible-panel-body {
   min-height: 0; display: grid; grid-template-rows: 1fr; opacity: 1; visibility: visible; overflow: hidden;
   transition: grid-template-rows .18s ease, opacity .14s ease, visibility 0s;
@@ -283,8 +283,8 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
 .sidecar-settings .disabled-field { background: var(--control); }
 .sidecar-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
 .sidecar-actions button { min-width: 0; }
-.glossary-panel { overflow: hidden; transition: gap .18s ease; }
-.glossary-panel.expanded { flex: 1 1 auto; grid-template-rows: auto minmax(0, 1fr); }
+.glossary-panel { min-height: 0; overflow: hidden; transition: gap .18s ease; }
+.glossary-panel.expanded { flex: 1 1 80px; grid-template-rows: auto minmax(0, 1fr); }
 .glossary-panel.collapsed { flex: 0 0 auto; }
 .glossary-panel.collapsed { gap: 0; padding: 13px; }
 .glossary-panel .collapsible-panel-content { display: flex; flex-direction: column; }
@@ -379,16 +379,6 @@ h1 { font-size: 22px; margin: 0 0 3px; letter-spacing: 0; transition: font-size 
   .thumbnail-frame { min-height: 64px; }
   .sidecar-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
   .sidecar-actions button { padding: 6px; }
-}
-
-@media (max-height: 620px) {
-  h1 { font-size: 18px; margin-bottom: 0; }
-  .subtle, .drop-hint { max-height: 0; opacity: 0; pointer-events: none; }
-  .topbar-controls { gap: 6px; }
-  .panel-title { min-height: 22px; }
-  button { padding: 6px 8px; }
-  input, textarea, select { padding: 6px 8px; }
-  .media-facts { grid-template-columns: auto minmax(0, 1fr); font-size: 11px; }
 }
 
 @media (max-width: 900px) {

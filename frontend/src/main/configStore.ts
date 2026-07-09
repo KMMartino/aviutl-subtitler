@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, AppState, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { workflows } from "../renderer/lib/workflowLabels";
+import { APPROVED_MODELS, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
 import { defaultPythonPath } from "./python";
 import { runtimePaths, type RuntimePaths } from "./paths";
 
@@ -52,6 +53,7 @@ export function ensureFrontendState(paths = runtimePaths()): void {
   if (!fs.existsSync(settingsPath(paths))) {
     writeJson(settingsPath(paths), defaultSettings(paths));
   }
+  migrateHostedDefaults(paths);
   rewriteLegacyUserDataPaths(paths);
 }
 
@@ -141,6 +143,39 @@ function rewriteLegacyUserDataPaths(paths: RuntimePaths): void {
     if (JSON.stringify(rewritten) !== JSON.stringify(current)) {
       writeJson(file, rewritten);
     }
+  }
+}
+
+function migrateHostedDefaults(paths: RuntimePaths): void {
+  for (const workflow of ["hosted", "hosted-long-stream"] as const) {
+    const file = workflowConfigPath(workflow, paths);
+    if (!fs.existsSync(file)) continue;
+    const config = readJson<WorkflowConfig>(file);
+    let changed = false;
+    const oldHostedDefaultFallback = (
+      config.backend?.transcriber === "gemini"
+      && config.backend.transcription_model === APPROVED_MODELS.gemini
+      && config.backend.fallback_transcriber === "openai"
+      && config.backend.fallback_transcription_model === APPROVED_MODELS.openaiTranscriptionMini
+    );
+    const oldHostedDefaultCleanup = (
+      config.cleanup?.backend === "openai"
+      && config.cleanup.api_model === APPROVED_MODELS.openaiCleanup
+      && (config.cleanup.window_subtitles === 8 || config.cleanup.window_subtitles === 256 || config.cleanup.window_subtitles === undefined)
+    );
+    if (
+      oldHostedDefaultFallback
+    ) {
+      const fallback = recommendedFallbackTranscription("gemini", APPROVED_MODELS.gemini);
+      config.backend.fallback_transcriber = fallback.provider;
+      config.backend.fallback_transcription_model = fallback.model;
+      changed = true;
+    }
+    if (oldHostedDefaultFallback && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
+      config.cleanup.skip_final_review = false;
+      changed = true;
+    }
+    if (changed) writeJson(file, config);
   }
 }
 

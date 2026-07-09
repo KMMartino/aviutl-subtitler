@@ -4,7 +4,7 @@ import type React from "react";
 import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
 import TooltipLabel from "./TooltipLabel";
-import { hostedOptions as catalogHostedOptions, isHostedModelVerified, type HostedOption } from "../../shared/hostedModelCatalog";
+import { APPROVED_MODELS, hostedOptions as catalogHostedOptions, isHostedModelVerified, recommendedFallbackTranscription, type HostedOption } from "../../shared/hostedModelCatalog";
 
 type Props = {
   workflow: WorkflowName;
@@ -68,11 +68,11 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   const local = settings.local ?? { model: "", mmproj: "", llamaServer: "", cleanupModel: "", cleanupLlamaServer: "", transcriptionDraftModel: "", cleanupDraftModel: "" };
   const hosted = settings.hosted ?? {
     transcriptionProvider: "gemini",
-    transcriptionModel: "gemini-3.5-flash",
-    fallbackTranscriptionProvider: "openai",
-    fallbackTranscriptionModel: "gpt-4o-mini-transcribe",
+    transcriptionModel: APPROVED_MODELS.gemini,
+    fallbackTranscriptionProvider: recommendedFallbackTranscription("gemini", APPROVED_MODELS.gemini).provider,
+    fallbackTranscriptionModel: recommendedFallbackTranscription("gemini", APPROVED_MODELS.gemini).model,
     cleanupProvider: "openai",
-    cleanupModel: "gpt-5.4-mini",
+    cleanupModel: APPROVED_MODELS.openaiCleanup,
     envFile: ""
   };
   const anyLocalProfileInstalled = Object.values(localProfileStatuses).some((status) => status.installed);
@@ -83,6 +83,8 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   const [envExpanded, setEnvExpanded] = useState(!envStatus.exists);
   const [serverExpanded, setServerExpanded] = useState(!pathStatus.llamaServer?.exists);
   const runtimeBusy = Boolean(runtimeAction);
+  const hfPythonReady = Boolean(hfDownloaderStatus?.pythonReady);
+  const hfReady = Boolean(hfDownloaderStatus?.ready);
   useEffect(() => setLocalModelExpanded(!anyLocalProfileInstalled), [anyLocalProfileInstalled]);
   useEffect(() => setPythonExpanded(!pythonReady), [pythonReady]);
   useEffect(() => setFfmpegExpanded(!runtimeStatus?.ffmpeg.ready), [runtimeStatus?.ffmpeg.ready]);
@@ -158,22 +160,28 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
               <span className="tooltip" tabIndex={0}><Info size={15} /><span className="tooltip-content">{localProfileBlurb(selectedLocalProfile)}</span></span>
             </div>
             <label>
-              <TooltipLabel text="Direct HTTPS works without Python packages. Hugging Face downloader may be faster, but requires the managed Python venv and extra Hugging Face packages.">Download method</TooltipLabel>
+              <TooltipLabel text="Basic HTTP is always available. The Python Hugging Face downloader can be faster when the Python runtime has huggingface_hub and hf_xet installed.">Download method</TooltipLabel>
               <select value={modelDownloadMode} onChange={(event) => onModelDownloadMode(event.target.value as "direct" | "huggingface")}>
-                <option value="direct">Direct HTTPS</option>
-                <option value="huggingface">Hugging Face downloader</option>
+                <option value="direct">Basic HTTP request</option>
+                <option value="huggingface">Python HF downloader</option>
               </select>
             </label>
             {modelDownloadMode === "huggingface" && (
               <>
                 <RuntimeLine
-                  label="HF packages"
-                  value={hfDownloaderStatus?.ready ? `Ready${hfDownloaderStatus.xetReady ? " with hf_xet" : ""}` : "Not installed"}
-                  ok={Boolean(hfDownloaderStatus?.ready)}
+                  label="Python"
+                  value={hfPythonReady ? runtimeSourceLabel(hfDownloaderStatus) : "Required"}
+                  ok={hfPythonReady}
                 />
-                <button onClick={onInstallHfDownloader} disabled={installingHfDownloader || downloadingModels}>
+                <RuntimeLine
+                  label="HF packages"
+                  value={hfReady ? `Ready${hfDownloaderStatus?.xetReady ? " with hf_xet" : ""}` : hfPythonReady ? "Install to enable" : "Needs Python first"}
+                  ok={hfReady}
+                />
+                {!hfReady && <div className="disabled-field">{hfPythonReady ? "Install downloader packages to enable the faster path." : "Create or select a Python runtime for the faster path."}</div>}
+                <button onClick={onInstallHfDownloader} disabled={hfReady || !hfPythonReady || installingHfDownloader || downloadingModels}>
                   {installingHfDownloader ? <LoadingDots /> : <Download size={16} />}
-                  {installingHfDownloader ? "Installing packages..." : "Install HF downloader packages"}
+                  {installingHfDownloader ? "Installing packages..." : hfReady ? "Downloader packages installed" : "Install downloader packages"}
                 </button>
               </>
             )}
@@ -187,7 +195,7 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
                 {deletingManaged === "models" ? "Deleting..." : "Delete managed files"}
               </button>
             </div>
-            <div className="managed-server-note">Download progress appears in the logs on the main panel. Large model downloads can take a long time, especially when Hugging Face is busy; running them overnight may be more practical. The Hugging Face downloader may be faster, but it requires the managed Python venv plus additional packages installed from this section.</div>
+            <div className="managed-server-note">Download progress appears in the logs on the main panel. Large model downloads can take a long time, especially when Hugging Face is busy; running them overnight may be more practical.</div>
           </div>
           <label>
             <TooltipLabel text="Directory managed by the application for downloaded GGUF models and multimodal projectors.">Models directory</TooltipLabel>
@@ -238,42 +246,68 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
       )}
       <SetupSection
         title="Python runtime"
-        detail={runtimeStatus?.python.ready ? `${runtimeStatus.python.source} · ${runtimeStatus.python.version}` : "Choose or create a Python runtime"}
+        detail={pythonRuntimeSummary(runtimeStatus)}
         ready={pythonReady}
         expanded={pythonExpanded}
         onToggle={() => setPythonExpanded((value) => !value)}
       >
+        <RuntimeLine
+          label="Active"
+          value={runtimeStatus?.python.ready ? `${runtimeSourceText(runtimeStatus.python.source)} · ${runtimeStatus.python.version}` : "Not found"}
+          ok={Boolean(runtimeStatus?.python.ready)}
+        />
+        <RuntimeLine
+          label="Path"
+          value={runtimeStatus?.python.resolvedPath || "No usable Python found"}
+          ok={Boolean(runtimeStatus?.python.ready)}
+        />
+        <RuntimeLine
+          label="App deps"
+          value={runtimeStatus?.python.requirementsInstalled ? "Installed" : "Missing ctc_forced_aligner"}
+          ok={Boolean(runtimeStatus?.python.requirementsInstalled)}
+        />
         <PathInput
-          label="Python executable"
-          tip="Python executable used to run the subtitle engine. The app prefers .venv-win/Scripts/python.exe; change this only when your venv is elsewhere."
+          label="Manual Python override"
+          tip="Leave empty for auto mode: the app uses its managed venv when available, otherwise Python on PATH. Set this only to force a specific Python executable."
           value={pythonPath}
-          status={{ path: pythonPath, exists: pythonReady }}
+          placeholder="Auto: managed venv, then python on PATH"
+          showStatus={false}
           onChange={onPythonPath}
           onPick={() => pickPath(onPythonPath, true)}
-          readyText="Runtime ready"
-          missingText="Runtime not ready"
         />
+        {pythonPath && (
+          <div className="runtime-actions">
+            <button onClick={() => onPythonPath("")} disabled={runtimeBusy}>Use auto runtime</button>
+          </div>
+        )}
         <div className="runtime-actions">
           <button onClick={() => onRefreshRuntime("refresh-python", "python")} disabled={runtimeBusy}>
             {runtimeAction === "refresh-python" ? <LoadingDots /> : <RefreshCw size={16} />}
             {runtimeAction === "refresh-python" ? "Refreshing..." : "Refresh runtime"}
           </button>
-          <button onClick={onCreateManagedPython} disabled={runtimeBusy}>
-            {runtimeAction === "create-python" ? <LoadingDots /> : <Download size={16} />}
-            {runtimeAction === "create-python" ? "Creating venv..." : "Create managed venv"}
-          </button>
-          <button onClick={onInstallPythonRequirements} disabled={runtimeBusy || !runtimeStatus?.python.ready}>
-            {runtimeAction === "install-python" ? <LoadingDots /> : <Download size={16} />}
-            {runtimeAction === "install-python" ? "Installing..." : "Install requirements"}
-          </button>
-          <button onClick={onDeleteManagedPython} disabled={runtimeBusy || !runtimeStatus?.python.managedInstalled}>
-            {runtimeAction === "delete-python" ? <LoadingDots /> : <Trash2 size={16} />}
-            {runtimeAction === "delete-python" ? "Deleting..." : "Delete managed venv"}
-          </button>
+          {!runtimeStatus?.python.managedInstalled && (
+            <button onClick={onCreateManagedPython} disabled={runtimeBusy}>
+              {runtimeAction === "create-python" ? <LoadingDots /> : <Download size={16} />}
+              {runtimeAction === "create-python" ? "Creating venv..." : "Create managed venv"}
+            </button>
+          )}
+          {runtimeStatus?.python.source === "managed" && !runtimeStatus.python.requirementsInstalled && (
+            <button onClick={onInstallPythonRequirements} disabled={runtimeBusy || !runtimeStatus.python.ready}>
+              {runtimeAction === "install-python" ? <LoadingDots /> : <Download size={16} />}
+              {runtimeAction === "install-python" ? "Installing..." : "Install managed requirements"}
+            </button>
+          )}
+          {runtimeStatus?.python.managedInstalled && (
+            <button onClick={onDeleteManagedPython} disabled={runtimeBusy}>
+              {runtimeAction === "delete-python" ? <LoadingDots /> : <Trash2 size={16} />}
+              {runtimeAction === "delete-python" ? "Deleting..." : "Delete managed venv"}
+            </button>
+          )}
         </div>
         {runtimeFeedback?.section === "python" && <RuntimeFeedback feedback={runtimeFeedback} />}
-        <RuntimeLine label="Resolved" value={runtimeStatus?.python.resolvedPath || "Not found"} ok={Boolean(runtimeStatus?.python.ready)} />
-        <RuntimeLine label="Requirements" value={runtimeStatus?.python.requirementsInstalled ? "Installed" : "Missing ctc_forced_aligner"} ok={Boolean(runtimeStatus?.python.requirementsInstalled)} />
+        {runtimeStatus?.python.ready && runtimeStatus.python.source !== "managed" && !runtimeStatus.python.requirementsInstalled && (
+          <div className="disabled-field">The active Python is outside the managed venv and is missing app requirements. Install them in that environment, or clear the override to use the managed venv.</div>
+        )}
         {runtimeStatus?.python.error && <div className="disabled-field">{runtimeStatus.python.error}</div>}
       </SetupSection>
       <SetupSection
@@ -283,23 +317,28 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
         expanded={ffmpegExpanded}
         onToggle={() => setFfmpegExpanded((value) => !value)}
       >
+        <RuntimeLine label="Active" value={runtimeStatus?.ffmpeg.ready ? `${runtimeSourceText(runtimeStatus.ffmpeg.source)} · ${runtimeStatus.ffmpeg.version}` : "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
+        <RuntimeLine label="ffmpeg" value={runtimeStatus?.ffmpeg.ffmpegPath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
+        <RuntimeLine label="ffprobe" value={runtimeStatus?.ffmpeg.ffprobePath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
         <div className="runtime-actions">
           <button onClick={() => onRefreshRuntime("refresh-ffmpeg", "ffmpeg")} disabled={runtimeBusy}>
             {runtimeAction === "refresh-ffmpeg" ? <LoadingDots /> : <RefreshCw size={16} />}
             {runtimeAction === "refresh-ffmpeg" ? "Refreshing..." : "Refresh FFmpeg"}
           </button>
-          <button onClick={onDownloadFfmpeg} disabled={runtimeBusy}>
-            {runtimeAction === "download-ffmpeg" ? <LoadingDots /> : <Download size={16} />}
-            {runtimeAction === "download-ffmpeg" ? "Downloading..." : "Download FFmpeg"}
-          </button>
-          <button onClick={onDeleteFfmpeg} disabled={runtimeBusy || !runtimeStatus?.ffmpeg.managedInstalled}>
-            {runtimeAction === "delete-ffmpeg" ? <LoadingDots /> : <Trash2 size={16} />}
-            {runtimeAction === "delete-ffmpeg" ? "Deleting..." : "Delete managed FFmpeg"}
-          </button>
+          {!runtimeStatus?.ffmpeg.ready && (
+            <button onClick={onDownloadFfmpeg} disabled={runtimeBusy}>
+              {runtimeAction === "download-ffmpeg" ? <LoadingDots /> : <Download size={16} />}
+              {runtimeAction === "download-ffmpeg" ? "Downloading..." : "Download managed FFmpeg"}
+            </button>
+          )}
+          {runtimeStatus?.ffmpeg.managedInstalled && (
+            <button onClick={onDeleteFfmpeg} disabled={runtimeBusy}>
+              {runtimeAction === "delete-ffmpeg" ? <LoadingDots /> : <Trash2 size={16} />}
+              {runtimeAction === "delete-ffmpeg" ? "Deleting..." : "Delete managed FFmpeg"}
+            </button>
+          )}
         </div>
         {runtimeFeedback?.section === "ffmpeg" && <RuntimeFeedback feedback={runtimeFeedback} />}
-        <RuntimeLine label="ffmpeg" value={runtimeStatus?.ffmpeg.ffmpegPath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
-        <RuntimeLine label="ffprobe" value={runtimeStatus?.ffmpeg.ffprobePath || "Not found"} ok={Boolean(runtimeStatus?.ffmpeg.ready)} />
         {runtimeStatus?.ffmpeg.error && <div className="disabled-field">{runtimeStatus.ffmpeg.error}</div>}
       </SetupSection>
       {isHostedWorkflow(workflow) && (
@@ -400,6 +439,25 @@ function localProfileBlurb(id: string): string {
   if (id === "8gb-gpu-gemma") return "Uses Gemma 4 E2B Q5 with its F16 audio projector for transcription and E2B Q6 for cleanup. The smaller model leaves roughly 2 GB or more for runtime context.";
   if (id === "12gb-gpu-gemma") return "Uses Gemma 4 E4B Q6 with its F16 audio projector for transcription and Gemma 4 12B Q5 for cleanup. Since the models run sequentially, each stage retains roughly 3-4 GB for runtime context.";
   return "Uses Gemma 4 E4B Q6 with its F16 audio projector for transcription and Gemma 4 12B Q6 for cleanup. Models run sequentially and target a 16 GB GPU.";
+}
+
+function runtimeSourceLabel(status: HuggingFaceDownloaderStatus | null): string {
+  if (!status?.pythonReady) return "Required";
+  if (status.pythonSource === "selected") return "Selected runtime";
+  if (status.pythonSource === "managed") return "Managed runtime";
+  return "Python on PATH";
+}
+
+function pythonRuntimeSummary(status: RuntimeSetupStatus | null): string {
+  if (!status?.python.ready) return "Choose a Python runtime";
+  return `${runtimeSourceText(status.python.source)} · ${status.python.version}`;
+}
+
+function runtimeSourceText(source: "selected" | "managed" | "path" | "missing"): string {
+  if (source === "selected") return "Manual override";
+  if (source === "managed") return "Managed venv";
+  if (source === "path") return "Python on PATH";
+  return "Missing";
 }
 
 function LoadingDots() {
@@ -636,17 +694,17 @@ function ProviderVerification({ label, result }: { label: string; result: Hosted
   return <div className={ok ? "verification-ok" : "verification-failed"} title={detail}>{ok ? <CheckCircle size={15} /> : <AlertTriangle size={15} />}<span><strong>{label}</strong><small>{detail}</small></span></div>;
 }
 
-function PathInput({ label, tip, value, status, onChange, onPick, readyText = "File found", missingText = "File missing" }: { label: string; tip: string; value: string; status?: PathStatus; onChange(value: string): void; onPick(): void; readyText?: string; missingText?: string }) {
+function PathInput({ label, tip, value, status, onChange, onPick, readyText = "File found", missingText = "File missing", placeholder = "", showStatus = true }: { label: string; tip: string; value: string; status?: PathStatus; onChange(value: string): void; onPick(): void; readyText?: string; missingText?: string; placeholder?: string; showStatus?: boolean }) {
   return (
     <label>
       <span className="path-label">
         <TooltipLabel text={tip}>{label}</TooltipLabel>
-        <span className={status?.exists ? "mini-ok" : "mini-warn"} title={status?.exists ? readyText : missingText}>
+        {showStatus && <span className={status?.exists ? "mini-ok" : "mini-warn"} title={status?.exists ? readyText : missingText}>
           {status?.exists ? <CheckCircle size={16} /> : <AlertTriangle size={16} />}
-        </span>
+        </span>}
       </span>
       <div className="row">
-        <input value={value} onChange={(event) => onChange(event.target.value)} />
+        <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
         <button className="icon-button" onClick={onPick} title={`Choose ${label}`}><FolderOpen size={17} /></button>
       </div>
     </label>

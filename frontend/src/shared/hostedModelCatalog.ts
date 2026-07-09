@@ -12,6 +12,14 @@ export const APPROVED_MODELS = {
   gemini31FlashLite: "gemini-3.1-flash-lite"
 } as const;
 
+export const OPENAI_TRANSCRIPTION_MODEL_ALIASES: Record<string, string[]> = {
+  [APPROVED_MODELS.openaiTranscription]: [APPROVED_MODELS.openaiTranscription],
+  [APPROVED_MODELS.openaiTranscriptionMini]: [
+    APPROVED_MODELS.openaiTranscriptionMini,
+    "gpt-4o-mini-transcribe-2025-12-15"
+  ]
+};
+
 export type HostedOption = {
   provider: HostedProvider;
   model: string;
@@ -89,6 +97,25 @@ export function hostedOptions(role: HostedRole): HostedOption[] {
 
 export function approvedHostedModels(provider: HostedProvider, role: HostedRole): string[] {
   return hostedOptions(role).filter((model) => model.provider === provider).map((model) => model.model);
+}
+
+export function recommendedFallbackTranscription(
+  provider: HostedProvider,
+  model: string,
+): { provider: HostedProvider; model: string } {
+  if (provider === "gemini") {
+    if (model === APPROVED_MODELS.gemini31Pro) {
+      return { provider: "gemini", model: APPROVED_MODELS.gemini };
+    }
+    if (model === APPROVED_MODELS.gemini31FlashLite) {
+      return { provider: "gemini", model: APPROVED_MODELS.gemini };
+    }
+    return { provider: "gemini", model: APPROVED_MODELS.gemini31Pro };
+  }
+  if (model === APPROVED_MODELS.openaiTranscription) {
+    return { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionMini };
+  }
+  return { provider: "openai", model: APPROVED_MODELS.openaiTranscription };
 }
 
 export function isHostedModelApproved(provider: HostedProvider, model: string, role: HostedRole): boolean {

@@ -11,6 +11,15 @@ from .errors import SubtitlerError
 
 
 WORKFLOWS = {"local", "hosted", "local-long-stream", "hosted-long-stream"}
+OPENAI_TRANSCRIPTION_MODEL_ALIASES = {
+    "gpt-4o-mini-transcribe": {
+        "gpt-4o-mini-transcribe",
+        "gpt-4o-mini-transcribe-2025-12-15",
+    },
+    "gpt-4o-transcribe": {
+        "gpt-4o-transcribe",
+    },
+}
 
 
 def project_root() -> Path:
@@ -21,6 +30,26 @@ def default_config_path(workflow: str) -> Path:
     if workflow not in WORKFLOWS:
         raise SubtitlerError(f"Unknown workflow: {workflow}")
     return project_root() / "configs" / f"{workflow}.json"
+
+
+def canonical_openai_transcription_model(model: str) -> str:
+    for canonical, aliases in OPENAI_TRANSCRIPTION_MODEL_ALIASES.items():
+        if model in aliases:
+            return canonical
+    return model
+
+
+def openai_transcription_aliases(model: str) -> set[str]:
+    canonical = canonical_openai_transcription_model(model)
+    return set(OPENAI_TRANSCRIPTION_MODEL_ALIASES.get(canonical, {model}))
+
+
+def openai_model_available(configured_model: str, available_names: list[str] | set[str]) -> str | None:
+    available = set(available_names)
+    for alias in openai_transcription_aliases(configured_model):
+        if alias in available:
+            return alias
+    return None
 
 
 def load_workflow_config(workflow: str, explicit_path: Path | None = None) -> dict[str, Any]:
@@ -127,7 +156,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
 
     if is_hosted:
         approved_transcription = {
-            "openai": {"gpt-4o-transcribe", "gpt-4o-mini-transcribe"},
+            "openai": set().union(*OPENAI_TRANSCRIPTION_MODEL_ALIASES.values()),
             "gemini": {"gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"},
         }
         approved_cleanup = {

@@ -17,6 +17,73 @@ from .glossary import GlossaryEntry, format_glossary
 from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 
 
+def cleanup_base_rules(mode: str) -> str:
+    mode_line = {
+        "fillers": "Remove filler sounds such as えー, あー, うーん, あの, その, and まあ when doing so keeps the spoken flow natural.",
+        "glossary": "Fix glossary terms when clearly intended.",
+        "full": "Remove filler sounds such as えー, あー, うーん, あの, その, and まあ when doing so keeps the spoken flow natural, and fix glossary terms when clearly intended.",
+    }.get(mode, "Clean the subtitle text conservatively.")
+    rules = [
+        "Faithfully preserve what was likely spoken.",
+        "Keep the same language.",
+        "Do not translate.",
+        "Do not summarize.",
+        "Do not make casual speech more formal or polished.",
+        "Preserve plausible repetitions, self-corrections, and streamer-style phrasing.",
+        mode_line,
+        "Keep technical terms exactly as written in the glossary.",
+        "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
+    ]
+    return "\n".join(f"- {rule}" for rule in rules)
+
+
+def split_planning_prompt(text: str, max_chars: int) -> str:
+    min_chars = max(6, max_chars // 4)
+    return (
+        "Task:\n"
+        "Insert exactly one split marker into this transcript.\n\n"
+        "Rules:\n"
+        "- Copy the input text exactly.\n"
+        "- Insert the marker <SPLIT> exactly once at the best subtitle break.\n"
+        "- Do not rewrite, summarize, translate, add, remove, normalize, re-spell, or reorder any text.\n"
+        "- Never split inside a contiguous English, product, event, game, or title name when it can be avoided.\n"
+        "- Treat katakana runs, ASCII letters, digits, and title separators such as ・, -, /, and & as fragile title text.\n"
+        "- If the text contains a list of game or event titles, prefer boundaries between list items.\n"
+        f"- Both sides should be at least {min_chars} characters when possible.\n"
+        f"- Prefer both sides to be at most {max_chars} characters when possible.\n"
+        "- Choose a split point near the center if there is no strong natural break.\n"
+        "- Prefer sentence, phrase, clause, or list-item boundaries.\n"
+        "- Output only the copied text with <SPLIT> inserted. No explanations.\n\n"
+        f"Input:\n{text}\n\n"
+        "Output:"
+    )
+
+
+def mistranscription_review_prompt(numbered_lines: list[tuple[int, str]]) -> str:
+    lines = "\n".join(f"{line_number}. {text}" for line_number, text in numbered_lines)
+    return (
+        "Task:\n"
+        "Find only subtitle text spans likely worth a human editor's attention. "
+        "Favor precision over recall; this pass should not flag normal speech quirks.\n\n"
+        "Rules:\n"
+        "- Do not rewrite or correct the transcript.\n"
+        "- Preserve intentional speaking quirks, casual particles, fillers, repeated emphasis, dialect, and streamer cadence unless they are clearly an ASR or cleanup artifact.\n"
+        "- Strongly flag broken product, game, event, or title names; suspicious English/Japanese title concatenation; partial cut fragments; bad subtitle-boundary joins; impossible dates or numbers; repeated model-loop fragments; cleanup artifacts; glossary leaks; mojibake; and topic-incoherent wording.\n"
+        "- Do not flag merely awkward but plausible Japanese.\n"
+        "- Flag short exact substrings when possible. If the suspicious part cannot be isolated, copy the whole subtitle line exactly.\n"
+        "- Severity must be high, medium, or low.\n"
+        "- Use high for clear correction candidates, medium for plausible issues worth checking, and low for weak/uncertain candidates.\n"
+        "- Output one flagged item per line as: line_number<TAB>severity<TAB>exact copied text segment<TAB>short reason\n"
+        "- If you are unsure, do not flag it.\n"
+        "- Output NONE only if there is truly nothing worth human review in this batch.\n"
+        "- Do not output explanations, bullets, JSON, or extra text.\n\n"
+        "Examples:\n"
+        "12\thigh\tゴッドオブウォートリロジーリメイク\tbroken product/title name\n"
+        "38\tmedium\tではでは、こ\tpossible subtitle cut fragment\n\n"
+        f"Transcript lines:\n{lines}"
+    )
+
+
 class TextRefiner:
     last_mistranscription_raw: str = ""
 
@@ -64,6 +131,7 @@ class LlamaServerTextRefiner(TextRefiner):
         n_gpu_layers: int = -1,
         spec_draft_model: Path | None = None,
         spec_draft_n_max: int = 3,
+        mistranscription_batch_size: int = 16,
         log_path: Path | None = None,
     ) -> None:
         if not model_path.exists():
@@ -79,6 +147,7 @@ class LlamaServerTextRefiner(TextRefiner):
         self.model_path = model_path
         self.spec_draft_model = spec_draft_model
         self.spec_draft_n_max = max(1, spec_draft_n_max)
+        self.mistranscription_batch_size = max(1, mistranscription_batch_size)
         self.log_path = log_path
         self._log_handle: TextIO | None = None
         self.glossary = glossary
@@ -202,22 +271,7 @@ class LlamaServerTextRefiner(TextRefiner):
         return self.split_lines_with_diagnostics(text, max_chars).lines
 
     def split_lines_with_diagnostics(self, text: str, max_chars: int) -> SplitPlanResult:
-        min_chars = max(6, max_chars // 4)
-        prompt = (
-            "Task:\n"
-            "Insert exactly one split marker into this transcript.\n\n"
-            "Rules:\n"
-            "- Copy the input text exactly.\n"
-            "- Insert the marker <SPLIT> exactly once at the best subtitle break.\n"
-            "- Do not rewrite, summarize, translate, add, remove, or reorder any text.\n"
-            f"- Both sides should be at least {min_chars} characters when possible.\n"
-            f"- Prefer both sides to be at most {max_chars} characters when possible.\n"
-            "- Choose a split point near the center if there is no strong natural break.\n"
-            "- Prefer sentence, phrase, or clause boundaries.\n"
-            "- Output only the copied text with <SPLIT> inserted. No explanations.\n\n"
-            f"Input:\n{text}\n\n"
-            "Output:"
-        )
+        prompt = split_planning_prompt(text, max_chars)
 
         try:
             raw = self._chat(prompt)
@@ -296,7 +350,7 @@ class LlamaServerTextRefiner(TextRefiner):
             return []
         flags: list[MisTranscriptionFlag] = []
         raw_blocks: list[str] = []
-        batch_size = 16
+        batch_size = max(1, int(getattr(self, "mistranscription_batch_size", 16)))
         total_batches = (len(numbered_lines) + batch_size - 1) // batch_size
         print(
             f"Final candidate review: {len(numbered_lines)} subtitles in {total_batches} batch(es).",
@@ -362,20 +416,7 @@ class LlamaServerTextRefiner(TextRefiner):
         return decision.startswith("MOVE")
 
     def _base_rules(self) -> str:
-        mode_line = {
-            "fillers": "Remove standalone filler sounds such as えー, あー, うーん, あの, その, and まあ when they do not add meaning.",
-            "glossary": "Fix glossary terms when clearly intended.",
-            "full": "Remove standalone filler sounds such as えー, あー, うーん, あの, その, and まあ when they do not add meaning, and fix glossary terms when clearly intended.",
-        }.get(self.mode, "Clean the subtitle text conservatively.")
-        rules = [
-            "Keep the same language.",
-            "Do not translate.",
-            "Do not summarize.",
-            mode_line,
-            "Keep technical terms exactly as written in the glossary.",
-            "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
-        ]
-        return "\n".join(f"- {rule}" for rule in rules)
+        return cleanup_base_rules(self.mode)
 
     def _prompt_one(self, line: str) -> str:
         glossary = format_glossary(self.glossary)
@@ -402,23 +443,7 @@ class LlamaServerTextRefiner(TextRefiner):
         )
 
     def _mistranscription_prompt(self, numbered_lines: list[tuple[int, str]]) -> str:
-        lines = "\n".join(f"{line_number}. {text}" for line_number, text in numbered_lines)
-        return (
-            "Task:\n"
-            "Find candidate subtitle text spans a human editor may want to inspect or fix. "
-            "This is non-destructive triage, so high recall is more important than precision.\n\n"
-            "Rules:\n"
-            "- Do not rewrite or correct the transcript.\n"
-            "- Flag anything a human might reasonably review, even if it could be correct.\n"
-            "- Flag likely ASR errors, odd proper nouns, broken English/product names, impossible dates or numbers, repeated fragments, partial words from subtitle cuts, unnatural particles, cleanup artifacts, mojibake, glossary leaks, and topic-incoherent wording.\n"
-            "- Flag suspicious but grammatical-looking Japanese when it is awkward in context or likely from a bad split.\n"
-            "- Flag short exact substrings when possible. If the suspicious part cannot be isolated, copy the whole subtitle line exactly.\n"
-            "- Output one flagged item per line as: line_number<TAB>exact copied text segment<TAB>short reason\n"
-            "- If you are unsure, flag it.\n"
-            "- Output NONE only if there is truly nothing worth human review in this batch.\n"
-            "- Do not output explanations, bullets, JSON, or extra text.\n\n"
-            f"Transcript lines:\n{lines}"
-        )
+        return mistranscription_review_prompt(numbered_lines)
 
     def _chat(self, prompt: str, max_tokens: int = 512) -> str:
         payload = {
@@ -543,9 +568,16 @@ def _parse_mistranscription_flags(
             continue
         line_number = int(match.group(1))
         remainder = match.group(2)
-        parts = [part.strip() for part in remainder.split("\t", 1)]
-        flagged_text = _clean_response_line(parts[0])
-        reason = _clean_response_line(parts[1]) if len(parts) > 1 else ""
+        parts = [part.strip() for part in remainder.split("\t")]
+        severity = "medium"
+        explicit_severity = _severity_or_none(parts[0]) if len(parts) >= 3 else None
+        if len(parts) >= 4 or explicit_severity is not None:
+            severity = explicit_severity or "medium"
+            flagged_text = _clean_response_line(parts[1])
+            reason = _clean_response_line("\t".join(parts[2:]))
+        else:
+            flagged_text = _clean_response_line(parts[0])
+            reason = _clean_response_line("\t".join(parts[1:])) if len(parts) > 1 else ""
         original = originals.get(line_number)
         if not original or not flagged_text:
             continue
@@ -555,8 +587,13 @@ def _parse_mistranscription_flags(
         if key in seen:
             continue
         seen.add(key)
-        flags.append(MisTranscriptionFlag(line_number=line_number, text=flagged_text, reason=reason))
+        flags.append(MisTranscriptionFlag(line_number=line_number, text=flagged_text, reason=reason, severity=severity))
     return flags
+
+
+def _severity_or_none(value: str) -> str | None:
+    lowered = _clean_response_line(value).lower()
+    return lowered if lowered in {"high", "medium", "low"} else None
 
 
 def _deterministic_mistranscription_flags(
@@ -570,17 +607,17 @@ def _deterministic_mistranscription_flags(
     for line_number, text in numbered_lines:
         for marker in artifact_markers:
             if marker in text:
-                flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="glossary artifact leaked into subtitle"))
+                flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="glossary artifact leaked into subtitle", severity="high"))
                 break
         if _looks_like_mojibake(text):
-            flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="possible mojibake"))
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=text, reason="possible mojibake", severity="high"))
             continue
         repeated = _repeated_fragment(text)
         if repeated:
-            flags.append(MisTranscriptionFlag(line_number=line_number, text=repeated, reason="repeated fragment"))
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=repeated, reason="repeated fragment", severity="high"))
         cut_fragment = _suspicious_cut_fragment(text)
         if cut_fragment:
-            flags.append(MisTranscriptionFlag(line_number=line_number, text=cut_fragment, reason="possible cut fragment"))
+            flags.append(MisTranscriptionFlag(line_number=line_number, text=cut_fragment, reason="possible cut fragment", severity="medium"))
     return flags
 
 

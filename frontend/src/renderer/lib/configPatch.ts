@@ -1,6 +1,13 @@
 import type { CoreWorkflowSettings, WorkflowConfig, WorkflowName } from "./types";
+import { recommendedFallbackTranscription } from "../../shared/hostedModelCatalog";
 
 export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSettings {
+  const transcriptionProvider = config.backend?.transcriber === "openai" ? "openai" : "gemini";
+  const transcriptionModel = String(config.backend?.transcription_model ?? "");
+  const recommendedFallback = recommendedFallbackTranscription(transcriptionProvider, transcriptionModel);
+  const fallbackTranscriptionProvider = config.backend?.fallback_transcriber === "openai" || config.backend?.fallback_transcriber === "gemini"
+    ? config.backend.fallback_transcriber
+    : recommendedFallback.provider;
   return {
     audioTrack: Number(config.audio?.track ?? 1),
     local: {
@@ -13,10 +20,10 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
       cleanupDraftModel: String(config.cleanup?.spec_draft_model ?? "")
     },
     hosted: {
-      transcriptionProvider: config.backend?.transcriber === "openai" ? "openai" : "gemini",
-      transcriptionModel: String(config.backend?.transcription_model ?? ""),
-      fallbackTranscriptionProvider: config.backend?.fallback_transcriber === "gemini" ? "gemini" : "openai",
-      fallbackTranscriptionModel: String(config.backend?.fallback_transcription_model ?? "gpt-4o-mini-transcribe"),
+      transcriptionProvider,
+      transcriptionModel,
+      fallbackTranscriptionProvider,
+      fallbackTranscriptionModel: String(config.backend?.fallback_transcription_model ?? recommendedFallback.model),
       cleanupProvider: config.cleanup?.backend === "gemini" ? "gemini" : "openai",
       cleanupModel: String(config.cleanup?.api_model ?? ""),
       envFile: ""

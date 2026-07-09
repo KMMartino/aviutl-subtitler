@@ -22,6 +22,9 @@ from .text_refiner import (
     _parse_mistranscription_flags,
     _split_marker_response,
     _valid_cleaned_line,
+    cleanup_base_rules,
+    mistranscription_review_prompt,
+    split_planning_prompt,
 )
 
 
@@ -52,22 +55,7 @@ class HostedTextRefiner(TextRefiner):
         return self.split_lines_with_diagnostics(text, max_chars).lines
 
     def split_lines_with_diagnostics(self, text: str, max_chars: int) -> SplitPlanResult:
-        min_chars = max(6, max_chars // 4)
-        prompt = (
-            "Task:\n"
-            "Insert exactly one split marker into this transcript.\n\n"
-            "Rules:\n"
-            "- Copy the input text exactly.\n"
-            "- Insert the marker <SPLIT> exactly once at the best subtitle break.\n"
-            "- Do not rewrite, summarize, translate, add, remove, or reorder any text.\n"
-            f"- Both sides should be at least {min_chars} characters when possible.\n"
-            f"- Prefer both sides to be at most {max_chars} characters when possible.\n"
-            "- Choose a split point near the center if there is no strong natural break.\n"
-            "- Prefer sentence, phrase, or clause boundaries.\n"
-            "- Output only the copied text with <SPLIT> inserted. No explanations.\n\n"
-            f"Input:\n{text}\n\n"
-            "Output:"
-        )
+        prompt = split_planning_prompt(text, max_chars)
         try:
             raw = self._chat(prompt, max_tokens=512, operation="split")
         except Exception as exc:
@@ -198,16 +186,7 @@ class HostedTextRefiner(TextRefiner):
         return chapters
 
     def _base_rules(self) -> str:
-        glossary_rule = "Keep technical terms exactly as written in the glossary."
-        rules = [
-            "Keep the same language.",
-            "Do not translate.",
-            "Do not summarize.",
-            "Remove standalone filler sounds such as えー, あー, うーん, あの, その, and まあ when they do not add meaning, and fix glossary terms when clearly intended.",
-            glossary_rule,
-            "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
-        ]
-        return "\n".join(f"- {rule}" for rule in rules)
+        return cleanup_base_rules(self.mode)
 
     def _prompt_one(self, line: str) -> str:
         glossary = format_glossary(self.glossary)
@@ -234,23 +213,7 @@ class HostedTextRefiner(TextRefiner):
         )
 
     def _mistranscription_prompt(self, numbered_lines: list[tuple[int, str]]) -> str:
-        lines = "\n".join(f"{line_number}. {text}" for line_number, text in numbered_lines)
-        return (
-            "Task:\n"
-            "Find only candidate subtitle text spans that are likely worth a human editor's attention. "
-            "Favor precision over recall; this pass should not flag normal speech quirks.\n\n"
-            "Rules:\n"
-            "- Do not rewrite or correct the transcript.\n"
-            "- Preserve intentional speaking quirks, casual particles, fillers, repeated emphasis, dialect, and streamer cadence unless they are clearly an ASR or cleanup artifact.\n"
-            "- Flag likely ASR errors, clearly wrong proper nouns, broken English/product names, impossible dates or numbers, repeated fragments caused by model looping, partial words from subtitle cuts, cleanup artifacts, mojibake, glossary leaks, and topic-incoherent wording.\n"
-            "- Do not flag merely awkward but plausible Japanese.\n"
-            "- Flag short exact substrings when possible. If the suspicious part cannot be isolated, copy the whole subtitle line exactly.\n"
-            "- Output one flagged item per line as: line_number<TAB>exact copied text segment<TAB>short reason\n"
-            "- If you are unsure, do not flag it.\n"
-            "- Output NONE only if there is truly nothing worth human review in this batch.\n"
-            "- Do not output explanations, bullets, JSON, or extra text.\n\n"
-            f"Transcript lines:\n{lines}"
-        )
+        return mistranscription_review_prompt(numbered_lines)
 
     def _youtube_chapters_prompt(self, numbered_subtitles: list[tuple[int, float, float, str]]) -> str:
         lines = "\n".join(

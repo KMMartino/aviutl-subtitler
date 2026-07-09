@@ -40,6 +40,57 @@ describe("config store runtime paths", () => {
     expect(loadAppState(paths).configs.hosted).toEqual({ user: "edited" });
   });
 
+  it("migrates the old hosted fallback default to Gemini Pro", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    saveWorkflowConfig("hosted", {
+      backend: {
+        transcriber: "gemini",
+        transcription_model: "gemini-3.5-flash",
+        fallback_transcriber: "openai",
+        fallback_transcription_model: "gpt-4o-mini-transcribe"
+      },
+      cleanup: {
+        backend: "openai",
+        api_model: "gpt-5.4-mini",
+        window_subtitles: 8,
+        skip_final_review: true
+      }
+    }, paths);
+
+    const state = loadAppState(paths);
+
+    expect(state.configs.hosted.backend.fallback_transcriber).toBe("gemini");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.1-pro-preview");
+    expect(state.configs.hosted.cleanup.skip_final_review).toBe(false);
+  });
+
+  it("does not migrate user-selected hosted fallbacks", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    saveWorkflowConfig("hosted", {
+      backend: {
+        transcriber: "gemini",
+        transcription_model: "gemini-3.1-pro-preview",
+        fallback_transcriber: "openai",
+        fallback_transcription_model: "gpt-4o-mini-transcribe"
+      },
+      cleanup: {
+        backend: "gemini",
+        api_model: "gemini-3.1-pro-preview",
+        skip_final_review: true
+      }
+    }, paths);
+
+    const state = loadAppState(paths);
+
+    expect(state.configs.hosted.backend.fallback_transcriber).toBe("openai");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(state.configs.hosted.cleanup.skip_final_review).toBe(true);
+  });
+
   it("imports a glossary by copying it into managed user state", () => {
     const paths = makePaths();
     const source = path.join(paths.appResourceRoot, "external-glossary.txt");

@@ -11,6 +11,7 @@ from .models import AlignedChunk, AlignedToken, SplitPlanResult, Subtitle
 SENTENCE_BREAK_CHARS = set("。！？!?")
 SENTENCE_TERMINAL_SOURCE = "sentence_terminal"
 PHRASE_BREAK_CHARS = set("、,;:")
+TITLE_JOIN_CHARS = set("・-/&＆＋+")
 JAPANESE_TRAILING_CONNECTIVE_TERMS = (
     "について",
     "という",
@@ -42,6 +43,46 @@ class BoundaryCandidate:
 
 def _normalized(text: str) -> str:
     return re.sub(r"\s+", "", text)
+
+
+def _is_katakana_char(char: str) -> bool:
+    return bool(char) and ("\u30a0" <= char <= "\u30ff" or "\uff66" <= char <= "\uff9f")
+
+
+def _is_title_char(char: str) -> bool:
+    return bool(char) and (char.isascii() and char.isalnum() or char.isdigit() or _is_katakana_char(char) or char in TITLE_JOIN_CHARS)
+
+
+def _looks_like_title_run(text: str) -> bool:
+    if len(text) < 4:
+        return False
+    has_join = any(char in TITLE_JOIN_CHARS for char in text)
+    ascii_count = sum(1 for char in text if char.isascii() and char.isalnum())
+    katakana_count = sum(1 for char in text if _is_katakana_char(char))
+    digit_count = sum(1 for char in text if char.isdigit())
+    return has_join or ascii_count >= 2 or katakana_count >= 4 or (digit_count > 0 and (ascii_count + katakana_count) > 0)
+
+
+def _inside_fragile_title_run_text(text: str, index: int) -> bool:
+    if index <= 0 or index >= len(text):
+        return False
+    if not (_is_title_char(text[index - 1]) and _is_title_char(text[index])):
+        return False
+    start = index - 1
+    while start > 0 and _is_title_char(text[start - 1]):
+        start -= 1
+    end = index
+    while end < len(text) and _is_title_char(text[end]):
+        end += 1
+    return _looks_like_title_run(text[start:end])
+
+
+def _split_inside_fragile_title_run(tokens: list[AlignedToken], index: int) -> bool:
+    if index <= 0 or index >= len(tokens):
+        return False
+    text = _tokens_to_text(tokens)
+    prefix = _normalized(_tokens_to_text(tokens[:index]))
+    return _inside_fragile_title_run_text(_normalized(text), len(prefix))
 
 
 def _min_split_chars(max_chars: int) -> int:
@@ -138,6 +179,8 @@ def _is_safe_boundary(tokens: list[AlignedToken], index: int) -> bool:
     if left and right and left[-1].isdigit() and right[0] == ".":
         return False
     if left.isascii() and right.isascii() and left[-1:].isalnum() and right[:1].isalnum():
+        return False
+    if _split_inside_fragile_title_run(tokens, index):
         return False
     return True
 
@@ -544,21 +587,25 @@ def _llm_boundary_candidate(
             result.reject_reason = "line_not_substring"
         else:
             raw_index = counts[0]
-            index = _normalized_boundary(segment.tokens, raw_index, max_chars)
-            if index is None:
+            if _split_inside_fragile_title_run(segment.tokens, raw_index) and _best_boundary_candidate(segment.tokens, max_chars) is not None:
                 result.accepted = False
-                result.reject_reason = "llm_boundary_rejected_illegal_head"
+                result.reject_reason = "title_cluster_split"
             else:
-                result.lines = lines
-                result.accepted = True
-                result.reject_reason = "llm_boundary_repaired" if index != raw_index else "none"
-                kind = "llm_boundary_repaired" if index != raw_index else "llm_boundary"
-                candidate = BoundaryCandidate(
-                    index=index,
-                    kind=kind,
-                    priority=3,
-                    distance=abs(_normalized_len(segment.tokens[:index]) - max_chars),
-                )
+                index = _normalized_boundary(segment.tokens, raw_index, max_chars)
+                if index is None:
+                    result.accepted = False
+                    result.reject_reason = "llm_boundary_rejected_illegal_head"
+                else:
+                    result.lines = lines
+                    result.accepted = True
+                    result.reject_reason = "llm_boundary_repaired" if index != raw_index else "none"
+                    kind = "llm_boundary_repaired" if index != raw_index else "llm_boundary"
+                    candidate = BoundaryCandidate(
+                        index=index,
+                        kind=kind,
+                        priority=3,
+                        distance=abs(_normalized_len(segment.tokens[:index]) - max_chars),
+                    )
     if llm_split_callback is not None:
         llm_split_callback(result, attempt_index, input_chars, len(segment.tokens), pass_name)
     return candidate

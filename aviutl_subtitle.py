@@ -89,6 +89,7 @@ def main() -> int:
         api_usage_path = sidecar_base.with_suffix(".api_usage.csv") if sidecar_base is not None else None
         aligned_text_path = sidecar_base.with_suffix(".aligned_text.txt") if sidecar_base is not None else None
         final_text_path = sidecar_base.with_suffix(".final_text.txt") if sidecar_base is not None else None
+        cleanup_diff_path = sidecar_base.with_suffix(".cleanup_diff.txt") if sidecar_base is not None else None
         mistranscription_path = sidecar_base.with_suffix(".possible_mistranscriptions.txt") if sidecar_base is not None else None
         regroup_profile_path = sidecar_base.with_suffix(".regroup.csv") if sidecar_base is not None else None
         llm_split_profile_path = sidecar_base.with_suffix(".llm_split.csv") if sidecar_base is not None else None
@@ -191,6 +192,7 @@ def main() -> int:
                     llm_split_console=bool(sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]),
                     subtitle_timing_profile_path=subtitle_timing_profile_path if diagnostics_enabled else None,
                     boundary_timing_profile_path=boundary_timing_profile_path if diagnostics_enabled else None,
+                    cleanup_diff_path=cleanup_diff_path if sidecars_enabled else None,
                     chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
                     cleanup_window_subtitles=int(cleanup_cfg["window_subtitles"] or _default_cleanup_window(config)),
                     cleanup_workers=int(cleanup_cfg["workers"] or _default_cleanup_workers(config)),
@@ -293,6 +295,7 @@ def _build_refiner(config: dict, glossary, api_usage: ApiUsageLedger, sidecar_ba
             n_gpu_layers=int(config["backend"]["n_gpu_layers"]),
             spec_draft_model=Path(cleanup["spec_draft_model"]) if cleanup.get("spec_draft_model") else None,
             spec_draft_n_max=int(cleanup["spec_draft_n_max"]),
+            mistranscription_batch_size=int(cleanup.get("window_subtitles") or 16),
             log_path=(
                 sidecar_base.with_suffix(".cleanup_llama.log")
                 if sidecar_base is not None
@@ -317,7 +320,7 @@ def _default_output_path(input_path: Path, workflow: str) -> Path:
 
 
 def _default_cleanup_window(config: dict) -> int:
-    return 8 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
+    return 256 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
 
 
 def _default_cleanup_workers(config: dict) -> int:
@@ -362,9 +365,10 @@ def _flag_possible_mistranscriptions(subtitles, refiner, output_path: Path) -> l
         if flag.text not in sub.text:
             continue
         reason = flag.reason.strip() or "review candidate"
-        by_line.setdefault(flag.line_number, []).append(f"{flag.text}\t{reason}")
-        if flag.line_number not in marked_lines:
-            markers.append(ExoMarker(sub.start_time, sub.end_time, f"{flag.line_number}: {reason}"))
+        severity = flag.severity if flag.severity in {"high", "medium", "low"} else "medium"
+        by_line.setdefault(flag.line_number, []).append(f"{flag.line_number}\t{severity}\t{flag.text}\t{reason}")
+        if severity in {"high", "medium"} and flag.line_number not in marked_lines:
+            markers.append(ExoMarker(sub.start_time, sub.end_time, f"{flag.line_number}: {severity} - {reason}"))
             marked_lines.add(flag.line_number)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

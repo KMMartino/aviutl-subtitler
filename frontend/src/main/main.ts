@@ -72,6 +72,7 @@ function requireWindow(): BrowserWindow {
 
 function registerIpc(): void {
   const paths = () => runtimePaths();
+  const currentPython = () => getPythonRuntimeStatus(loadAppState().settings.pythonPath);
   ipcMain.handle("dialog:input-file", () => chooseInputFile(requireWindow()));
   ipcMain.handle("dialog:file", () => chooseFile(requireWindow()));
   ipcMain.handle("dialog:output-file", (_event, defaultPath?: string) => chooseOutputFile(requireWindow(), defaultPath));
@@ -85,12 +86,12 @@ function registerIpc(): void {
   ipcMain.handle("env:verify-hosted-models", (_event, envFile: string) => verifyHostedModels(envFile));
   ipcMain.handle("local-models:list", () => listLocalProfiles());
   ipcMain.handle("local-models:status", (_event, modelsDirectory: string, profileId: string) => localModelStatus(modelsDirectory, profileId, paths().userModelsRoot));
-  ipcMain.handle("local-models:download", (_event, modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface") => downloadLocalProfile(modelsDirectory, profileId, (text) => {
+  ipcMain.handle("local-models:download", async (_event, modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface") => downloadLocalProfile(modelsDirectory, profileId, (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "local-model-download", text });
-  }, paths().userModelsRoot, mode ?? "direct", paths()));
+  }, paths().userModelsRoot, mode ?? "direct", paths(), mode === "huggingface" ? await currentPython() : undefined));
   ipcMain.handle("local-models:delete-managed", (_event, modelsDirectory: string, profileId: string) => deleteManagedLocalProfile(modelsDirectory, profileId, paths().userModelsRoot));
-  ipcMain.handle("local-models:hf-downloader-status", () => getHuggingFaceDownloaderStatus(paths()));
-  ipcMain.handle("local-models:install-hf-downloader", () => installHuggingFaceDownloader(paths(), (text) => {
+  ipcMain.handle("local-models:hf-downloader-status", async () => getHuggingFaceDownloaderStatus(paths(), await currentPython()));
+  ipcMain.handle("local-models:install-hf-downloader", async () => installHuggingFaceDownloader(paths(), await currentPython(), (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "hf-downloader-install", text });
   }));
   ipcMain.handle("llama:list-backends", () => listLlamaBackends());

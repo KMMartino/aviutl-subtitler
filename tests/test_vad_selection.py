@@ -1,8 +1,8 @@
 import unittest
 
-from subtitler.backends.existing_pipeline import long_stream_default_duration_ratio
+from subtitler.backends.existing_pipeline import _cleanup_group_max_sec, long_stream_default_duration_ratio
 from subtitler.models import AudioChunk
-from subtitler.vad import _speech_timestamps_from_probabilities, select_high_activation_chunks
+from subtitler.vad import _speech_timestamps_from_probabilities, assign_vad_groups_by_largest_gaps, select_high_activation_chunks
 
 
 def _chunk(index: int, activation: float, peak: float = 0.0) -> AudioChunk:
@@ -30,6 +30,11 @@ class VadSelectionTests(unittest.TestCase):
         self.assertGreater(long_stream_default_duration_ratio(2.5 * 3600.0), 0.07)
         self.assertLess(long_stream_default_duration_ratio(2.5 * 3600.0), 0.15)
 
+    def test_cleanup_group_max_sec_is_clamped_from_media_duration(self) -> None:
+        self.assertEqual(_cleanup_group_max_sec(90.0), 60.0)
+        self.assertEqual(_cleanup_group_max_sec(360.0), 180.0)
+        self.assertEqual(_cleanup_group_max_sec(3600.0), 600.0)
+
     def test_speech_timestamps_from_probabilities_splits_on_silence(self) -> None:
         timestamps = _speech_timestamps_from_probabilities(
             [0.1, 0.8, 0.9, 0.2, 0.1, 0.8, 0.9, 0.1, 0.1],
@@ -43,6 +48,19 @@ class VadSelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(timestamps, [{"start": 100, "end": 300}, {"start": 500, "end": 700}])
+
+    def test_cleanup_groups_split_oversized_runs_at_largest_gap(self) -> None:
+        chunks = [
+            AudioChunk(index=0, start=0.0, end=10.0, samples=[]),
+            AudioChunk(index=1, start=11.0, end=20.0, samples=[]),
+            AudioChunk(index=2, start=80.0, end=90.0, samples=[]),
+            AudioChunk(index=3, start=91.0, end=100.0, samples=[]),
+        ]
+
+        groups = assign_vad_groups_by_largest_gaps(chunks, max_group_sec=50.0)
+
+        self.assertEqual([(group.start, group.end) for group in groups], [(0.0, 20.0), (80.0, 100.0)])
+        self.assertEqual([chunk.vad_group_index for chunk in chunks], [0, 0, 1, 1])
 
 
 if __name__ == "__main__":

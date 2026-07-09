@@ -21,6 +21,7 @@ def backend_result_to_aligned_chunks(result: BackendTranscriptResult) -> list[Al
             wav_path=None,
             vad_activation=float(region.activation or 0.0) if region is not None else 0.0,
             vad_peak=float(region.peak or 0.0) if region is not None else 0.0,
+            vad_group_index=int(region.metadata["vad_group_index"]) if region is not None and "vad_group_index" in region.metadata else None,
         )
         tokens = [
             AlignedToken(

@@ -16,6 +16,7 @@ class AudioChunk:
     wav_path: Path | None = None
     vad_activation: float = 0.0
     vad_peak: float = 0.0
+    vad_group_index: int | None = None
 
 
 @dataclass
@@ -75,6 +76,7 @@ class MisTranscriptionFlag:
     line_number: int
     text: str
     reason: str = ""
+    severity: str = "medium"
 
 
 @dataclass

@@ -23,7 +23,7 @@ describe("local model catalog", () => {
     expect(LOCAL_PROFILES[0].files.transcription.filename).toBe("gemma-4-E2B-it-Q5_K_M.gguf");
     expect(LOCAL_PROFILES[1].files.cleanup.filename).toBe("gemma-4-12b-it-Q5_K_M.gguf");
     expect(LOCAL_PROFILES[2].files.cleanup.filename).toBe("gemma-4-12b-it-UD-Q6_K_XL.gguf");
-    expect(LOCAL_PROFILES.map((profile) => profile.cleanupWindowSubtitles)).toEqual([10, 20, 32, 10, 20, 32]);
+    expect(LOCAL_PROFILES.map((profile) => profile.cleanupWindowSubtitles)).toEqual([64, 128, 256, 64, 128, 256]);
   });
 
   it("reuses standard target paths in MTP profiles", () => {

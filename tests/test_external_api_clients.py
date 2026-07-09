@@ -1,4 +1,5 @@
 import os
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
-from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json
+from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json, verify_openai_model_available
 from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
@@ -71,6 +72,19 @@ class ExternalApiClientTests(unittest.TestCase):
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "こんにちは")
         self.assertEqual(ledger.rows[0].output_tokens, 5)
+
+    def test_openai_canonical_model_is_available_when_dated_alias_is_listed(self) -> None:
+        response = {"data": [{"id": "gpt-4o-mini-transcribe-2025-12-15"}]}
+        with mock.patch("subtitler.external_transcribers._request_json", return_value=response):
+            available = verify_openai_model_available("gpt-4o-mini-transcribe", "key")
+
+        self.assertEqual(available, "gpt-4o-mini-transcribe-2025-12-15")
+
+    def test_openai_unrelated_model_is_rejected(self) -> None:
+        response = {"data": [{"id": "gpt-5.4-mini"}]}
+        with mock.patch("subtitler.external_transcribers._request_json", return_value=response):
+            with self.assertRaises(Exception):
+                verify_openai_model_available("gpt-4o-mini-transcribe", "key")
 
     def test_fallback_transcriber_uses_fallback_on_malformed_response(self) -> None:
         chunk = self._chunk()
