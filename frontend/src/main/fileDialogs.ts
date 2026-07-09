@@ -19,6 +19,17 @@ export async function chooseFile(window: BrowserWindow): Promise<string | null> 
   return result.canceled ? null : result.filePaths[0] ?? null;
 }
 
+export async function chooseGlossaryFile(window: BrowserWindow): Promise<string | null> {
+  const result = await dialog.showOpenDialog(window, {
+    properties: ["openFile"],
+    filters: [
+      { name: "Glossary text", extensions: ["txt"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  return result.canceled ? null : result.filePaths[0] ?? null;
+}
+
 export async function chooseOutputFile(window: BrowserWindow, defaultPath?: string): Promise<string | null> {
   const result = await dialog.showSaveDialog(window, {
     defaultPath,

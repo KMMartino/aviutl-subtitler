@@ -37,6 +37,9 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
   if (!request.sidecarsEnabled) {
     args.push("--no-sidecars");
   }
+  if (fs.existsSync(paths.glossaryFile)) {
+    args.push("--glossary", paths.glossaryFile);
+  }
   if (request.profile) {
     args.push("--profile");
   }

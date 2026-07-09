@@ -32,6 +32,7 @@ declare global {
       deleteManagedLlamaServer(backend: LlamaBackendId): Promise<ManagedLlamaStatus>;
       readGlossary(): Promise<string>;
       saveGlossary(text: string): Promise<void>;
+      importGlossary(): Promise<string | null>;
       pathExists(path: string): Promise<boolean>;
       pythonReady(path: string): Promise<boolean>;
       getRuntimeSetupStatus(): Promise<RuntimeSetupStatus>;

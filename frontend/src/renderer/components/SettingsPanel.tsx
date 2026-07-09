@@ -1,4 +1,4 @@
-import { AlertTriangle, Brain, CheckCircle, ChevronDown, CircleGauge, Download, FolderOpen, Info, RefreshCw, Settings, Trash2, Zap } from "lucide-react";
+import { AlertTriangle, Brain, CheckCircle, ChevronDown, CircleGauge, Download, ExternalLink, FolderOpen, Info, RefreshCw, Settings, Trash2, Zap } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
@@ -37,6 +37,7 @@ type Props = {
   runtimeFeedback: { section: "python" | "ffmpeg"; text: string; ok: boolean } | null;
   sidecarsEnabled: boolean;
   sidecarDir: string;
+  outputPath: string;
   onChange(settings: CoreWorkflowSettings): void;
   onPythonPath(path: string): void;
   onEnvFile(path: string): void;
@@ -63,7 +64,7 @@ type Props = {
   onDeleteFfmpeg(): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg }: Props) {
+export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, outputPath, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg }: Props) {
   const local = settings.local ?? { model: "", mmproj: "", llamaServer: "", cleanupModel: "", cleanupLlamaServer: "", transcriptionDraftModel: "", cleanupDraftModel: "" };
   const hosted = settings.hosted ?? {
     transcriptionProvider: "gemini",
@@ -101,6 +102,16 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
   async function pickSidecar() {
     const path = await window.subtitler.chooseDirectory();
     if (path) onSidecar(path);
+  }
+  const runStem = outputPath.replace(/^.*[\\/]/, "").replace(/\.exo$/i, "");
+  const sidecarFile = (suffix: string) => sidecarDir && runStem ? `${sidecarDir}\\${runStem}${suffix}` : "";
+  async function openSidecarLocation() {
+    if (!sidecarDir) return;
+    if (await window.subtitler.pathExists(sidecarDir)) {
+      await window.subtitler.openPath(sidecarDir);
+    } else {
+      await window.subtitler.openPath(parentDirectory(sidecarDir));
+    }
   }
   return (
     <section className="panel">
@@ -358,13 +369,19 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
         {sidecarsEnabled ? (
           <>
             <label>
-              <TooltipLabel text="Directory where sidecar files are written and opened from the Outputs panel.">Sidecar directory</TooltipLabel>
+              <TooltipLabel text="Directory where debugging sidecar files are written.">Sidecar directory</TooltipLabel>
               <div className="row">
                 <input value={sidecarDir} onChange={(event) => onSidecar(event.target.value)} />
                 <button className="icon-button" onClick={pickSidecar} title="Choose sidecar directory"><FolderOpen size={17} /></button>
               </div>
             </label>
             <label className="check"><input type="checkbox" checked={settings.diagnostics.profile} onChange={(event) => onChange({ ...settings, diagnostics: { profile: event.target.checked } })} /><TooltipLabel text="Add timing and profiling diagnostics to the sidecar output set.">Write diagnostics</TooltipLabel></label>
+            <div className="sidecar-actions">
+              <button disabled={!sidecarDir} onClick={openSidecarLocation}><FolderOpen size={15} /> Sidecar location</button>
+              <button disabled={!sidecarDir || !runStem} title="Open the per-run JSON summary with command inputs, paths, configuration, timings, and status details." onClick={() => window.subtitler.openPath(sidecarFile(".run.json"))}><ExternalLink size={15} /> Run JSON</button>
+              <button disabled={!sidecarDir || !runStem} title="Open the final cleaned transcript text that was used to produce subtitle output." onClick={() => window.subtitler.openPath(sidecarFile(".final_text.txt"))}><ExternalLink size={15} /> Final text</button>
+              <button disabled={!sidecarDir || !runStem} title="Open possible mistranscription notes flagged during review for manual checking." onClick={() => window.subtitler.openPath(sidecarFile(".possible_mistranscriptions.txt"))}><ExternalLink size={15} /> Review notes</button>
+            </div>
           </>
         ) : (
           <div className="disabled-field">Run JSON, final text, review notes, and diagnostics will not be written.</div>
@@ -411,7 +428,9 @@ function SetupSection({ title, detail, ready, expanded, onToggle, children }: {
         </span>
       </button>
       <div className={`setup-content-outer ${expanded ? "expanded" : ""}`}>
-        <div className="stack setup-content">{children}</div>
+        <div className="setup-content-clip">
+          <div className="stack setup-content">{children}</div>
+        </div>
       </div>
     </div>
   );
@@ -636,4 +655,10 @@ function PathInput({ label, tip, value, status, onChange, onPick, readyText = "F
 
 function EnvBadge({ label, ok }: { label: string; ok: boolean }) {
   return <span className={ok ? "env-ok" : "env-missing"}>{ok ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}{label}</span>;
+}
+
+function parentDirectory(value: string): string {
+  const normalized = value.replace(/[\\/]+$/, "");
+  const index = Math.max(normalized.lastIndexOf("\\"), normalized.lastIndexOf("/"));
+  return index > 0 ? normalized.slice(0, index) : normalized;
 }

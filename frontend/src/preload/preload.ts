@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("subtitler", {
   deleteManagedLlamaServer: (backend: LlamaBackendId) => ipcRenderer.invoke("llama:delete-managed", backend),
   readGlossary: () => ipcRenderer.invoke("glossary:read"),
   saveGlossary: (text: string) => ipcRenderer.invoke("glossary:save", text),
+  importGlossary: () => ipcRenderer.invoke("glossary:import"),
   pathExists: (path: string) => ipcRenderer.invoke("path:exists", path),
   pythonReady: (path: string) => ipcRenderer.invoke("runtime:python-status", path),
   getRuntimeSetupStatus: () => ipcRenderer.invoke("runtime:setup-status"),

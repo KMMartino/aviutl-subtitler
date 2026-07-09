@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-track", type=int, help="Override config audio track")
     parser.add_argument("--sidecar-dir", help="Diagnostics/intermediate output directory")
     parser.add_argument("--no-sidecars", action="store_true", help="Do not create diagnostic or intermediate sidecar files")
+    parser.add_argument("--glossary", help="Glossary text file. Defaults to auto-discovery beside input or project")
+    parser.add_argument("--no-glossary", action="store_true", help="Disable glossary loading")
     return parser.parse_args()
 
 
@@ -122,8 +124,8 @@ def main() -> int:
 
             glossary_path = find_glossary(
                 input_path=input_path,
-                explicit=None,
-                disabled=False,
+                explicit=Path(args.glossary) if args.glossary else None,
+                disabled=args.no_glossary,
                 project_dir=Path(__file__).resolve().parent,
             )
             glossary = load_glossary(glossary_path)

@@ -43,7 +43,7 @@
   },
   "build": {
     "appId": "com.kmmartino.aviutl-subtitler",
-    "productName": "AviUtl Subtitler",
+    "productName": "SubUtl",
     "directories": {
       "output": "../release"
     },
@@ -96,6 +96,9 @@
         "nsis",
         "portable"
       ]
+    },
+    "portable": {
+      "artifactName": "SubUtl.exe"
     },
     "nsis": {
       "oneClick": false,

@@ -57,7 +57,7 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
   const [view, setView] = useState<"main" | "settings">("main");
-  const [inputWidth, setInputWidth] = useState(58);
+  const [inputWidth, setInputWidth] = useState(48);
   const [logsHeight, setLogsHeight] = useState(24);
 
   const workflow = settings?.selectedWorkflow ?? "local";
@@ -243,6 +243,13 @@ export default function App() {
   async function saveGlossary() {
     await window.subtitler.saveGlossary(glossary);
     setNotice("Glossary saved");
+  }
+
+  async function importGlossary() {
+    const imported = await window.subtitler.importGlossary();
+    if (imported === null) return;
+    setGlossary(imported);
+    setNotice("Glossary imported");
   }
 
   async function refreshPathStatus(core: CoreWorkflowSettings) {
@@ -738,6 +745,7 @@ export default function App() {
             runtimeFeedback={runtimeFeedback}
             sidecarsEnabled={settings.sidecarsEnabled}
             sidecarDir={sidecarDir}
+            outputPath={outputPath}
             onChange={setCoreSettings}
             onPythonPath={(pythonPath) => {
               const next = { ...settings, pythonPath };
@@ -793,26 +801,26 @@ export default function App() {
       ) : (
       <div className="main-workspace" style={{ "--logs-height": `${logsHeight}%` } as React.CSSProperties}>
         <div className="primary-flow" style={{ "--input-width": `${inputWidth}%` } as React.CSSProperties}>
-          <InputPanel
-            inputPath={inputPath}
-            audioTrack={coreSettings.audioTrack}
-            analysis={analysis}
-            analyzing={analyzing}
-            analysisError={analysisError}
-            onInput={handleInput}
-            onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
-          />
+          <div className="input-stack">
+            <InputPanel
+              inputPath={inputPath}
+              audioTrack={coreSettings.audioTrack}
+              analysis={analysis}
+              analyzing={analyzing}
+              analysisError={analysisError}
+              onInput={handleInput}
+              onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
+            />
+            <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
+          </div>
           <div className="resize-divider column-divider" role="separator" aria-orientation="vertical" title="Drag to resize input and right panels" onPointerDown={startColumnResize} />
           <div className="flow-side">
           <OutputPanel
             outputPath={outputPath}
-            sidecarDir={sidecarDir}
-            sidecarsEnabled={settings.sidecarsEnabled}
             onOutput={setOutputPath}
           />
           <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} onChange={setCoreSettings} />
-          <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
-          <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} />
+          <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
           </div>
         </div>
         <div className="resize-divider log-divider" role="separator" aria-orientation="horizontal" title="Drag to resize logs" onPointerDown={startLogResize} />

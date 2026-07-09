@@ -2,10 +2,11 @@ import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { chooseDirectory, chooseExecutable, chooseFile, chooseInputFile, chooseOutputFile } from "./fileDialogs";
+import { chooseDirectory, chooseExecutable, chooseFile, chooseGlossaryFile, chooseInputFile, chooseOutputFile } from "./fileDialogs";
 import { getEnvStatus } from "./envStatus";
 import {
   loadAppState,
+  importGlossary,
   readGlossary,
   readWorkflowConfig,
   saveAppSettings,
@@ -22,12 +23,17 @@ import { runtimePaths } from "./paths";
 import { createManagedPythonEnv, deleteManagedPythonEnv, getPythonRuntimeStatus, installPythonRequirements } from "./pythonRuntime";
 import { deleteManagedFfmpeg, downloadManagedFfmpeg, getFfmpegStatus } from "./ffmpegManager";
 
+if (app.isPackaged) {
+  app.setName("SubUtl");
+  app.setPath("userData", path.join(app.getPath("appData"), "SubUtl"));
+}
+
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
-    height: 860,
+    height: 1130,
     minWidth: 1080,
     minHeight: 720,
     autoHideMenuBar: true,
@@ -97,6 +103,10 @@ function registerIpc(): void {
   ipcMain.handle("llama:delete-managed", (_event, backend) => deleteManagedLlamaBackend(paths().stateRoot, backend));
   ipcMain.handle("glossary:read", () => readGlossary());
   ipcMain.handle("glossary:save", (_event, text: string) => saveGlossary(text));
+  ipcMain.handle("glossary:import", async () => {
+    const sourcePath = await chooseGlossaryFile(requireWindow());
+    return sourcePath ? importGlossary(sourcePath) : null;
+  });
   ipcMain.handle("path:exists", (_event, value: string) => Boolean(value && fs.existsSync(value)));
   ipcMain.handle("runtime:python-status", (_event, value: string) => {
     if (!value) return false;

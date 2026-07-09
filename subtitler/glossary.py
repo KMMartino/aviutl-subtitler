@@ -37,12 +37,9 @@ def load_glossary(path: Path | None, limit: int = 80) -> list[GlossaryEntry]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if "|" in line:
-            term, guidance = line.split("|", 1)
-        else:
-            term, guidance = line, ""
-        term = term.strip()
-        guidance = guidance.strip()
+        parts = [part.strip() for part in line.split("|")]
+        term = parts[0] if parts else ""
+        guidance = parts[1] if len(parts) > 1 else ""
         if term:
             entries.append(GlossaryEntry(term=term, guidance=guidance))
         if len(entries) >= limit:

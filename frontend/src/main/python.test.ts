@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRunCommand } from "./python";
 import type { RuntimePaths } from "./paths";
@@ -69,5 +72,28 @@ describe("python command builder", () => {
     expect(command.cwd).toBe("C:/app/resources/app-backend");
     expect(command.args[0]).toBe("C:\\app\\resources\\app-backend\\aviutl_subtitle.py");
     expect(command.env.PYTHONUTF8).toBe("1");
+  });
+
+  it("passes the managed glossary when it exists", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "subtitler-python-"));
+    try {
+      const glossaryFile = path.join(root, "userData", "glossary.txt");
+      fs.mkdirSync(path.dirname(glossaryFile), { recursive: true });
+      fs.writeFileSync(glossaryFile, "PSSR | PlayStation image upscaling\n", "utf8");
+      const command = buildRunCommand({ ...paths, glossaryFile }, "python", {
+        workflow: "hosted",
+        inputPath: "C:/media/in.mkv",
+        outputPath: "C:/media/in.exo",
+        configPath: "C:/repo/config.json",
+        envFile: "C:/repo/.env",
+        profile: false,
+        sidecarsEnabled: true
+      });
+
+      expect(command.args).toContain("--glossary");
+      expect(command.args).toContain(glossaryFile);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
