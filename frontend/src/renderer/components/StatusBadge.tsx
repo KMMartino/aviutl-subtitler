@@ -13,5 +13,5 @@ export default function StatusBadge({ state }: Props) {
     failed: <AlertTriangle size={14} />,
     cancelled: <Square size={14} />
   }[state];
-  return <span className={`status status-${state}`}>{icon}{state}</span>;
+  return <span className={`status status-${state}`} role="status" aria-live="polite">{icon}{state}</span>;
 }

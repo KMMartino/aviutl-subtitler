@@ -10,7 +10,7 @@ from pathlib import Path
 from .aligner import AlignmentTooLongError, ForcedAligner, is_japanese_language
 from .models import AlignedChunk, TranscriptChunk
 from .profiling import PipelineProfiler, now
-from .vad import split_chunk_with_tighter_vad
+from .vad import VadSession, split_chunk_with_tighter_vad
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class AlignmentConfig:
     emission_batch_size: int
     torch_threads: int | None
     max_split_depth: int = 4
+    vad_session: VadSession | None = None
 
 
 class AlignmentPool:
@@ -121,6 +122,7 @@ class AlignmentPool:
                 sample_rate=self.config.sample_rate,
                 temp_dir=self.config.temp_dir,
                 keep_temp=True,
+                session=self.config.vad_session,
             )
             if len(subchunks) < 2:
                 raise AlignmentTooLongError(

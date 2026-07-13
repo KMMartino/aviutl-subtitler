@@ -1,6 +1,6 @@
 import unittest
 
-from subtitler.backends.existing_pipeline import _cleanup_group_max_sec, long_stream_default_duration_ratio
+from subtitler.backends.existing_pipeline import CleanupGroupPolicy, _cleanup_group_max_sec, long_stream_default_duration_ratio
 from subtitler.models import AudioChunk
 from subtitler.vad import _speech_timestamps_from_probabilities, assign_vad_groups_by_largest_gaps, select_high_activation_chunks
 
@@ -34,6 +34,20 @@ class VadSelectionTests(unittest.TestCase):
         self.assertEqual(_cleanup_group_max_sec(90.0), 60.0)
         self.assertEqual(_cleanup_group_max_sec(360.0), 180.0)
         self.assertEqual(_cleanup_group_max_sec(3600.0), 600.0)
+
+    def test_cleanup_group_policy_tiers(self) -> None:
+        eight_gb = CleanupGroupPolicy(20.0, 8.0, 180.0)
+        twelve_gb = CleanupGroupPolicy(40.0, 4.0, 300.0)
+        sixteen_gb = CleanupGroupPolicy(60.0, 2.0, 600.0)
+        self.assertEqual(_cleanup_group_max_sec(80.0, eight_gb), 20.0)
+        self.assertEqual(_cleanup_group_max_sec(800.0, eight_gb), 100.0)
+        self.assertEqual(_cleanup_group_max_sec(2400.0, eight_gb), 180.0)
+        self.assertEqual(_cleanup_group_max_sec(80.0, twelve_gb), 40.0)
+        self.assertEqual(_cleanup_group_max_sec(800.0, twelve_gb), 200.0)
+        self.assertEqual(_cleanup_group_max_sec(2400.0, twelve_gb), 300.0)
+        self.assertEqual(_cleanup_group_max_sec(80.0, sixteen_gb), 60.0)
+        self.assertEqual(_cleanup_group_max_sec(800.0, sixteen_gb), 400.0)
+        self.assertEqual(_cleanup_group_max_sec(2400.0, sixteen_gb), 600.0)
 
     def test_speech_timestamps_from_probabilities_splits_on_silence(self) -> None:
         timestamps = _speech_timestamps_from_probabilities(

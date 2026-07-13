@@ -1,7 +1,8 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { chooseDirectory, chooseExecutable, chooseFile, chooseGlossaryFile, chooseInputFile, chooseOutputFile } from "./fileDialogs";
 import { getEnvStatus } from "./envStatus";
 import {
@@ -9,26 +10,41 @@ import {
   importGlossary,
   readGlossary,
   readWorkflowConfig,
+  resetFrontendState,
   saveAppSettings,
+  saveActiveAlignmentModel,
   saveGlossary,
   saveWorkflowConfig,
   workflowConfigPath
 } from "./configStore";
-import { cancelRun, startRun } from "./runProcess";
-import { analyzeMedia } from "./mediaAnalyzer";
+import { cancelRun, shutdownActiveRun, startRun } from "./runProcess";
+import { MediaAnalysisCoordinator } from "./mediaAnalyzer";
+import { assertTrustedSender, contentSecurityPolicy, installNavigationGuards, validateIpcArguments } from "./ipcSecurity";
 import { verifyHostedModels } from "./hostedModels";
-import { deleteManagedLocalProfile, downloadLocalProfile, getHuggingFaceDownloaderStatus, installHuggingFaceDownloader, listLocalProfiles, localModelStatus } from "./localModels";
-import { checkLatestLlamaRelease, deleteManagedLlamaBackend, downloadManagedLlamaServer, getCurrentLlamaServerState, getManagedLlamaStatus, listLlamaBackends } from "./llamaServerManager";
+import { deleteManagedLocalProfile, downloadLocalProfile, getHuggingFaceDownloaderStatus, installHuggingFaceDownloader, listLocalProfiles, localModelStatus, verifyExistingLocalProfile } from "./localModels";
+import { checkLatestLlamaRelease, deleteManagedLlamaBackend, downloadManagedLlamaServer, getCurrentLlamaServerState, getManagedLlamaStatus, listLlamaBackends, migrateLegacyManagedLlamaRoot } from "./llamaServerManager";
 import { runtimePaths } from "./paths";
 import { createManagedPythonEnv, deleteManagedPythonEnv, getPythonRuntimeStatus, installPythonRequirements } from "./pythonRuntime";
 import { deleteManagedFfmpeg, downloadManagedFfmpeg, getFfmpegStatus } from "./ffmpegManager";
+import { ALIGNMENT_MODEL, deleteAlignmentModel, downloadAlignmentModel, getAlignmentModelStatus } from "./alignmentModelManager";
+import { CoalescedWriter } from "./coalescedWriter";
+import type { AppSettings, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
+import { userDataOverride } from "./userDataOverride";
 
-if (app.isPackaged) {
-  app.setName("SubUtl");
+const isolatedUserData = userDataOverride();
+if (app.isPackaged) app.setName("SubUtl");
+if (isolatedUserData) {
+  // Test-only escape hatch used by packaged smoke checks. This must be set before
+  // runtimePaths or any persisted state is read.
+  app.setPath("userData", isolatedUserData);
+} else if (app.isPackaged) {
   app.setPath("userData", path.join(app.getPath("appData"), "SubUtl"));
 }
 
 let mainWindow: BrowserWindow | null = null;
+let drainPersistence = async (): Promise<void> => {};
+let quittingAfterDrain = false;
+const mediaAnalysis = new MediaAnalysisCoordinator();
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -41,9 +57,11 @@ function createWindow(): void {
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true
     }
   });
+  installNavigationGuards(mainWindow);
 
   if (!app.isPackaged) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173");
@@ -53,6 +71,11 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({ responseHeaders: { ...details.responseHeaders, "Content-Security-Policy": [contentSecurityPolicy(app.isPackaged)] } });
+  });
+  const currentPaths = runtimePaths();
+  migrateLegacyManagedLlamaRoot(currentPaths.stateRoot, currentPaths.userToolsRoot);
   Menu.setApplicationMenu(null);
   registerIpc();
   createWindow();
@@ -65,72 +88,128 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
+app.on("before-quit", (event) => {
+  shutdownActiveRun();
+  mediaAnalysis.cancel();
+  if (quittingAfterDrain) return;
+  event.preventDefault();
+  void drainPersistence().finally(() => {
+    quittingAfterDrain = true;
+    app.quit();
+  });
+});
+
 function requireWindow(): BrowserWindow {
   if (!mainWindow) throw new Error("Main window is not ready");
   return mainWindow;
 }
 
 function registerIpc(): void {
+  const rawHandle = ipcMain.handle.bind(ipcMain);
+  const trustedRendererUrl = app.isPackaged
+    ? pathToFileURL(path.join(__dirname, "..", "..", "dist", "index.html")).href
+    : process.env.VITE_DEV_SERVER_URL;
+  const secureHandle: typeof ipcMain.handle = (channel, listener) => rawHandle(channel, (event, ...args) => {
+    assertTrustedSender(event, app.isPackaged, trustedRendererUrl);
+    validateIpcArguments(channel, args);
+    return listener(event, ...args);
+  });
+  // Keep individual handlers compact while applying one mandatory policy boundary.
+  const handle = secureHandle;
+  const settingsWriter = new CoalescedWriter<AppSettings>((settings) => saveAppSettings(settings));
+  const configWriters = new Map<WorkflowName, CoalescedWriter<WorkflowConfig>>();
+  const configWriter = (workflow: WorkflowName) => {
+    let writer = configWriters.get(workflow);
+    if (!writer) {
+      writer = new CoalescedWriter<WorkflowConfig>((config) => saveWorkflowConfig(workflow, config));
+      configWriters.set(workflow, writer);
+    }
+    return writer;
+  };
+  drainPersistence = async () => {
+    await settingsWriter.flushNow();
+    await Promise.all([...configWriters.values()].map((writer) => writer.flushNow()));
+  };
   const paths = () => runtimePaths();
   const currentPython = () => getPythonRuntimeStatus(loadAppState().settings.pythonPath);
-  ipcMain.handle("dialog:input-file", () => chooseInputFile(requireWindow()));
-  ipcMain.handle("dialog:file", () => chooseFile(requireWindow()));
-  ipcMain.handle("dialog:output-file", (_event, defaultPath?: string) => chooseOutputFile(requireWindow(), defaultPath));
-  ipcMain.handle("dialog:directory", () => chooseDirectory(requireWindow()));
-  ipcMain.handle("dialog:executable", () => chooseExecutable(requireWindow()));
-  ipcMain.handle("state:get", () => loadAppState());
-  ipcMain.handle("state:save-settings", (_event, settings) => saveAppSettings(settings));
-  ipcMain.handle("config:get", (_event, workflow) => ({ config: readWorkflowConfig(workflow), path: workflowConfigPath(workflow) }));
-  ipcMain.handle("config:save", (_event, workflow, config) => saveWorkflowConfig(workflow, config));
-  ipcMain.handle("env:status", (_event, envFile: string) => getEnvStatus(envFile));
-  ipcMain.handle("env:verify-hosted-models", (_event, envFile: string) => verifyHostedModels(envFile));
-  ipcMain.handle("local-models:list", () => listLocalProfiles());
-  ipcMain.handle("local-models:status", (_event, modelsDirectory: string, profileId: string) => localModelStatus(modelsDirectory, profileId, paths().userModelsRoot));
-  ipcMain.handle("local-models:download", async (_event, modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface") => downloadLocalProfile(modelsDirectory, profileId, (text) => {
-    requireWindow().webContents.send("run:event", { type: "stdout", runId: "local-model-download", text });
-  }, paths().userModelsRoot, mode ?? "direct", paths(), mode === "huggingface" ? await currentPython() : undefined));
-  ipcMain.handle("local-models:delete-managed", (_event, modelsDirectory: string, profileId: string) => deleteManagedLocalProfile(modelsDirectory, profileId, paths().userModelsRoot));
-  ipcMain.handle("local-models:hf-downloader-status", async () => getHuggingFaceDownloaderStatus(paths(), await currentPython()));
-  ipcMain.handle("local-models:install-hf-downloader", async () => installHuggingFaceDownloader(paths(), await currentPython(), (text) => {
+  handle("dialog:input-file", (_event, defaultPath?: string) => chooseInputFile(requireWindow(), defaultPath));
+  handle("dialog:file", () => chooseFile(requireWindow()));
+  handle("dialog:output-file", (_event, defaultPath?: string) => chooseOutputFile(requireWindow(), defaultPath));
+  handle("dialog:directory", () => chooseDirectory(requireWindow()));
+  handle("dialog:executable", () => chooseExecutable(requireWindow()));
+  handle("state:get", () => loadAppState());
+  handle("state:reset", () => resetFrontendState());
+  handle("state:save-settings", (_event, settings) => settingsWriter.enqueue(settings));
+  handle("config:get", (_event, workflow) => ({ config: readWorkflowConfig(workflow), path: workflowConfigPath(workflow) }));
+  handle("config:save", (_event, workflow: WorkflowName, config: WorkflowConfig) => configWriter(workflow).enqueue(config));
+  handle("env:status", (_event, envFile: string) => getEnvStatus(envFile));
+  handle("env:verify-hosted-models", (_event, envFile: string) => verifyHostedModels(envFile));
+  handle("local-models:list", () => listLocalProfiles());
+  handle("local-models:status", (_event, modelsDirectory: string, profileId: string) => localModelStatus(modelsDirectory, profileId, paths().userModelsRoot));
+  handle("local-models:download", async (_event, modelsDirectory: string, profileId: string, mode?: "direct" | "huggingface") => {
+    const onLog = (text: string) => requireWindow().webContents.send("run:event", { type: "stdout", runId: "local-model-download", text });
+    const status = localModelStatus(modelsDirectory, profileId, paths().userModelsRoot);
+    return status.needsVerification
+      ? verifyExistingLocalProfile(modelsDirectory, profileId, paths().userModelsRoot, onLog)
+      : downloadLocalProfile(modelsDirectory, profileId, onLog, paths().userModelsRoot, mode ?? "direct", paths(), mode === "huggingface" ? await currentPython() : undefined);
+  });
+  handle("local-models:delete-managed", (_event, modelsDirectory: string, profileId: string) => deleteManagedLocalProfile(modelsDirectory, profileId, paths().userModelsRoot));
+  handle("local-models:hf-downloader-status", async () => getHuggingFaceDownloaderStatus(paths(), await currentPython()));
+  handle("local-models:install-hf-downloader", async () => installHuggingFaceDownloader(paths(), await currentPython(), (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "hf-downloader-install", text });
   }));
-  ipcMain.handle("llama:list-backends", () => listLlamaBackends());
-  ipcMain.handle("llama:check-latest", () => checkLatestLlamaRelease());
-  ipcMain.handle("llama:status", (_event, backend, releaseTag?: string) => getManagedLlamaStatus(paths().stateRoot, backend, releaseTag));
-  ipcMain.handle("llama:current-state", (_event, serverPath: string) => getCurrentLlamaServerState(paths().stateRoot, serverPath));
-  ipcMain.handle("llama:download", (_event, backend) => downloadManagedLlamaServer(paths().stateRoot, backend, (text) => {
+  handle("llama:list-backends", () => listLlamaBackends());
+  handle("llama:check-latest", () => checkLatestLlamaRelease());
+  handle("llama:status", (_event, backend, releaseTag?: string) => getManagedLlamaStatus(paths().userToolsRoot, backend, releaseTag));
+  handle("llama:current-state", (_event, serverPath: string) => getCurrentLlamaServerState(paths().userToolsRoot, serverPath));
+  handle("llama:download", (_event, backend) => downloadManagedLlamaServer(paths().userToolsRoot, backend, (text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "llama-server-download", text });
   }));
-  ipcMain.handle("llama:delete-managed", (_event, backend) => deleteManagedLlamaBackend(paths().stateRoot, backend));
-  ipcMain.handle("glossary:read", () => readGlossary());
-  ipcMain.handle("glossary:save", (_event, text: string) => saveGlossary(text));
-  ipcMain.handle("glossary:import", async () => {
+  handle("llama:delete-managed", (_event, backend) => deleteManagedLlamaBackend(paths().userToolsRoot, backend));
+  handle("glossary:read", () => readGlossary());
+  handle("glossary:save", (_event, text: string) => saveGlossary(text));
+  handle("glossary:import", async () => {
     const sourcePath = await chooseGlossaryFile(requireWindow());
     return sourcePath ? importGlossary(sourcePath) : null;
   });
-  ipcMain.handle("path:exists", (_event, value: string) => Boolean(value && fs.existsSync(value)));
-  ipcMain.handle("runtime:python-status", (_event, value: string) => {
+  handle("path:exists", (_event, value: string) => Boolean(value && fs.existsSync(value)));
+  handle("runtime:python-status", (_event, value: string) => {
     if (!value) return false;
     const result = spawnSync(value, ["--version"], { encoding: "utf8", timeout: 5000, windowsHide: true });
     return !result.error && result.status === 0;
   });
-  ipcMain.handle("runtime:setup-status", async () => ({
+  handle("runtime:setup-status", async () => ({
     python: await getPythonRuntimeStatus(loadAppState().settings.pythonPath),
     ffmpeg: await getFfmpegStatus(),
+    alignment: await getAlignmentModelStatus(paths()),
   }));
-  ipcMain.handle("runtime:create-managed-python", () => createManagedPythonEnv((text) => {
+  handle("runtime:create-managed-python", () => createManagedPythonEnv((text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "python-runtime", text });
   }));
-  ipcMain.handle("runtime:install-python-requirements", () => installPythonRequirements((text) => {
+  handle("runtime:install-python-requirements", () => installPythonRequirements((text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "python-runtime", text });
   }));
-  ipcMain.handle("runtime:delete-managed-python", () => deleteManagedPythonEnv());
-  ipcMain.handle("runtime:download-ffmpeg", () => downloadManagedFfmpeg((text) => {
+  handle("runtime:delete-managed-python", () => deleteManagedPythonEnv());
+  handle("runtime:download-ffmpeg", () => downloadManagedFfmpeg((text) => {
     requireWindow().webContents.send("run:event", { type: "stdout", runId: "ffmpeg-download", text });
   }));
-  ipcMain.handle("runtime:delete-ffmpeg", () => deleteManagedFfmpeg());
-  ipcMain.handle("media:analyze", (_event, inputPath: string) => analyzeMedia(inputPath));
-  ipcMain.handle("run:start", async (_event, request) => {
+  handle("runtime:delete-ffmpeg", () => deleteManagedFfmpeg());
+  handle("runtime:download-alignment", async () => {
+    const status = await downloadAlignmentModel(paths(), await currentPython(), (text) => {
+      requireWindow().webContents.send("run:event", { type: "stdout", runId: "alignment-model-download", text });
+    });
+    await drainPersistence();
+    saveActiveAlignmentModel(status.modelPath, true, paths());
+    return status;
+  });
+  handle("runtime:delete-alignment", async () => {
+    const status = await deleteAlignmentModel(paths());
+    await drainPersistence();
+    saveActiveAlignmentModel(ALIGNMENT_MODEL.repo, false, paths());
+    return status;
+  });
+  handle("media:analyze", (_event, inputPath: string) => mediaAnalysis.analyze(inputPath));
+  handle("run:start", async (_event, request) => {
     const appState = loadAppState();
     const python = await getPythonRuntimeStatus(appState.settings.pythonPath);
     if (!python.ready) throw new Error(python.error || "Python runtime is not ready");
@@ -139,7 +218,7 @@ function registerIpc(): void {
     }
     return startRun(requireWindow(), paths(), python.resolvedPath, request);
   });
-  ipcMain.handle("run:cancel", (_event, runId: string) => cancelRun(runId));
-  ipcMain.handle("shell:open-path", (_event, target: string) => shell.openPath(target));
-  ipcMain.handle("shell:show-item", (_event, target: string) => shell.showItemInFolder(target));
+  handle("run:cancel", (_event, runId: string) => cancelRun(runId));
+  handle("shell:open-path", (_event, target: string) => shell.openPath(target));
+  handle("shell:show-item", (_event, target: string) => shell.showItemInFolder(target));
 }

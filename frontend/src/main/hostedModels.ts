@@ -14,7 +14,7 @@ export async function verifyHostedModels(envFile: string): Promise<HostedModelVe
 }
 
 async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["openai"]> {
-  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false };
+  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false, cleanup56Sol: false, cleanup56Terra: false, cleanup56Luna: false };
   try {
     const response = await fetch("https://api.openai.com/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -30,10 +30,13 @@ async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["opena
       transcription: hasAlias(APPROVED_MODELS.openaiTranscription),
       transcriptionMini: hasAlias(APPROVED_MODELS.openaiTranscriptionMini),
       cleanup: names.has(APPROVED_MODELS.openaiCleanup),
-      cleanup55: names.has(APPROVED_MODELS.openaiCleanup55)
+      cleanup55: names.has(APPROVED_MODELS.openaiCleanup55),
+      cleanup56Sol: names.has(APPROVED_MODELS.openaiCleanup56Sol),
+      cleanup56Terra: names.has(APPROVED_MODELS.openaiCleanup56Terra),
+      cleanup56Luna: names.has(APPROVED_MODELS.openaiCleanup56Luna)
     };
   } catch (error) {
-    return { keyPresent: true, error: errorMessage(error), transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false };
+    return { keyPresent: true, error: errorMessage(error), transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false, cleanup56Sol: false, cleanup56Terra: false, cleanup56Luna: false };
   }
 }
 

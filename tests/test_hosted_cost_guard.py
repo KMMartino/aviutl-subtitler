@@ -41,6 +41,30 @@ class HostedCostGuardTests(unittest.TestCase):
 
         enforce_cost_guard(config, estimated_api_cost=1.0)
 
+    def test_string_false_cannot_authorize_api_spend(self):
+        config = load_workflow_config("hosted")
+        config["cost"]["max_estimated_api_cost_usd"] = 0.01
+        config["cost"]["allow_api_spend"] = "false"
+
+        with self.assertRaisesRegex(SubtitlerError, "allow_api_spend must be a boolean"):
+            enforce_cost_guard(config, estimated_api_cost=1.0)
+
+    def test_non_finite_limit_fails_closed(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                config = load_workflow_config("hosted")
+                config["cost"]["max_estimated_api_cost_usd"] = value
+                config["cost"]["allow_api_spend"] = True
+                with self.assertRaisesRegex(SubtitlerError, "finite non-negative number"):
+                    enforce_cost_guard(config, estimated_api_cost=1.0)
+
+    def test_non_finite_estimate_fails_closed(self):
+        config = load_workflow_config("hosted")
+        config["cost"]["allow_api_spend"] = True
+
+        with self.assertRaisesRegex(SubtitlerError, "estimated API cost must be"):
+            enforce_cost_guard(config, estimated_api_cost=float("nan"))
+
 
 if __name__ == "__main__":
     unittest.main()

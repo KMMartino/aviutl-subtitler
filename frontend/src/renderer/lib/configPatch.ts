@@ -39,7 +39,15 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
     additionalSettings: {
       youtubeChapters: Boolean(config.additional_settings?.youtube_chapters)
     },
-    cleanupWindowSubtitles: Number(config.cleanup?.window_subtitles ?? 0) || undefined
+    cleanupGroupPolicy: {
+      minSec: Number(config.cleanup?.group_min_sec ?? 60),
+      durationDivisor: Number(config.cleanup?.group_duration_divisor ?? 2),
+      maxSec: Number(config.cleanup?.group_max_sec ?? 600)
+    },
+    alignment: {
+      model: String(config.alignment?.model ?? "MahmoudAshraf/mms-300m-1130-forced-aligner"),
+      offlineModelCache: Boolean(config.alignment?.offline_model_cache)
+    }
   };
 }
 
@@ -52,6 +60,7 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.diagnostics ??= {};
   next.cost ??= {};
   next.additional_settings ??= {};
+  next.alignment ??= {};
   next.audio.track = settings.audioTrack;
   if (localWorkflow) {
     next.backend.transcriber = "local-gemma";
@@ -80,8 +89,16 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.cost.allow_api_spend = settings.cost?.allowApiSpend ?? false;
   next.cost.estimate_cost_only = settings.cost?.estimateCostOnly ?? false;
   next.additional_settings.youtube_chapters = workflow === "hosted" ? settings.additionalSettings?.youtubeChapters ?? false : false;
-  if (settings.cleanupWindowSubtitles !== undefined) {
-    next.cleanup.window_subtitles = settings.cleanupWindowSubtitles;
+  if (settings.cleanupGroupPolicy !== undefined) {
+    next.cleanup.group_min_sec = settings.cleanupGroupPolicy.minSec;
+    next.cleanup.group_duration_divisor = settings.cleanupGroupPolicy.durationDivisor;
+    next.cleanup.group_max_sec = settings.cleanupGroupPolicy.maxSec;
   }
+  next.alignment.model = settings.alignment?.model ?? next.alignment.model;
+  next.alignment.offline_model_cache = settings.alignment?.offlineModelCache ?? false;
   return next;
+}
+
+export function applySharedAlignment(config: WorkflowConfig, model: string, offlineModelCache: boolean): WorkflowConfig {
+  return { ...config, alignment: { ...(config.alignment ?? {}), model, offline_model_cache: offlineModelCache } };
 }

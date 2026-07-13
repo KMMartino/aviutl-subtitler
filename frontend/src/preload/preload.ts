@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { AppSettings, LlamaBackendId, RunEvent, RunRequest, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 
 contextBridge.exposeInMainWorld("subtitler", {
-  chooseInputFile: () => ipcRenderer.invoke("dialog:input-file"),
+  chooseInputFile: (defaultPath?: string) => ipcRenderer.invoke("dialog:input-file", defaultPath),
   chooseFile: () => ipcRenderer.invoke("dialog:file"),
   chooseOutputFile: (defaultPath?: string) => ipcRenderer.invoke("dialog:output-file", defaultPath),
   chooseDirectory: () => ipcRenderer.invoke("dialog:directory"),
@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld("subtitler", {
   filePath: (file: File) => webUtils.getPathForFile(file),
   analyzeMedia: (path: string) => ipcRenderer.invoke("media:analyze", path),
   getAppState: () => ipcRenderer.invoke("state:get"),
+  resetAppState: () => ipcRenderer.invoke("state:reset"),
   saveAppSettings: (settings: AppSettings) => ipcRenderer.invoke("state:save-settings", settings),
   getWorkflowConfig: (workflow: WorkflowName) => ipcRenderer.invoke("config:get", workflow),
   saveWorkflowConfig: (workflow: WorkflowName, config: WorkflowConfig) => ipcRenderer.invoke("config:save", workflow, config),
@@ -38,6 +39,8 @@ contextBridge.exposeInMainWorld("subtitler", {
   deleteManagedPythonEnv: () => ipcRenderer.invoke("runtime:delete-managed-python"),
   downloadManagedFfmpeg: () => ipcRenderer.invoke("runtime:download-ffmpeg"),
   deleteManagedFfmpeg: () => ipcRenderer.invoke("runtime:delete-ffmpeg"),
+  downloadAlignmentModel: () => ipcRenderer.invoke("runtime:download-alignment"),
+  deleteAlignmentModel: () => ipcRenderer.invoke("runtime:delete-alignment"),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),
   cancelRun: (runId: string) => ipcRenderer.invoke("run:cancel", runId),
   onRunEvent: (callback: (event: RunEvent) => void) => {

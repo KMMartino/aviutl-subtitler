@@ -1,5 +1,4 @@
 import os
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +8,7 @@ import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
-from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json, verify_openai_model_available
+from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json, verify_gemini_model_available, verify_openai_model_available
 from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
@@ -52,6 +51,32 @@ class ExternalApiClientTests(unittest.TestCase):
                 result = transcriber.transcribe(self._chunk())
         self.assertEqual(result.text, "")
         self.assertEqual(len(ledger.rows), 1)
+
+    def test_gemini_transcription_uses_api_key_header_not_query(self) -> None:
+        response = {
+            "candidates": [{"content": {"parts": [{"text": "どうも"}]}}],
+            "usageMetadata": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch("subtitler.external_transcribers.verify_gemini_model_available"), mock.patch(
+                "subtitler.external_transcribers._request_json", return_value=response
+            ) as request:
+                GeminiTranscriber(
+                    "gemini-2.5-flash", Path(temp_name), ApiUsageLedger(), api_key="secret-key"
+                ).transcribe(self._chunk())
+        _method, url, _payload, *_rest = request.call_args.args
+        self.assertNotIn("secret-key", url)
+        self.assertNotIn("?key=", url)
+        self.assertEqual(request.call_args.kwargs["headers"], {"x-goog-api-key": "secret-key"})
+
+    def test_gemini_model_verification_uses_api_key_header_not_query(self) -> None:
+        with mock.patch("subtitler.external_transcribers._request_json", return_value={"models": []}) as request:
+            with self.assertRaises(Exception):
+                verify_gemini_model_available("gemini-missing", "secret-key")
+        _method, url, *_rest = request.call_args.args
+        self.assertNotIn("secret-key", url)
+        self.assertNotIn("?key=", url)
+        self.assertEqual(request.call_args.kwargs["headers"], {"x-goog-api-key": "secret-key"})
 
     def test_openai_transcriber_parses_text_and_usage(self) -> None:
         ledger = ApiUsageLedger()
@@ -113,7 +138,9 @@ class ExternalApiClientTests(unittest.TestCase):
         fallback.transcribe.assert_called_once_with(chunk)
 
     def test_transcription_timeout_request_can_be_classified_for_fallback(self) -> None:
-        with mock.patch("subtitler.external_transcribers.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+        with mock.patch("subtitler.hosted_http.urllib.request.urlopen", side_effect=TimeoutError("timed out")), mock.patch(
+            "subtitler.hosted_http.time.sleep"
+        ), mock.patch("subtitler.hosted_http.random.uniform", return_value=0.0):
             with self.assertRaises(DeadTranscriptionRequest):
                 _request_json(
                     "GET",
@@ -144,6 +171,20 @@ class ExternalApiClientTests(unittest.TestCase):
                 result = refiner.split_lines_with_diagnostics("前半後半", 10)
         self.assertTrue(result.accepted)
         self.assertEqual(result.lines, ["前半", "後半"])
+
+    def test_gemini_refiner_uses_api_key_header_not_query(self) -> None:
+        response = {"candidates": [{"content": {"parts": [{"text": "clean"}]}}], "usageMetadata": {}}
+        with mock.patch("subtitler.external_refiners.verify_gemini_model_available"), mock.patch(
+            "subtitler.external_refiners._request_json_with_retries", return_value=response
+        ) as request:
+            result = GeminiTextRefiner(
+                "gemini-2.5-flash", [], ApiUsageLedger(), api_key="secret-key"
+            )._chat("prompt")
+        self.assertEqual(result, "clean")
+        _method, url, *_rest = request.call_args.args
+        self.assertNotIn("secret-key", url)
+        self.assertNotIn("?key=", url)
+        self.assertEqual(request.call_args.kwargs["headers"], {"x-goog-api-key": "secret-key"})
 
     def test_transcription_timeout_scales_with_audio_length_and_caps(self) -> None:
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 2.0, [])), 5.0)

@@ -153,6 +153,7 @@ def generate_exo_file(
     chapter_markers: list[ExoMarker] | None = None,
     mistranscription_markers: list[ExoMarker] | None = None,
 ) -> str:
+    _validate_shift_jis_literal("exo.font", settings.font)
     total_frames = time_to_frame(total_duration, settings.rate)
     header = f"""[exedit]
 width={settings.width}
@@ -232,6 +233,25 @@ def _marker_frame_ranges(markers: list[ExoMarker], fps: int) -> list[tuple[int, 
 
 def write_exo(path: Path, content: str) -> None:
     try:
-        path.write_text(content, encoding="shift_jis", errors="replace")
-    except Exception as exc:
+        content.encode("shift_jis")
+    except UnicodeEncodeError as exc:
+        unsupported = content[exc.start : exc.end]
+        raise ExoWriteError(
+            "Could not encode generated EXO content as Shift-JIS; "
+            f"unsupported character {unsupported!r} at character offset {exc.start}"
+        ) from exc
+    try:
+        path.write_text(content, encoding="shift_jis")
+    except OSError as exc:
         raise ExoWriteError(f"Could not write EXO file: {path}") from exc
+
+
+def _validate_shift_jis_literal(field: str, value: str) -> None:
+    try:
+        value.encode("shift_jis")
+    except UnicodeEncodeError as exc:
+        unsupported = value[exc.start : exc.end]
+        raise ExoWriteError(
+            f"EXO setting {field}={value!r} cannot be encoded as Shift-JIS; "
+            f"unsupported character {unsupported!r}"
+        ) from exc

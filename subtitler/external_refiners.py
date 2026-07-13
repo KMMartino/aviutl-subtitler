@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import json
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
 from .api_usage import ApiUsageLedger
 from .errors import ModelLoadError
 from .external_transcribers import require_api_key, verify_gemini_model_available, verify_openai_model_available
 from .glossary import GlossaryEntry, format_glossary
+from .hosted_http import request_json
 from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 from .text_refiner import (
     TextRefiner,
@@ -435,9 +433,9 @@ class GeminiTextRefiner(HostedTextRefiner):
         }
         data = _request_json_with_retries(
             "POST",
-            f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent"
-            f"?key={urllib.parse.quote(self.api_key)}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent",
             payload,
+            headers={"x-goog-api-key": self.api_key},
             timeout_sec=_hosted_text_timeout(prompt, max_tokens),
             message=f"Gemini hosted text {operation} request failed",
         )
@@ -464,33 +462,14 @@ def _request_json_with_retries(
     timeout_sec: float = 300.0,
     message: str = "Hosted text request failed",
 ) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request_headers = {"Content-Type": "application/json"}
-    if headers:
-        request_headers.update(headers)
-    for attempt in range(3):
-        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code not in {408, 429, 500, 502, 503, 504} or attempt == 2:
-                raise ModelLoadError(f"{message}: HTTP {exc.code}: {detail}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, f"HTTP {exc.code}")
-        except Exception as exc:
-            if attempt == 2:
-                raise ModelLoadError(f"{message}: {exc}") from exc
-            _print_retry_warning(message, attempt, timeout_sec, str(exc))
-        time.sleep(2**attempt)
-    raise ModelLoadError(message)
-
-
-def _print_retry_warning(message: str, attempt: int, timeout_sec: float, reason: str) -> None:
-    print(
-        f"Warning: {message}; attempt {attempt + 1}/3 failed after timeout={timeout_sec:.1f}s "
-        f"or retryable error ({reason}). Resending request...",
-        flush=True,
+    return request_json(
+        method,
+        url,
+        payload,
+        ModelLoadError,
+        message,
+        headers=headers,
+        timeout_sec=timeout_sec,
     )
 
 

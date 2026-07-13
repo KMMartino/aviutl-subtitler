@@ -8,13 +8,20 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["src/renderer", "src/preload", "src/shared.d.ts"]
+  "include": [
+    "src/renderer",
+    "src/preload",
+    "src/shared.d.ts",
+    "src/assets.d.ts"
+  ]
 }

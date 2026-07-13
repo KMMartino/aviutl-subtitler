@@ -1,14 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
 import extract from "extract-zip";
 import type { CurrentLlamaServerState, LlamaBackendId, LlamaBackendOption, LlamaReleaseAsset, LlamaReleaseCheck, ManagedLlamaStatus } from "../renderer/lib/types";
+import { downloadVerifiedArtifact, writeArtifactMetadata } from "./artifactIntegrity";
 
 type GithubAsset = {
   name: string;
   browser_download_url: string;
+  size: number;
+  digest: string | null;
 };
 
 type GithubRelease = {
@@ -54,11 +55,17 @@ export function matchReleaseAsset(release: GithubRelease, backend: LlamaBackendI
     const label = backend === "vulkan" ? "Vulkan" : "CUDA 12.4";
     throw new Error(`No llama.cpp Windows ${label} asset found in release ${release.tag_name}.\nAvailable Windows assets:\n${windowsAssets || "- none"}`);
   }
+  const sha256 = asset.digest?.match(/^sha256:([a-f0-9]{64})$/i)?.[1] ?? "";
+  if (!sha256 || !Number.isSafeInteger(asset.size) || asset.size <= 0) {
+    throw new Error(`llama.cpp release ${release.tag_name} does not provide trustworthy SHA-256 and size metadata for ${asset.name}.`);
+  }
   return {
     backend,
     releaseTag: release.tag_name,
     assetName: asset.name,
-    downloadUrl: asset.browser_download_url
+    downloadUrl: asset.browser_download_url,
+    bytes: asset.size,
+    sha256,
   };
 }
 
@@ -71,8 +78,25 @@ export async function checkLatestLlamaRelease(): Promise<LlamaReleaseCheck> {
   };
 }
 
-export function managedLlamaRoot(root: string): string {
-  return path.join(root, ".frontend-state", "tools", "llama");
+export function managedLlamaRoot(userToolsRoot: string): string {
+  return path.join(userToolsRoot, "llama");
+}
+
+/** Adopt installs written by the old stateRoot/.frontend-state/tools contract. */
+export function migrateLegacyManagedLlamaRoot(stateRoot: string, userToolsRoot: string): boolean {
+  const legacy = path.join(stateRoot, ".frontend-state", "tools", "llama");
+  const target = managedLlamaRoot(userToolsRoot);
+  if (!fs.existsSync(legacy)) return false;
+  let moved: boolean;
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.renameSync(legacy, target);
+    moved = true;
+  } else {
+    moved = moveMissingTree(legacy, target);
+  }
+  removeEmptyParents(path.dirname(legacy), stateRoot);
+  return moved;
 }
 
 export function managedLlamaInstallDir(root: string, backend: LlamaBackendId, releaseTag: string): string {
@@ -82,7 +106,7 @@ export function managedLlamaInstallDir(root: string, backend: LlamaBackendId, re
 export function getManagedLlamaStatus(root: string, backend: LlamaBackendId, releaseTag?: string): ManagedLlamaStatus {
   const tag = releaseTag || latestInstalledRelease(root, backend);
   const installDir = tag ? managedLlamaInstallDir(root, backend, tag) : path.join(managedLlamaRoot(root), backend);
-  const serverPath = tag ? findLlamaServerExe(installDir) : "";
+  const serverPath = tag && hasInstallMetadata(installDir, tag) ? findLlamaServerExe(installDir) : "";
   return {
     backend,
     releaseTag: tag,
@@ -149,27 +173,29 @@ export async function downloadManagedLlamaServer(
   const zipPath = path.join(downloadsDir, asset.assetName);
   fs.mkdirSync(downloadsDir, { recursive: true });
 
-  if (!fs.existsSync(zipPath)) {
-    const partial = `${zipPath}.part`;
-    onLog(`[llama] downloading ${asset.downloadUrl}\n`);
-    try {
-      const response = await fetch(asset.downloadUrl, { redirect: "follow", signal: AbortSignal.timeout(30 * 60 * 1000) });
-      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
-      await pipeline(Readable.fromWeb(response.body as never), fs.createWriteStream(partial));
-      fs.renameSync(partial, zipPath);
-      onLog(`[llama] downloaded ${zipPath}\n`);
-    } catch (error) {
-      fs.rmSync(partial, { force: true });
-      throw new Error(`Could not download llama.cpp server: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  } else {
-    onLog(`[llama] using cached download ${zipPath}\n`);
+  onLog(`[llama] acquiring and verifying ${asset.downloadUrl}\n`);
+  try {
+    let lastPercent = -1;
+    await downloadVerifiedArtifact(asset.downloadUrl, zipPath, asset, (received, total) => {
+      const percent = Math.floor(received / total * 100);
+      if (percent !== lastPercent && percent % 5 === 0) {
+        lastPercent = percent;
+        onLog(`[llama] download ${percent}%\n`);
+      }
+    });
+  } catch (error) {
+    throw new Error(`Could not download verified llama.cpp server: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+  onLog(`[llama] verified SHA-256 ${asset.sha256}\n`);
 
   const installDir = managedLlamaInstallDir(root, backend, release.tag_name);
-  fs.mkdirSync(installDir, { recursive: true });
-  onLog(`[llama] extracting to ${installDir}\n`);
-  await extract(zipPath, { dir: installDir });
+  const stagingDir = `${installDir}.part`;
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  fs.mkdirSync(stagingDir, { recursive: true });
+  onLog(`[llama] extracting to staging directory\n`);
+  await extract(zipPath, { dir: stagingDir });
+  fs.rmSync(installDir, { recursive: true, force: true });
+  fs.renameSync(stagingDir, installDir);
 
   const serverPath = findLlamaServerExe(installDir);
   if (!serverPath) {
@@ -185,6 +211,13 @@ export async function downloadManagedLlamaServer(
     onLog(`[llama] installed, but version check failed: ${error instanceof Error ? error.message : String(error)}\n`);
   }
   onLog("[llama] install complete\n");
+  writeArtifactMetadata(path.join(installDir, "artifact.json"), {
+    source: asset.downloadUrl,
+    bytes: asset.bytes,
+    sha256: asset.sha256,
+    revision: release.tag_name,
+    installedAt: new Date().toISOString(),
+  });
   pruneOldManagedInstalls(root, backend, release.tag_name, onLog);
 
   return {
@@ -285,6 +318,15 @@ function versionOfServerSync(serverPath: string): string {
   return `${result.stdout}${result.stderr}`.trim();
 }
 
+function hasInstallMetadata(installDir: string, releaseTag: string): boolean {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(installDir, "artifact.json"), "utf8")) as { bytes?: number; sha256?: string; revision?: string };
+    return Number.isSafeInteger(value.bytes) && (value.bytes ?? 0) > 0 && /^[a-f0-9]{64}$/i.test(value.sha256 ?? "") && value.revision === releaseTag;
+  } catch {
+    return false;
+  }
+}
+
 function versionOfServer(serverPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(serverPath, ["--version"], { windowsHide: true });
@@ -301,4 +343,36 @@ function versionOfServer(serverPath: string): Promise<string> {
 
 function firstLine(text: string): string {
   return text.split(/\r?\n/).find(Boolean) ?? "";
+}
+
+function removeEmptyParents(start: string, stop: string): void {
+  let current = path.resolve(start);
+  const boundary = path.resolve(stop);
+  while (current !== boundary && isWithin(boundary, current)) {
+    try {
+      if (fs.readdirSync(current).length) return;
+      fs.rmdirSync(current);
+    } catch {
+      return;
+    }
+    current = path.dirname(current);
+  }
+}
+
+function moveMissingTree(source: string, target: string): boolean {
+  let moved = false;
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (!fs.existsSync(to)) {
+      fs.renameSync(from, to);
+      moved = true;
+    } else if (entry.isDirectory() && fs.statSync(to).isDirectory()) {
+      moved = moveMissingTree(from, to) || moved;
+      if (fs.existsSync(from) && fs.readdirSync(from).length === 0) fs.rmdirSync(from);
+    }
+  }
+  if (fs.existsSync(source) && fs.readdirSync(source).length === 0) fs.rmdirSync(source);
+  return moved;
 }

@@ -5,6 +5,12 @@ from subtitler.errors import SubtitlerError
 
 
 class WorkflowConfigValidationTests(unittest.TestCase):
+    def assert_invalid_field(self, section, field, value, *, workflow="hosted"):
+        config = load_workflow_config(workflow)
+        config[section][field] = value
+        with self.assertRaises(SubtitlerError):
+            validate_workflow_config(config, workflow=workflow, check_paths=False)
+
     def test_all_default_configs_validate_without_path_checks(self):
         for workflow in WORKFLOWS:
             with self.subTest(workflow=workflow):
@@ -64,6 +70,9 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_new_approved_cleanup_models_are_allowed(self):
         for backend, model in (
             ("openai", "gpt-5.5"),
+            ("openai", "gpt-5.6-sol"),
+            ("openai", "gpt-5.6-terra"),
+            ("openai", "gpt-5.6-luna"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -142,6 +151,123 @@ class WorkflowConfigValidationTests(unittest.TestCase):
                 config["additional_settings"]["youtube_chapters"] = True
                 with self.assertRaises(SubtitlerError):
                     validate_workflow_config(config, workflow=workflow, check_paths=False)
+
+    def test_boolean_fields_require_actual_booleans(self):
+        fields = (
+            ("alignment", "offline_model_cache"),
+            ("cleanup", "skip_final_review"),
+            ("cleanup", "llm_split_planning"),
+            ("diagnostics", "profile"),
+            ("diagnostics", "llm_split_diagnostics"),
+            ("cost", "allow_api_spend"),
+            ("cost", "estimate_cost_only"),
+            ("additional_settings", "youtube_chapters"),
+        )
+        for section, field in fields:
+            with self.subTest(field=f"{section}.{field}"):
+                self.assert_invalid_field(section, field, "false")
+
+    def test_integer_fields_reject_booleans(self):
+        fields = (
+            ("backend", "server_port"),
+            ("backend", "n_gpu_layers"),
+            ("backend", "ctx_size"),
+            ("backend", "audio_prep_workers"),
+            ("backend", "transcription_workers"),
+            ("backend", "transcription_max_split_depth"),
+            ("backend", "spec_draft_n_max"),
+            ("audio", "track"),
+            ("workflow", "long_stream_min_chunks"),
+            ("vad", "min_silence_ms"),
+            ("vad", "speech_pad_ms"),
+            ("alignment", "max_split_depth"),
+            ("alignment", "workers"),
+            ("alignment", "torch_threads"),
+            ("alignment", "emission_batch_size"),
+            ("cleanup", "server_port"),
+            ("cleanup", "ctx_size"),
+            ("cleanup", "window_subtitles"),
+            ("cleanup", "workers"),
+            ("cleanup", "spec_draft_n_max"),
+            ("subtitles", "max_chars"),
+            ("subtitles", "chain_split_workers"),
+            ("exo", "width"),
+            ("exo", "height"),
+            ("exo", "fps"),
+            ("exo", "font_size"),
+        )
+        for section, field in fields:
+            with self.subTest(field=f"{section}.{field}"):
+                self.assert_invalid_field(section, field, True)
+
+    def test_non_finite_numeric_fields_are_rejected(self):
+        fields = (
+            ("workflow", "long_stream_selection_ratio"),
+            ("vad", "max_chunk_sec"),
+            ("vad", "min_speech_sec"),
+            ("vad", "min_silence_ms"),
+            ("vad", "speech_pad_ms"),
+            ("subtitles", "min_duration"),
+            ("subtitles", "max_duration"),
+            ("subtitles", "gap_threshold"),
+            ("subtitles", "regroup_gap_sec"),
+            ("subtitles", "chain_lead_in_sec"),
+            ("exo", "y_position"),
+            ("cost", "max_estimated_api_cost_usd"),
+        )
+        for section, field in fields:
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=f"{section}.{field}", value=value):
+                    self.assert_invalid_field(section, field, value)
+
+    def test_worker_counts_depths_batches_and_contexts_are_range_checked(self):
+        fields = (
+            ("backend", "ctx_size", 0),
+            ("backend", "audio_prep_workers", 0),
+            ("backend", "transcription_workers", 0),
+            ("backend", "transcription_max_split_depth", -1),
+            ("backend", "spec_draft_n_max", 0),
+            ("vad", "min_silence_ms", 0),
+            ("vad", "speech_pad_ms", -1),
+            ("alignment", "max_split_depth", -1),
+            ("alignment", "workers", 0),
+            ("alignment", "torch_threads", 0),
+            ("alignment", "emission_batch_size", 0),
+            ("cleanup", "ctx_size", 0),
+            ("cleanup", "window_subtitles", 0),
+            ("cleanup", "workers", 0),
+            ("cleanup", "spec_draft_n_max", 0),
+            ("subtitles", "chain_split_workers", 0),
+        )
+        for section, field, value in fields:
+            with self.subTest(field=f"{section}.{field}"):
+                self.assert_invalid_field(section, field, value)
+
+    def test_vad_millisecond_fields_reject_fractional_values(self):
+        for field in ("min_silence_ms", "speech_pad_ms"):
+            with self.subTest(field=field):
+                self.assert_invalid_field("vad", field, 1.5)
+
+    def test_server_ports_must_be_in_tcp_port_range(self):
+        for section in ("backend", "cleanup"):
+            for value in (0, 65536):
+                with self.subTest(section=section, value=value):
+                    self.assert_invalid_field(section, "server_port", value)
+
+    def test_optional_numeric_fields_allow_none(self):
+        config = load_workflow_config("hosted")
+        for section, field in (
+            ("backend", "transcription_workers"),
+            ("workflow", "long_stream_selection_ratio"),
+            ("alignment", "workers"),
+            ("alignment", "torch_threads"),
+            ("cleanup", "window_subtitles"),
+            ("cleanup", "workers"),
+            ("subtitles", "chain_split_workers"),
+        ):
+            config[section][field] = None
+
+        validate_workflow_config(config, workflow="hosted", check_paths=False)
 
 
 if __name__ == "__main__":

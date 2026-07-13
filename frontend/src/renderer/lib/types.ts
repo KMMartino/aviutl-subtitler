@@ -10,6 +10,7 @@ export type ThemeName =
   | "plum";
 
 export type AppSettings = {
+  schemaVersion: number;
   pythonPath: string;
   envFile: string;
   lastInputPath: string;
@@ -23,6 +24,8 @@ export type AppSettings = {
   llamaBackend: LlamaBackendId;
   ffmpegMode?: "auto" | "managed" | "path";
   modelDownloadMode?: "direct" | "huggingface";
+  alignmentModel: string;
+  alignmentOfflineModelCache: boolean;
 };
 
 export type LlamaBackendId = "vulkan" | "cuda-12";
@@ -38,6 +41,8 @@ export type LlamaReleaseAsset = {
   releaseTag: string;
   assetName: string;
   downloadUrl: string;
+  bytes: number;
+  sha256: string;
 };
 
 export type ManagedLlamaStatus = {
@@ -68,6 +73,7 @@ export type LlamaReleaseCheck = {
 export type LocalModelStatus = {
   profile: string;
   installed: boolean;
+  needsVerification: boolean;
   downloading: boolean;
   managed: boolean;
   files: {
@@ -85,8 +91,14 @@ export type LocalModelProfile = {
   vramGb: number;
   summary: string;
   downloadBytes: number;
-  cleanupWindowSubtitles: number;
+  cleanupGroupPolicy: CleanupGroupPolicy;
   experimental: boolean;
+};
+
+export type CleanupGroupPolicy = {
+  minSec: number;
+  durationDivisor: number;
+  maxSec: number;
 };
 
 export type HuggingFaceDownloaderStatus = {
@@ -132,6 +144,17 @@ export type FfmpegStatus = {
 export type RuntimeSetupStatus = {
   python: PythonRuntimeStatus;
   ffmpeg: FfmpegStatus;
+  alignment: AlignmentModelStatus;
+};
+
+export type AlignmentModelStatus = {
+  installed: boolean;
+  modelPath: string;
+  cachePath: string;
+  revision: string;
+  downloadBytes: number;
+  verified: boolean;
+  error: string;
 };
 
 export type HostedModelVerification = {
@@ -143,6 +166,9 @@ export type HostedModelVerification = {
     transcriptionMini: boolean;
     cleanup: boolean;
     cleanup55: boolean;
+    cleanup56Sol: boolean;
+    cleanup56Terra: boolean;
+    cleanup56Luna: boolean;
   };
   gemini: {
     keyPresent: boolean;
@@ -187,10 +213,26 @@ export type CoreWorkflowSettings = {
   additionalSettings?: {
     youtubeChapters: boolean;
   };
-  cleanupWindowSubtitles?: number;
+  cleanupGroupPolicy?: CleanupGroupPolicy;
+  alignment?: {
+    model: string;
+    offlineModelCache: boolean;
+  };
 };
 
-export type WorkflowConfig = Record<string, any>;
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type WorkflowConfigSection = Record<string, JsonValue | undefined>;
+export type WorkflowConfig = {
+  audio?: WorkflowConfigSection;
+  backend?: WorkflowConfigSection;
+  cleanup?: WorkflowConfigSection;
+  diagnostics?: WorkflowConfigSection;
+  cost?: WorkflowConfigSection;
+  additional_settings?: WorkflowConfigSection;
+  alignment?: WorkflowConfigSection;
+  /** Advanced backend options not represented by the main UI are preserved here. */
+  [extension: string]: WorkflowConfigSection | JsonValue | undefined;
+};
 
 export type RunRequest = {
   workflow: WorkflowName;

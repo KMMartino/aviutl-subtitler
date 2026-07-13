@@ -11,13 +11,20 @@
   },
   "main": "dist-electron/main/main.js",
   "scripts": {
+    "postinstall": "node node_modules/electron/install.js",
     "dev": "vite --host 127.0.0.1",
     "clean:electron": "node scripts/clean-electron.mjs",
     "electron": "npm run clean:electron && tsc -p tsconfig.node.json && set ELECTRON_RUN_AS_NODE=&& electron .",
     "start": "concurrently \"npm run dev\" \"wait-on http://127.0.0.1:5173 && npm run electron\"",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "lint": "eslint src",
+    "format:check": "prettier --check package.json tsconfig.json tsconfig.node.json vite.config.ts vitest.config.ts scripts/*.mjs",
+    "quality": "npm run typecheck && npm run lint && npm run format:check",
+    "test:release-version": "node --test scripts/set-release-version.test.mjs",
+    "release:version": "node scripts/set-release-version.mjs",
     "build": "vite build && npm run clean:electron && tsc -p tsconfig.node.json",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "dist": "npm run build && electron-builder --publish never",
     "dist:dir": "npm run build && electron-builder --dir",
     "pack": "npm run dist:dir"
@@ -29,17 +36,23 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
-    "electron": "^33.2.1",
-    "electron-builder": "^26.15.3",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.5",
-    "vitest": "^4.1.8",
-    "wait-on": "^8.0.1"
+    "@vitejs/plugin-react": "6.0.3",
+    "@vitest/coverage-v8": "4.1.10",
+    "concurrently": "10.0.3",
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3",
+    "eslint": "10.0.1",
+    "globals": "17.7.0",
+    "prettier": "3.9.5",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.63.0",
+    "vite": "8.1.4",
+    "vitest": "4.1.10",
+    "wait-on": "8.0.5"
   },
   "build": {
     "appId": "com.kmmartino.aviutl-subtitler",
@@ -75,6 +88,10 @@
         "to": "app-backend/requirements.txt"
       },
       {
+        "from": "../requirements-lock-win.txt",
+        "to": "app-backend/requirements-lock-win.txt"
+      },
+      {
         "from": "../.env.example",
         "to": "app-backend/.env.example"
       },
@@ -98,9 +115,10 @@
       ]
     },
     "portable": {
-      "artifactName": "SubUtl.exe"
+      "artifactName": "SubUtl${version}.exe"
     },
     "nsis": {
+      "artifactName": "SubUtlSetup${version}.exe",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

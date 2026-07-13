@@ -88,6 +88,8 @@ def extract_audio(
                 progress_callback(min(100.0, seconds / duration * 100.0))
     code = process.wait()
     stderr_thread.join(timeout=1.0)
+    process.stdout.close()
+    process.stderr.close()
     if code != 0:
         raise AudioExtractionError("".join(stderr_lines).strip() or "ffmpeg audio extraction failed")
     if progress_callback is not None:

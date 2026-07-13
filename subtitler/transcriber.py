@@ -5,19 +5,16 @@ from __future__ import annotations
 import base64
 import json
 import re
-import shutil
-import subprocess
 import time
-import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import TextIO
 
 from .audio import write_wav_segment
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry, format_glossary
+from .llama_server import LlamaServerProcess
 from .models import AudioChunk, TranscriptChunk
-from .vad import split_chunk_with_tighter_vad
+from .vad import VadSession, split_chunk_with_tighter_vad
 
 
 UNTRANSCRIBABLE_AUDIO_TOKEN = "__SUBTITLER_UNTRANSCRIBABLE_AUDIO__"
@@ -96,6 +93,7 @@ class ServerGemmaTranscriber:
         spec_draft_model: Path | None = None,
         spec_draft_n_max: int = 3,
         log_path: Path | None = None,
+        vad_session: VadSession | None = None,
     ) -> None:
         if not model_path.exists():
             raise ModelLoadError(f"Gemma GGUF model not found: {model_path}")
@@ -108,13 +106,10 @@ class ServerGemmaTranscriber:
                 "Speculative draft/MTP model must be a GGUF file for llama.cpp. "
                 f"Got: {spec_draft_model}"
             )
-        self.server_path = self._resolve_server(server_path)
         self.model_path = model_path
         self.mmproj = mmproj
         self.spec_draft_model = spec_draft_model
         self.spec_draft_n_max = max(1, spec_draft_n_max)
-        self.log_path = log_path
-        self._log_handle: TextIO | None = None
         self.n_gpu_layers = n_gpu_layers
         self.ctx_size = ctx_size
         self.temp_dir = temp_dir
@@ -123,51 +118,12 @@ class ServerGemmaTranscriber:
         self.base_url = f"http://{host}:{port}"
         self.prompt = build_transcription_prompt(glossary)
         self.max_transcription_split_depth = max(0, max_transcription_split_depth)
-        self.process: subprocess.Popen[str] | None = None
-        self._owned_process = False
-        self._ensure_server()
-
-    @staticmethod
-    def _resolve_server(server_path: Path | None) -> Path:
-        if server_path is not None:
-            if not server_path.exists():
-                raise ModelLoadError(f"llama-server not found: {server_path}")
-            return server_path
-        found = shutil.which("llama-server") or shutil.which("llama-server.exe")
-        if found:
-            return Path(found)
-        common = Path(r"C:\tools\llama-vulkan\llama-server.exe")
-        if common.exists():
-            return common
-        raise ModelLoadError(
-            "llama-server was not found on PATH or at C:\\tools\\llama-vulkan\\llama-server.exe"
-        )
-
-    def _ensure_server(self) -> None:
-        if self._health_ok():
-            return
-
-        gpu_layers = "all" if self.n_gpu_layers < 0 else str(self.n_gpu_layers)
-        cmd = [
-            str(self.server_path),
-            "-m",
-            str(self.model_path),
-            "-ngl",
-            gpu_layers,
-            "-c",
-            str(self.ctx_size),
-            "--host",
-            self.host,
-            "--port",
-            str(self.port),
-            "--no-warmup",
-            "--log-verbosity",
-            "2",
-        ]
+        self.vad_session = vad_session
+        extra_args: list[str] = []
         if self.mmproj is not None:
-            cmd.extend(["--mmproj", str(self.mmproj)])
+            extra_args.extend(["--mmproj", str(self.mmproj)])
         if self.spec_draft_model is not None:
-            cmd.extend(
+            extra_args.extend(
                 [
                     "--spec-draft-model",
                     str(self.spec_draft_model),
@@ -177,49 +133,18 @@ class ServerGemmaTranscriber:
                     str(self.spec_draft_n_max),
                 ]
             )
-        if self.log_path is not None:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_handle = self.log_path.open("w", encoding="utf-8")
-            self._log_handle.write(" ".join(cmd) + "\n\n")
-            self._log_handle.flush()
-            stdout = self._log_handle
-            stderr = subprocess.STDOUT
-            print(f"Transcription llama-server log: {self.log_path}", flush=True)
-        else:
-            stdout = subprocess.DEVNULL
-            stderr = subprocess.DEVNULL
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-            )
-        except OSError as exc:
-            raise ModelLoadError(f"Could not start llama-server: {exc}") from exc
-        self._owned_process = True
-
-        deadline = time.monotonic() + 180
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                detail = f" See log: {self.log_path}" if self.log_path is not None else ""
-                tail = _tail_log(self.log_path) if self.log_path is not None else ""
-                raise ModelLoadError(
-                    f"llama-server exited early with code {self.process.returncode}.{detail}{tail}"
-                )
-            if self._health_ok():
-                return
-            time.sleep(1)
-        self.close()
-        detail = f" See log: {self.log_path}" if self.log_path is not None else ""
-        raise ModelLoadError(f"llama-server did not become healthy within 180 seconds.{detail}")
-
-    def _health_ok(self) -> bool:
-        try:
-            with urllib.request.urlopen(f"{self.base_url}/health", timeout=2) as response:
-                return response.status == 200
-        except (OSError, urllib.error.URLError):
-            return False
+        self._server = LlamaServerProcess(
+            model_path=model_path,
+            server_path=server_path,
+            host=host,
+            port=port,
+            ctx_size=ctx_size,
+            n_gpu_layers=n_gpu_layers,
+            extra_args=extra_args,
+            log_path=log_path,
+            label="transcription llama-server",
+        )
+        self.process = self._server.process
 
     def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
         payload = self.prepare_payload(chunk)
@@ -257,6 +182,7 @@ class ServerGemmaTranscriber:
                 sample_rate=16000,
                 temp_dir=self.temp_dir,
                 keep_temp=True,
+                session=self.vad_session,
             )
             if len(subchunks) >= 2:
                 print(
@@ -312,27 +238,7 @@ class ServerGemmaTranscriber:
         return cleaned
 
     def close(self) -> None:
-        if self.process is None or not self._owned_process:
-            return
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=10)
-        if self._log_handle is not None:
-            self._log_handle.close()
-            self._log_handle = None
-
-
-def _tail_log(path: Path, max_chars: int = 2000) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    tail = text[-max_chars:].strip()
-    return f"\nLast llama-server log lines:\n{tail}" if tail else ""
+        self._server.close()
 
 def _merge_transcript_parts(parts: list[str]) -> str:
     cleaned = [part.strip() for part in parts if part.strip()]

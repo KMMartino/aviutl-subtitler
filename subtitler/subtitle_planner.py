@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .models import AlignedChunk, AlignedToken, Subtitle
 from .profiling import (
@@ -20,7 +23,7 @@ from .profiling import (
     write_subtitle_timing_profile,
 )
 from .splitter import SENTENCE_TERMINAL_SOURCE, split_aligned_chunk, split_token_chain
-from .text_refiner import TextRefiner
+from .text_refiner import TextRefiner, _is_filler_only
 
 BOUNDARY_REVIEW_TERMS = (
     "について",
@@ -259,7 +262,10 @@ def build_grouped_subtitles(
     cleanup_window_subtitles: int = 1,
     cleanup_workers: int = 1,
     chain_split_workers: int = 1,
+    progress_callback: Callable[[str, int, int], None] | None = None,
+    planning_profile_path: Path | None = None,
 ) -> list[Subtitle]:
+    planning_started = time.perf_counter()
     chains = group_aligned_chains(
         chunks,
         gap_sec=regroup_gap_sec,
@@ -370,14 +376,24 @@ def build_grouped_subtitles(
         )
         return chain_index, split_parts, regroup_row, local_llm_rows, local_llm_rejections, local_fallback, local_tokenless
 
+    if progress_callback is not None and chains:
+        progress_callback("Planning subtitle breaks", 0, len(chains))
     if chain_split_workers > 1 and len(chains) > 1:
         split_results = []
         with ThreadPoolExecutor(max_workers=max(1, chain_split_workers)) as pool:
             futures = [pool.submit(split_chain, chain_index, chain) for chain_index, chain in enumerate(chains)]
-            for future in as_completed(futures):
+            for completed, future in enumerate(as_completed(futures), start=1):
                 split_results.append(future.result())
+                if progress_callback is not None:
+                    progress_callback("Planning subtitle breaks", completed, len(chains))
     else:
-        split_results = [split_chain(chain_index, chain) for chain_index, chain in enumerate(chains)]
+        split_results = []
+        for chain_index, chain in enumerate(chains):
+            split_results.append(split_chain(chain_index, chain))
+            if progress_callback is not None:
+                progress_callback("Planning subtitle breaks", chain_index + 1, len(chains))
+
+    split_elapsed = time.perf_counter() - planning_started
 
     for _, split_parts, regroup_row, local_rows, local_rejections, local_fallback, local_tokenless in sorted(
         split_results,
@@ -388,33 +404,24 @@ def build_grouped_subtitles(
         tokenless_chunks += local_tokenless
         llm_split_rows.extend(local_rows)
         llm_split_rejections.extend(local_rejections)
-        if regroup_profile_path is not None:
+        if regroup_profile_path is not None or planning_profile_path is not None:
             regroup_rows.append(regroup_row)
     subtitles = [s for s in subtitles if s.text.strip()]
     subtitles.sort(key=lambda s: (s.start_time, s.end_time))
     left_merge_count = _left_merge_adjacent_subtitles(subtitles, max_chars)
     stripped_period_count = _strip_standard_sentence_periods(subtitles)
     boundary_review_count = 0
+    boundary_started = time.perf_counter()
     if refiner is not None:
+        if progress_callback is not None:
+            progress_callback("Reviewing subtitle boundaries", 0, 1)
         boundary_review_count = _review_same_chain_leading_phrases(subtitles, refiner, max_chars)
+        if progress_callback is not None:
+            progress_callback("Reviewing subtitle boundaries", 1, 1)
+    boundary_elapsed = time.perf_counter() - boundary_started
 
     if regroup_profile_path is not None:
         write_regroup_profile(regroup_profile_path, regroup_rows)
-        merged_chains = sum(1 for row in regroup_rows if row.chunk_count > 1)
-        longest = max(regroup_rows, key=lambda row: row.duration_sec, default=None)
-        print("Regroup diagnostics:", flush=True)
-        print(f"  aligned_chunks={len(chunks)}", flush=True)
-        print(f"  fallback_chunks={fallback_chunks}", flush=True)
-        print(f"  tokenless_chunks={tokenless_chunks}", flush=True)
-        print(f"  chain_count={len(regroup_rows)}", flush=True)
-        print(f"  merged_chains={merged_chains}", flush=True)
-        print(f"  left_merged_subtitles={left_merge_count}", flush=True)
-        print(f"  stripped_sentence_periods={stripped_period_count}", flush=True)
-        print(f"  boundary_review_moves={boundary_review_count}", flush=True)
-        if longest is not None:
-            print(f"  longest_chain_chunks={longest.chunk_count}", flush=True)
-            print(f"  longest_chain_sec={longest.duration_sec:.2f}", flush=True)
-        print(f"  subtitles_before_cleanup={len(subtitles)}", flush=True)
     if llm_split_profile_path is not None:
         write_llm_split_profile(llm_split_profile_path, llm_split_rows)
         print(f"Wrote LLM split diagnostics: {llm_split_profile_path}", flush=True)
@@ -466,13 +473,44 @@ def build_grouped_subtitles(
     if boundary_timing_profile_path is not None:
         write_boundary_timing_profile(boundary_timing_profile_path, boundary_rows)
 
+    cleanup_started = time.perf_counter()
+    subtitles_before_cleanup = len(subtitles)
+    cleanup_stats = CleanupStats()
     if refiner is not None:
-        _refine_subtitle_text(
+        cleanup_stats = _refine_subtitle_text(
             subtitles,
             refiner,
-            max(1, cleanup_window_subtitles),
             max(1, cleanup_workers),
             cleanup_diff_path,
+            progress_callback,
+        )
+    cleanup_elapsed = time.perf_counter() - cleanup_started
+    if planning_profile_path is not None:
+        merged_chains = sum(1 for row in regroup_rows if row.chunk_count > 1)
+        longest = max(regroup_rows, key=lambda row: row.duration_sec, default=None)
+        _write_planning_profile(
+            planning_profile_path,
+            {
+                "split_planning_seconds": split_elapsed,
+                "boundary_review_seconds": boundary_elapsed,
+                "cleanup_seconds": cleanup_elapsed,
+                "chain_count": len(chains),
+                "cleanup_group_count": cleanup_stats.group_count,
+                "cleanup_input_subtitles": cleanup_stats.input_count,
+                "cleanup_changed_subtitles": cleanup_stats.changed_count,
+                "cleanup_deleted_subtitles": cleanup_stats.deleted_count,
+                "cleanup_retained_originals": cleanup_stats.retained_count,
+                "aligned_chunks": len(chunks),
+                "fallback_chunks": fallback_chunks,
+                "tokenless_chunks": tokenless_chunks,
+                "merged_chains": merged_chains,
+                "left_merged_subtitles": left_merge_count,
+                "stripped_sentence_periods": stripped_period_count,
+                "boundary_review_moves": boundary_review_count,
+                "longest_chain_chunks": longest.chunk_count if longest is not None else 0,
+                "longest_chain_seconds": longest.duration_sec if longest is not None else 0.0,
+                "subtitles_before_cleanup": subtitles_before_cleanup,
+            },
         )
     return subtitles
 
@@ -748,7 +786,7 @@ def _cleanup_group_key(subtitle: Subtitle) -> int | None:
     return subtitle.cleanup_group_index if subtitle.cleanup_group_index is not None else subtitle.chain_index
 
 
-def _cleanup_windows(subtitles: list[Subtitle], window_size: int) -> list[tuple[int, int]]:
+def _cleanup_windows(subtitles: list[Subtitle]) -> list[tuple[int, int]]:
     windows: list[tuple[int, int]] = []
     i = 0
     while i < len(subtitles):
@@ -756,7 +794,6 @@ def _cleanup_windows(subtitles: list[Subtitle], window_size: int) -> list[tuple[
         end = i + 1
         while (
             end < len(subtitles)
-            and end - i < window_size
             and _cleanup_group_key(subtitles[end]) == group_index
         ):
             end += 1
@@ -801,43 +838,110 @@ def _cleanup_change_rank(before: str, after: str) -> tuple[str, str]:
     return "high", "large text change"
 
 
+@dataclass(frozen=True)
+class CleanupStats:
+    group_count: int = 0
+    input_count: int = 0
+    changed_count: int = 0
+    deleted_count: int = 0
+
+    @property
+    def retained_count(self) -> int:
+        return max(0, self.input_count - self.changed_count - self.deleted_count)
+
+
+def _write_planning_profile(path: Path, values: dict[str, float | int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["metric", "value"])
+        writer.writerows(values.items())
+
+
 def _refine_subtitle_text(
     subtitles: list[Subtitle],
     refiner: TextRefiner,
-    window_size: int,
     workers: int = 1,
     cleanup_diff_path: Path | None = None,
-) -> None:
+    progress_callback: Callable[[str, int, int], None] | None = None,
+) -> CleanupStats:
     total = len(subtitles)
-    windows = _cleanup_windows(subtitles, window_size)
+    windows = _cleanup_windows(subtitles)
+    if progress_callback is not None and windows:
+        progress_callback("Cleaning subtitles", 0, len(windows))
     changes: list[tuple[int, str, str]] = []
+    refinements: dict[int, str] = {}
     if workers > 1 and len(windows) > 1:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {}
             for start, end in windows:
-                print(f"Cleaning subtitles {start + 1}-{end}/{total}...", flush=True)
                 futures[pool.submit(_refine_window, refiner, subtitles, start, end)] = (start, end)
-            for future in as_completed(futures):
+            for completed, future in enumerate(as_completed(futures), start=1):
                 start, end = futures[future]
                 _, refined = future.result()
                 window = subtitles[start:end]
                 if len(refined) == len(window):
-                    for offset, (sub, text) in enumerate(zip(window, refined), start=start + 1):
-                        if text.strip():
-                            _record_cleanup_change(changes, offset, sub.text, text.strip())
-                            sub.text = text.strip()
+                    for index, text in enumerate(refined, start=start):
+                        refinements[index] = text.strip()
+                if progress_callback is not None:
+                    progress_callback("Cleaning subtitles", completed, len(windows))
+        _apply_cleanup_refinements(subtitles, refinements, changes)
         if cleanup_diff_path is not None:
             _write_cleanup_diff(cleanup_diff_path, changes)
-        return
+        return _cleanup_stats(total, windows, changes)
 
-    for start, end in windows:
+    for completed, (start, end) in enumerate(windows, start=1):
         window = subtitles[start:end]
-        print(f"Cleaning subtitles {start + 1}-{end}/{total}...", flush=True)
         refined = refiner.refine([sub.text for sub in window])
         if len(refined) == len(window):
-            for offset, (sub, text) in enumerate(zip(window, refined), start=start + 1):
-                if text.strip():
-                    _record_cleanup_change(changes, offset, sub.text, text.strip())
-                    sub.text = text.strip()
+            for index, text in enumerate(refined, start=start):
+                refinements[index] = text.strip()
+        if progress_callback is not None:
+            progress_callback("Cleaning subtitles", completed, len(windows))
+    _apply_cleanup_refinements(subtitles, refinements, changes)
     if cleanup_diff_path is not None:
         _write_cleanup_diff(cleanup_diff_path, changes)
+    return _cleanup_stats(total, windows, changes)
+
+
+def _cleanup_stats(input_count: int, windows: list[tuple[int, int]], changes: list[tuple[int, str, str]]) -> CleanupStats:
+    deleted = sum(1 for _, _, after in changes if not after)
+    changed = sum(1 for _, _, after in changes if after)
+    return CleanupStats(len(windows), input_count, changed, deleted)
+
+
+def _apply_cleanup_refinements(
+    subtitles: list[Subtitle],
+    refinements: dict[int, str],
+    changes: list[tuple[int, str, str]],
+) -> None:
+    """Apply cleanup atomically, deleting only verified filler-only subtitles."""
+    delete_indices = {
+        index
+        for index, text in refinements.items()
+        if not text and 0 <= index < len(subtitles) and _is_filler_only(subtitles[index].text)
+    }
+    for index, text in refinements.items():
+        if index in delete_indices or not text or not (0 <= index < len(subtitles)):
+            continue
+        sub = subtitles[index]
+        _record_cleanup_change(changes, index + 1, sub.text, text)
+        sub.text = text
+
+    for index in sorted(delete_indices):
+        deleted = subtitles[index]
+        previous = next((candidate for candidate in range(index - 1, -1, -1) if candidate not in delete_indices), None)
+        following = next((candidate for candidate in range(index + 1, len(subtitles)) if candidate not in delete_indices), None)
+        if previous is not None:
+            # Prefer the previous survivor. If the next subtitle already begins
+            # inside this span, it already covers the remainder, so stop there.
+            cover_end = deleted.end_time
+            if following is not None:
+                cover_end = min(cover_end, subtitles[following].start_time)
+            subtitles[previous].end_time = max(subtitles[previous].end_time, cover_end)
+        elif following is not None:
+            subtitles[following].start_time = min(subtitles[following].start_time, deleted.start_time)
+
+    for index in sorted(delete_indices, reverse=True):
+        _record_cleanup_change(changes, index + 1, subtitles[index].text, "")
+        del subtitles[index]

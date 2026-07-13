@@ -1,11 +1,11 @@
-import type { AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
+import type { AlignmentModelStatus, AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
 
 export {};
 
 declare global {
   interface Window {
     subtitler: {
-      chooseInputFile(): Promise<string | null>;
+      chooseInputFile(defaultPath?: string): Promise<string | null>;
       chooseFile(): Promise<string | null>;
       chooseOutputFile(defaultPath?: string): Promise<string | null>;
       chooseDirectory(): Promise<string | null>;
@@ -13,6 +13,7 @@ declare global {
       filePath(file: File): string;
       analyzeMedia(path: string): Promise<MediaAnalysis>;
       getAppState(): Promise<AppState>;
+      resetAppState(): Promise<AppState>;
       saveAppSettings(settings: AppSettings): Promise<void>;
       getWorkflowConfig(workflow: WorkflowName): Promise<{ config: WorkflowConfig; path: string }>;
       saveWorkflowConfig(workflow: WorkflowName, config: WorkflowConfig): Promise<void>;
@@ -41,6 +42,8 @@ declare global {
       deleteManagedPythonEnv(): Promise<PythonRuntimeStatus>;
       downloadManagedFfmpeg(): Promise<FfmpegStatus>;
       deleteManagedFfmpeg(): Promise<FfmpegStatus>;
+      downloadAlignmentModel(): Promise<AlignmentModelStatus>;
+      deleteAlignmentModel(): Promise<AlignmentModelStatus>;
       startRun(request: RunRequest): Promise<{ runId: string }>;
       cancelRun(runId: string): Promise<void>;
       onRunEvent(callback: (event: RunEvent) => void): () => void;

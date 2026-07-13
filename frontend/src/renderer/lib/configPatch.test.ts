@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyCoreSettings, extractCoreSettings } from "./configPatch";
+import { applyCoreSettings, applySharedAlignment, extractCoreSettings } from "./configPatch";
 
 describe("config patching", () => {
+  it("shares alignment selection without discarding advanced alignment options", () => {
+    expect(applySharedAlignment({ alignment: { language: "ja", split_size: "char", model: "old" } }, "managed", true).alignment).toEqual({ language: "ja", split_size: "char", model: "managed", offline_model_cache: true });
+  });
   it("extracts and applies core settings without touching advanced sections", () => {
     const config = {
       audio: { track: 1 },
@@ -21,11 +24,11 @@ describe("config patching", () => {
       diagnostics: { profile: false }
     }, "local");
 
-    expect(next.audio.track).toBe(0);
-    expect(next.backend.model).toBe("new.gguf");
-    expect(next.diagnostics.profile).toBe(false);
-    expect(next.vad.max_chunk_sec).toBe(30);
-    expect(next.additional_settings.youtube_chapters).toBe(false);
+    expect(next.audio!.track).toBe(0);
+    expect(next.backend!.model).toBe("new.gguf");
+    expect(next.diagnostics!.profile).toBe(false);
+    expect((next.vad as Record<string, unknown>).max_chunk_sec).toBe(30);
+    expect(next.additional_settings!.youtube_chapters).toBe(false);
   });
 
   it("repairs local workflow provider fields", () => {
@@ -46,8 +49,8 @@ describe("config patching", () => {
       },
       "local"
     );
-    expect(next.backend.transcriber).toBe("local-gemma");
-    expect(next.cleanup.backend).toBe("local-llama");
+    expect(next.backend!.transcriber).toBe("local-gemma");
+    expect(next.cleanup!.backend).toBe("local-llama");
   });
 
   it("applies YouTube chapters only for hosted short workflow", () => {
@@ -66,9 +69,9 @@ describe("config patching", () => {
       additionalSettings: { youtubeChapters: true }
     };
 
-    expect(applyCoreSettings({}, core, "hosted").additional_settings.youtube_chapters).toBe(true);
-    expect(applyCoreSettings({}, core, "hosted-long-stream").additional_settings.youtube_chapters).toBe(false);
-    expect(applyCoreSettings({}, core, "local").additional_settings.youtube_chapters).toBe(false);
+    expect(applyCoreSettings({}, core, "hosted").additional_settings!.youtube_chapters).toBe(true);
+    expect(applyCoreSettings({}, core, "hosted-long-stream").additional_settings!.youtube_chapters).toBe(false);
+    expect(applyCoreSettings({}, core, "local").additional_settings!.youtube_chapters).toBe(false);
   });
 
   it("round-trips hosted fallback transcription settings", () => {
@@ -88,8 +91,8 @@ describe("config patching", () => {
     expect(core.hosted?.fallbackTranscriptionModel).toBe("gpt-4o-mini-transcribe");
 
     const next = applyCoreSettings({}, core, "hosted");
-    expect(next.backend.fallback_transcriber).toBe("openai");
-    expect(next.backend.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(next.backend!.fallback_transcriber).toBe("openai");
+    expect(next.backend!.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
   });
 
   it("defaults hosted fallback transcription to the recommended model pair", () => {

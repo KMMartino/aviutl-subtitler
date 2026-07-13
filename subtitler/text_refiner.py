@@ -4,24 +4,25 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
-import time
-import urllib.error
+import threading
+import unicodedata
 import urllib.request
 from pathlib import Path
-from typing import TextIO
 
 from .errors import ModelLoadError
-from .glossary import GlossaryEntry, format_glossary
+from .glossary import GlossaryEntry
+from .llama_server import LlamaServerProcess
 from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 
 
-def cleanup_base_rules(mode: str) -> str:
+def cleanup_base_rules(mode: str, *, include_glossary: bool = True) -> str:
     mode_line = {
         "fillers": "Remove filler sounds such as えー, あー, うーん, あの, その, and まあ when doing so keeps the spoken flow natural.",
-        "glossary": "Fix glossary terms when clearly intended.",
-        "full": "Remove filler sounds such as えー, あー, うーん, あの, その, and まあ when doing so keeps the spoken flow natural, and fix glossary terms when clearly intended.",
+        "glossary": "Fix glossary terms when clearly intended." if include_glossary else "Do not rewrite names or terms.",
+        "full": (
+            "Remove filler sounds such as えー, あー, うーん, あの, その, and まあ when doing so keeps the spoken flow natural, "
+            + ("and fix glossary terms when clearly intended." if include_glossary else "but do not rewrite names or terms.")
+        ),
     }.get(mode, "Clean the subtitle text conservatively.")
     rules = [
         "Faithfully preserve what was likely spoken.",
@@ -31,9 +32,10 @@ def cleanup_base_rules(mode: str) -> str:
         "Do not make casual speech more formal or polished.",
         "Preserve plausible repetitions, self-corrections, and streamer-style phrasing.",
         mode_line,
-        "Keep technical terms exactly as written in the glossary.",
         "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
     ]
+    if include_glossary:
+        rules.insert(-1, "Keep technical terms exactly as written in the glossary.")
     return "\n".join(f"- {rule}" for rule in rules)
 
 
@@ -133,6 +135,7 @@ class LlamaServerTextRefiner(TextRefiner):
         spec_draft_n_max: int = 3,
         mistranscription_batch_size: int = 16,
         log_path: Path | None = None,
+        cleanup_diagnostics_path: Path | None = None,
     ) -> None:
         if not model_path.exists():
             raise ModelLoadError(f"Cleanup model not found: {model_path}")
@@ -143,13 +146,10 @@ class LlamaServerTextRefiner(TextRefiner):
                 "Cleanup speculative draft/MTP model must be a GGUF file for llama.cpp. "
                 f"Got: {spec_draft_model}"
             )
-        self.server_path = self._resolve_server(server_path)
         self.model_path = model_path
         self.spec_draft_model = spec_draft_model
         self.spec_draft_n_max = max(1, spec_draft_n_max)
         self.mistranscription_batch_size = max(1, mistranscription_batch_size)
-        self.log_path = log_path
-        self._log_handle: TextIO | None = None
         self.glossary = glossary
         self.mode = mode
         self.host = host
@@ -157,52 +157,20 @@ class LlamaServerTextRefiner(TextRefiner):
         self.ctx_size = ctx_size
         self.n_gpu_layers = n_gpu_layers
         self.base_url = f"http://{host}:{port}"
-        self.process: subprocess.Popen[str] | None = None
-        self._owned_process = False
         self.last_mistranscription_raw = ""
-        self._ensure_server()
-
-    @staticmethod
-    def _resolve_server(server_path: Path | None) -> Path:
-        if server_path is not None:
-            if not server_path.exists():
-                raise ModelLoadError(f"llama-server not found: {server_path}")
-            return server_path
-        found = shutil.which("llama-server") or shutil.which("llama-server.exe")
-        if found:
-            return Path(found)
-        common = Path(r"C:\tools\llama-vulkan\llama-server.exe")
-        if common.exists():
-            return common
-        raise ModelLoadError(
-            "llama-server was not found on PATH or at C:\\tools\\llama-vulkan\\llama-server.exe"
-        )
-
-    def _ensure_server(self) -> None:
-        if self._health_ok():
-            print(f"Using existing cleanup llama-server at {self.base_url}", flush=True)
-            return
-        gpu_layers = "all" if self.n_gpu_layers < 0 else str(self.n_gpu_layers)
-        cmd = [
-            str(self.server_path),
-            "-m",
-            str(self.model_path),
-            "-ngl",
-            gpu_layers,
-            "-c",
-            str(self.ctx_size),
-            "--host",
-            self.host,
-            "--port",
-            str(self.port),
-            "--no-warmup",
-            "--log-verbosity",
-            "2",
-            "--reasoning-budget",
-            "0",
-        ]
+        self.cleanup_diagnostics_path = cleanup_diagnostics_path
+        if self.cleanup_diagnostics_path is not None:
+            self.cleanup_diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+            self.cleanup_diagnostics_path.unlink(missing_ok=True)
+        self._cleanup_diagnostics_lock = threading.Lock()
+        self._cleanup_diagnostics_sequence = 0
+        self._chat_context = threading.local()
+        # Newer llama.cpp builds distinguish disabling reasoning mode from giving
+        # reasoning a zero-token budget.  The budget alone can leave the model in
+        # reasoning mode and expose an untagged checklist in message.content.
+        extra_args = ["--reasoning", "off", "--reasoning-budget", "0"]
         if self.spec_draft_model is not None:
-            cmd.extend(
+            extra_args.extend(
                 [
                     "--spec-draft-model",
                     str(self.spec_draft_model),
@@ -216,56 +184,35 @@ class LlamaServerTextRefiner(TextRefiner):
         print(f"Cleanup model: {self.model_path}", flush=True)
         if self.spec_draft_model is not None:
             print(f"Cleanup MTP draft model: {self.spec_draft_model}", flush=True)
-        if self.log_path is not None:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._log_handle = self.log_path.open("w", encoding="utf-8")
-            self._log_handle.write(" ".join(cmd) + "\n\n")
-            self._log_handle.flush()
-            stdout = self._log_handle
-            stderr = subprocess.STDOUT
-            print(f"Cleanup llama-server log: {self.log_path}", flush=True)
-        else:
-            stdout = subprocess.DEVNULL
-            stderr = subprocess.DEVNULL
-        self.process = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, text=True)
-        self._owned_process = True
-        deadline = time.monotonic() + 180
-        next_notice = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                detail = f" See log: {self.log_path}" if self.log_path is not None else ""
-                tail = _tail_log(self.log_path) if self.log_path is not None else ""
-                raise ModelLoadError(
-                    f"cleanup llama-server exited early with code {self.process.returncode}.{detail}{tail}"
-                )
-            if self._health_ok():
-                print("Cleanup model ready.", flush=True)
-                return
-            if time.monotonic() >= next_notice:
-                print("Waiting for cleanup model to load...", flush=True)
-                next_notice = time.monotonic() + 10
-            time.sleep(1)
-        self.close()
-        detail = f" See log: {self.log_path}" if self.log_path is not None else ""
-        raise ModelLoadError(f"cleanup llama-server did not become healthy within 180 seconds.{detail}")
-
-    def _health_ok(self) -> bool:
-        try:
-            with urllib.request.urlopen(f"{self.base_url}/health", timeout=2) as response:
-                return response.status == 200
-        except (OSError, urllib.error.URLError):
-            return False
+        self._server = LlamaServerProcess(
+            model_path=model_path,
+            server_path=server_path,
+            host=host,
+            port=port,
+            ctx_size=ctx_size,
+            n_gpu_layers=n_gpu_layers,
+            extra_args=extra_args,
+            log_path=log_path,
+            label="cleanup llama-server",
+            ready_message="Cleanup model ready.",
+            wait_message="Waiting for cleanup model to load...",
+        )
+        self.process = self._server.process
 
     def refine(self, lines: list[str]) -> list[str]:
         if self.mode == "off" or not lines:
             return lines
         if len(lines) == 1:
-            refined = self._refine_one(lines[0])
-            return [refined if refined is not None else lines[0]]
-        refined = self._refine_many(lines)
-        if refined is not None:
-            return refined
-        return [self._refine_one(line) or line for line in lines]
+            refined_line = self._refine_one(lines[0])
+            return [refined_line if refined_line is not None else lines[0]]
+        refined_lines = self._refine_many(lines)
+        if refined_lines is not None:
+            return refined_lines
+        print(
+            f"Warning: cleanup response rejected; retaining {len(lines)} original subtitle(s).",
+            flush=True,
+        )
+        return lines
 
     def split_lines(self, text: str, max_chars: int) -> list[str] | None:
         return self.split_lines_with_diagnostics(text, max_chars).lines
@@ -416,30 +363,31 @@ class LlamaServerTextRefiner(TextRefiner):
         return decision.startswith("MOVE")
 
     def _base_rules(self) -> str:
-        return cleanup_base_rules(self.mode)
+        # Local cleanup applies exact glossary presentation normalization after
+        # validation, so the model never needs to infer aliases or substitutions.
+        return cleanup_base_rules(self.mode, include_glossary=False)
 
     def _prompt_one(self, line: str) -> str:
-        glossary = format_glossary(self.glossary)
-        glossary_block = f"\nGlossary:\n{glossary}\n" if glossary else ""
         return (
             "Task:\nClean this subtitle text.\n\n"
             f"Rules:\n{self._base_rules()}\n"
-            "- Output only the cleaned subtitle text.\n"
-            f"{glossary_block}\nSubtitle:\n{line}"
+            "- Output exactly one line as: 1<TAB>cleaned subtitle text.\n"
+            "- If and only if the entire subtitle is filler or punctuation to remove, output: 1<TAB><DELETE>\n"
+            "- Do not omit the index or output notes, bullets, or explanations.\n"
+            f"\nSubtitle:\n1. {line}"
         )
 
     def _prompt_many(self, lines: list[str]) -> str:
-        glossary = format_glossary(self.glossary)
-        glossary_block = f"\nGlossary:\n{glossary}\n" if glossary else ""
         numbered = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
         return (
             "Task:\nClean these subtitle lines.\n\n"
             f"Rules:\n{self._base_rules()}\n"
-            "- Keep the same number of lines.\n"
-            "- Keep each line in the same order.\n"
-            "- Output only the cleaned lines, one per line.\n"
-            "- Do not add numbering, bullets, notes, or explanations.\n"
-            f"{glossary_block}\nLines:\n{numbered}"
+            "- Output exactly one result for every input index, in the same order.\n"
+            "- Format every result as: index<TAB>cleaned subtitle text.\n"
+            "- If and only if an entire subtitle is filler or punctuation to remove, use <DELETE> as its text.\n"
+            "- Never omit, repeat, invent, or renumber an index.\n"
+            "- Do not output notes, bullets, headings, or explanations.\n"
+            f"\nLines:\n{numbered}"
         )
 
     def _mistranscription_prompt(self, numbered_lines: list[tuple[int, str]]) -> str:
@@ -467,52 +415,98 @@ class LlamaServerTextRefiner(TextRefiner):
         )
         with urllib.request.urlopen(request, timeout=300) as response:
             data = json.loads(response.read().decode("utf-8"))
-        return str(data["choices"][0]["message"]["content"])
+        choice = data["choices"][0]
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        completion_tokens = usage.get("completion_tokens")
+        finish_reason = choice.get("finish_reason")
+        self._chat_context.metadata = {
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "max_tokens": max_tokens,
+            "appears_token_limited": finish_reason == "length"
+            or (isinstance(completion_tokens, int) and completion_tokens >= max_tokens),
+        }
+        return str(choice["message"]["content"])
 
     def _refine_one(self, line: str) -> str | None:
+        if not hasattr(self, "_chat_context"):
+            self._chat_context = threading.local()
+        self._chat_context.metadata = {}
         try:
             raw = self._chat(self._prompt_one(line))
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
-        cleaned = _clean_response_line(raw)
-        return cleaned if _valid_cleaned_line(cleaned) else None
+        cleaned_lines, rejection_reason = _parse_indexed_cleanup_response(raw, [line], self.glossary)
+        raw_line_count = len([part for part in raw.splitlines() if part.strip()])
+        if rejection_reason is not None:
+            self._record_cleanup_rejection([line], raw, rejection_reason, raw_line_count, len(cleaned_lines or []))
+            print(f"Warning: cleanup response rejected ({rejection_reason}); retaining original subtitle.", flush=True)
+            return None
+        assert cleaned_lines is not None
+        return cleaned_lines[0]
 
     def _refine_many(self, lines: list[str]) -> list[str] | None:
+        if not hasattr(self, "_chat_context"):
+            self._chat_context = threading.local()
+        self._chat_context.metadata = {}
         try:
-            raw = self._chat(self._prompt_many(lines))
+            raw = self._chat(
+                self._prompt_many(lines),
+                max_tokens=_cleanup_max_tokens(len(lines), getattr(self, "ctx_size", 4096)),
+            )
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
-        cleaned_lines = [_clean_response_line(line) for line in raw.splitlines() if line.strip()]
-        if len(cleaned_lines) != len(lines):
+        cleaned_lines, reason = _parse_indexed_cleanup_response(raw, lines, self.glossary)
+        raw_line_count = len([part for part in raw.splitlines() if part.strip()])
+        if reason is not None:
+            self._record_cleanup_rejection(lines, raw, reason, raw_line_count, len(cleaned_lines or []))
+            print(f"Warning: cleanup response rejected ({reason}).", flush=True)
             return None
-        if any(not _valid_cleaned_line(line) for line in cleaned_lines):
-            return None
+        assert cleaned_lines is not None
         return cleaned_lines
 
-    def close(self) -> None:
-        if self.process is None or not self._owned_process:
+    def _record_cleanup_rejection(
+        self,
+        input_lines: list[str],
+        raw_response: str,
+        reason: str,
+        raw_nonblank_line_count: int,
+        cleaned_nonblank_line_count: int,
+    ) -> None:
+        path = getattr(self, "cleanup_diagnostics_path", None)
+        if path is None:
             return
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=10)
-        if self._log_handle is not None:
-            self._log_handle.close()
-            self._log_handle = None
+        metadata = dict(getattr(getattr(self, "_chat_context", None), "metadata", {}) or {})
+        entry = {
+            "event": "local_cleanup_rejected",
+            "reason": reason,
+            "input_line_count": len(input_lines),
+            "raw_nonblank_line_count": raw_nonblank_line_count,
+            "cleaned_nonblank_line_count": cleaned_nonblank_line_count,
+            "input_lines": input_lines,
+            "raw_response": raw_response,
+            "finish_reason": metadata.get("finish_reason"),
+            "usage": metadata.get("usage", {}),
+            "max_tokens": metadata.get("max_tokens"),
+            "appears_token_limited": bool(metadata.get("appears_token_limited", False)),
+        }
+        lock = getattr(self, "_cleanup_diagnostics_lock", None)
+        if lock is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            return
+        with lock:
+            self._cleanup_diagnostics_sequence += 1
+            entry["sequence"] = self._cleanup_diagnostics_sequence
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-
-def _tail_log(path: Path, max_chars: int = 2000) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    tail = text[-max_chars:].strip()
-    return f"\nLast cleanup llama-server log lines:\n{tail}" if tail else ""
+    def close(self) -> None:
+        self._server.close()
 
 
 def _clean_response_line(text: str) -> str:
@@ -521,6 +515,61 @@ def _clean_response_line(text: str) -> str:
     text = re.sub(r"```$", "", text).strip()
     text = re.sub(r"^\s*\d+[.)]\s*", "", text).strip()
     return text.strip().strip('"')
+
+
+_CLEANUP_DELETE_MARKER = "<DELETE>"
+_INDEXED_CLEANUP_LINE_RE = re.compile(r"^([0-9]+)\t(.+)$")
+
+
+def _cleanup_max_tokens(line_count: int, ctx_size: int) -> int:
+    """Allow indexed cleanup output to grow without consuming the full context."""
+    # 512 tokens comfortably covers ordinary groups. Larger VAD groups need room
+    # for the repeated indexes and line text; observed output averages stay below
+    # 16 tokens per additional line. Keep at least half the context for the prompt.
+    requested = 512 + max(0, line_count - 16) * 16
+    context_cap = max(128, int(ctx_size) // 2)
+    return min(requested, 2048, context_cap)
+
+
+def _parse_indexed_cleanup_response(
+    raw: str,
+    originals: list[str],
+    glossary: list[GlossaryEntry] | None = None,
+) -> tuple[list[str] | None, str | None]:
+    """Parse an indexed cleanup response atomically and fail closed."""
+    raw_lines = [line.rstrip("\r") for line in raw.splitlines() if line.strip()]
+    results: dict[int, str] = {}
+    for raw_line in raw_lines:
+        match = _INDEXED_CLEANUP_LINE_RE.fullmatch(raw_line)
+        if match is None:
+            return None, "malformed_indexed_line"
+        index = int(match.group(1))
+        if index < 1 or index > len(originals):
+            return None, "out_of_range_index"
+        if index in results:
+            return None, "duplicate_index"
+        results[index] = match.group(2).strip()
+
+    if len(results) != len(originals) or any(index not in results for index in range(1, len(originals) + 1)):
+        return None, "missing_index"
+    if list(results) != list(range(1, len(originals) + 1)):
+        return None, "out_of_order_index"
+
+    cleaned_lines: list[str] = []
+    for index, original in enumerate(originals, start=1):
+        cleaned = results[index]
+        if cleaned == _CLEANUP_DELETE_MARKER:
+            if not _is_filler_only(original):
+                return None, f"line_{index}_delete_non_filler"
+            cleaned = ""
+        elif _CLEANUP_DELETE_MARKER.casefold() in cleaned.casefold():
+            return None, f"line_{index}_malformed_delete_marker"
+        line_reason = _cleanup_rejection_reason(cleaned, original)
+        if line_reason is not None:
+            return None, f"line_{index}_{line_reason}"
+        cleaned = _apply_exact_glossary_normalization(cleaned, glossary or [])
+        cleaned_lines.append(cleaned)
+    return cleaned_lines, None
 
 
 def _split_marker_response(raw: str) -> list[str] | None:
@@ -546,8 +595,110 @@ def _valid_cleaned_line(text: str) -> bool:
     return not any(marker in lowered for marker in bad_markers)
 
 
+def _valid_cleanup_result(text: str, original: str) -> bool:
+    """Accept only a plausible subtitle, never a free-form model response."""
+    return _cleanup_rejection_reason(text, original) is None
+
+
+def _cleanup_rejection_reason(text: str, original: str) -> str | None:
+    if not text:
+        return None if _is_filler_only(original) else "empty_non_filler_line"
+    if "\n" in text or "\r" in text:
+        return "multiline_line"
+    if not _valid_cleaned_line(text):
+        return "explanatory_marker"
+    lowered = text.casefold()
+    meta_markers = (
+        "thinking process",
+        "analysis:",
+        "reasoning:",
+        "final answer:",
+        "output:",
+        "task:",
+        "rules:",
+        "glossary:",
+        "思考過程",
+        "考察:",
+        "分析:",
+        "結論:",
+        "出力:",
+        "ルール:",
+        "用語集:",
+    )
+    if any(marker in lowered for marker in meta_markers):
+        return "reasoning_or_prompt_marker"
+    if re.search(r"(?:^|\s)(?:#{1,6}|[-*+]\s|```|\*\*|__)", text):
+        return "markdown"
+    # Cleanup may fix wording, but it must not turn a subtitle into a paragraph.
+    if len(text) > max(len(original) * 3, len(original) + 40):
+        return "implausible_expansion"
+    original_substance = _strip_cleanup_fillers(original)
+    cleaned_compact = _normalize_for_validation(text)
+    # Cleanup may remove fillers and make small wording corrections, but losing
+    # most of the actual utterance is never a safe cleanup result.
+    if len(original_substance) - len(cleaned_compact) >= 8 and len(cleaned_compact) * 100 < len(original_substance) * 55:
+        return "severe_contraction"
+    # Cleanup is intentionally not a correction or rewriting pass. After
+    # removing the fillers and punctuation it is allowed to delete, the spoken
+    # content must remain identical. This catches subtle meaning changes such
+    # as ません -> ます as well as glossary-driven title substitutions.
+    if _cleanup_content_fingerprint(text) != _cleanup_content_fingerprint(original):
+        return "semantic_content_changed"
+    return None
+
+
+_FILLER_ONLY_RE = re.compile(
+    r"^(?:(?:えー*|あー*|うーん+|あの|その|まあ)[\s、。,.，．!！?？…・~〜～ー]*)+$"
+)
+_PUNCTUATION_ONLY_RE = re.compile(r"^[\s、。,.，．!！?？…・~〜～ー]*$")
+
+
+def _is_filler_only(text: str) -> bool:
+    stripped = text.strip()
+    return bool(_FILLER_ONLY_RE.fullmatch(stripped) or _PUNCTUATION_ONLY_RE.fullmatch(stripped))
+
+
+def _strip_cleanup_fillers(text: str) -> str:
+    compact = _normalize_for_validation(text)
+    # Short fillers such as bare え and ま are ordinary Japanese characters in
+    # other contexts, so remove them only as punctuation-delimited utterances.
+    # えっと is likewise treated as a filler only at an utterance boundary.
+    punctuation = r"、。,.，．!！?？…・~〜～"
+    compact = re.sub(
+        rf"(^|[{punctuation}])(?:えっと|えー*|ま)(?=[{punctuation}]|$)",
+        r"\1",
+        compact,
+    )
+    compact = re.sub(rf"ですね(?=[{punctuation}])", "", compact)
+    compact = re.sub(r"(?:えー+|あー+|うーん+|あの|その|まあ)", "", compact)
+    return re.sub(rf"[{punctuation}ー]", "", compact)
+
+
 def _normalize_for_validation(text: str) -> str:
     return re.sub(r"\s+", "", text)
+
+
+def _cleanup_content_fingerprint(text: str) -> str:
+    return unicodedata.normalize("NFKC", _strip_cleanup_fillers(text)).casefold()
+
+
+_GLOSSARY_SAFE_SEPARATOR_RE = re.compile(r"[\s・_./\\-]+")
+
+
+def _apply_exact_glossary_normalization(text: str, glossary: list[GlossaryEntry]) -> str:
+    """Canonicalize a glossary term without asking the model to infer aliases."""
+    result = text
+    for entry in glossary:
+        compact = _GLOSSARY_SAFE_SEPARATOR_RE.sub("", entry.term)
+        if len(compact) < 2:
+            continue
+        pattern = r"[\s・_./\\-]*".join(re.escape(character) for character in compact)
+        if compact[0].isascii() and compact[0].isalnum():
+            pattern = rf"(?<![A-Za-z0-9]){pattern}"
+        if compact[-1].isascii() and compact[-1].isalnum():
+            pattern = rf"{pattern}(?![A-Za-z0-9])"
+        result = re.sub(pattern, lambda _match, term=entry.term: term, result, flags=re.IGNORECASE)
+    return result
 
 
 def _parse_mistranscription_flags(

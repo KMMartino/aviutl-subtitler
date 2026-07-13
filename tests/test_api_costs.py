@@ -26,6 +26,18 @@ class ApiCostTests(unittest.TestCase):
     def test_cleanup_estimate_is_zero_for_none_backend(self) -> None:
         self.assertEqual(estimate_cleanup_cost("none", "", 600.0), 0.0)
 
+    def test_gpt_56_cleanup_prices(self) -> None:
+        for model, input_rate, output_rate in (
+            ("gpt-5.6-sol", 5.00, 30.00),
+            ("gpt-5.6-terra", 2.50, 15.00),
+            ("gpt-5.6-luna", 1.00, 6.00),
+        ):
+            with self.subTest(model=model):
+                self.assertAlmostEqual(
+                    token_cost("openai", model, input_tokens=1000, output_tokens=500),
+                    (1000 * input_rate + 500 * output_rate) / 1_000_000,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

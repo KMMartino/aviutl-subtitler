@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { pipeline } from "node:stream/promises";
-import { Readable, Transform } from "node:stream";
 import type { HuggingFaceDownloaderStatus, LocalModelProfile, LocalModelStatus, PythonRuntimeStatus } from "../renderer/lib/types";
 import type { RuntimePaths } from "./paths";
+import { downloadVerifiedArtifact, verifyArtifact, writeArtifactMetadata } from "./artifactIntegrity";
 
 type ModelFile = { repo: string; filename: string; sourcePath?: string; folder: string; bytes: number };
+type HuggingFaceFileMetadata = { revision: string; bytes: number; sha256: string };
+type ExistingModelArtifact = ModelFile & { target: string };
 type ProfileDefinition = LocalModelProfile & {
   files: {
     transcription: ModelFile;
@@ -20,6 +21,11 @@ type ProfileDefinition = LocalModelProfile & {
 const e2bRepo = "unsloth/gemma-4-E2B-it-GGUF";
 const e4bRepo = "unsloth/gemma-4-E4B-it-GGUF";
 const b12Repo = "unsloth/gemma-4-12b-it-GGUF";
+const PINNED_REVISIONS: Readonly<Record<string, string>> = {
+  [e2bRepo]: "739965d73654c0ead8020786aa998fc813070087",
+  [e4bRepo]: "0720adb23527c2cd5ea01d1db067cd960327fdac",
+  [b12Repo]: "d997c805aafe035a8024f961c6e1afd6b30d79a5",
+};
 
 export const LOCAL_PROFILES: ProfileDefinition[] = [
   {
@@ -28,7 +34,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 8,
     summary: "E2B Q5 transcription and E2B Q6 cleanup",
     downloadBytes: 3356035200 + 985654080 + 4501719168,
-    cleanupWindowSubtitles: 64,
+    cleanupGroupPolicy: { minSec: 20, durationDivisor: 8, maxSec: 180 },
     experimental: false,
     files: {
       transcription: { repo: e2bRepo, filename: "gemma-4-E2B-it-Q5_K_M.gguf", folder: "gemma-4-e2b", bytes: 3356035200 },
@@ -42,7 +48,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 12,
     summary: "E4B Q6 transcription and 12B Q5 cleanup",
     downloadBytes: 7074927776 + 990372672 + 8413574560,
-    cleanupWindowSubtitles: 128,
+    cleanupGroupPolicy: { minSec: 40, durationDivisor: 4, maxSec: 300 },
     experimental: false,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -56,7 +62,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 16,
     summary: "E4B Q6 transcription and 12B Q6 cleanup",
     downloadBytes: 7074927776 + 990372672 + 10685011360,
-    cleanupWindowSubtitles: 256,
+    cleanupGroupPolicy: { minSec: 60, durationDivisor: 2, maxSec: 600 },
     experimental: false,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -70,7 +76,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 8,
     summary: "Experimental E2B profile with multi-token prediction",
     downloadBytes: 3356035200 + 985654080 + 4501719168 + 97817664,
-    cleanupWindowSubtitles: 64,
+    cleanupGroupPolicy: { minSec: 20, durationDivisor: 8, maxSec: 180 },
     experimental: true,
     files: {
       transcription: { repo: e2bRepo, filename: "gemma-4-E2B-it-Q5_K_M.gguf", folder: "gemma-4-e2b", bytes: 3356035200 },
@@ -86,7 +92,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 12,
     summary: "Experimental E4B/12B profile with multi-token prediction",
     downloadBytes: 7074927776 + 990372672 + 8413574560 + 98653248 + 465109248,
-    cleanupWindowSubtitles: 128,
+    cleanupGroupPolicy: { minSec: 40, durationDivisor: 4, maxSec: 300 },
     experimental: true,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -102,7 +108,7 @@ export const LOCAL_PROFILES: ProfileDefinition[] = [
     vramGb: 16,
     summary: "Experimental E4B/12B profile with multi-token prediction",
     downloadBytes: 7074927776 + 990372672 + 10685011360 + 98653248 + 465109248,
-    cleanupWindowSubtitles: 256,
+    cleanupGroupPolicy: { minSec: 60, durationDivisor: 2, maxSec: 600 },
     experimental: true,
     files: {
       transcription: { repo: e4bRepo, filename: "gemma-4-E4B-it-Q6_K.gguf", folder: "gemma-4-e4b", bytes: 7074927776 },
@@ -125,20 +131,70 @@ export function listLocalProfiles(): LocalModelProfile[] {
 export function localModelStatus(modelsDirectory: string, profileId: string, managedModelsRoot = ""): LocalModelStatus {
   const profile = getProfile(profileId);
   const paths = localModelPaths(modelsDirectory, profileId);
+  const requireMetadata = Boolean(managedModelsRoot) && samePath(modelsDirectory, managedModelsRoot);
+  const catalogFiles = Object.entries(paths).filter(([, file]) => Boolean(file)) as Array<[keyof ProfileDefinition["files"], string]>;
+  const installed = catalogFiles.every(([key, file]) => validCatalogFile(profile, key, file, requireMetadata));
   return {
     profile: profile.id,
-    installed: Object.values(paths).filter(Boolean).every((file) => fs.existsSync(file)),
+    installed,
+    needsVerification: requireMetadata && !installed && completeFilesNeedVerification(catalogFiles.map(([key, file]) => ({ definition: profile.files[key], file }))),
     downloading,
     managed: Boolean(managedModelsRoot) && samePath(modelsDirectory, managedModelsRoot),
     files: {
-      transcription: { path: paths.transcription, exists: fs.existsSync(paths.transcription) },
-      projector: { path: paths.projector, exists: fs.existsSync(paths.projector) },
-      cleanup: { path: paths.cleanup, exists: fs.existsSync(paths.cleanup) }
+      transcription: { path: paths.transcription, exists: validCatalogFile(profile, "transcription", paths.transcription, requireMetadata) },
+      projector: { path: paths.projector, exists: validCatalogFile(profile, "projector", paths.projector, requireMetadata) },
+      cleanup: { path: paths.cleanup, exists: validCatalogFile(profile, "cleanup", paths.cleanup, requireMetadata) }
       ,
-      ...(paths.transcriptionDraft ? { transcriptionDraft: { path: paths.transcriptionDraft, exists: fs.existsSync(paths.transcriptionDraft) } } : {}),
-      ...(paths.cleanupDraft ? { cleanupDraft: { path: paths.cleanupDraft, exists: fs.existsSync(paths.cleanupDraft) } } : {})
+      ...(paths.transcriptionDraft ? { transcriptionDraft: { path: paths.transcriptionDraft, exists: validCatalogFile(profile, "transcriptionDraft", paths.transcriptionDraft, requireMetadata) } } : {}),
+      ...(paths.cleanupDraft ? { cleanupDraft: { path: paths.cleanupDraft, exists: validCatalogFile(profile, "cleanupDraft", paths.cleanupDraft, requireMetadata) } } : {})
     }
   };
+}
+
+export function completeFilesNeedVerification(files: Array<{ definition: ModelFile | undefined; file: string }>): boolean {
+  return files.length > 0 && files.every(({ definition, file }) => hasExpectedFileSize(definition, file));
+}
+
+export async function verifyExistingLocalProfile(
+  modelsDirectory: string,
+  profileId: string,
+  managedModelsRoot: string,
+  onLog: (text: string) => void = () => undefined,
+): Promise<LocalModelStatus> {
+  if (!samePath(modelsDirectory, managedModelsRoot)) {
+    throw new Error("Existing-file verification is only available for app-managed models.");
+  }
+  const profile = getProfile(profileId);
+  const paths = localModelPaths(modelsDirectory, profileId);
+  const artifacts = Object.entries(profile.files).map(([key, file]) => ({
+    ...file,
+    target: paths[key as keyof typeof paths],
+  }));
+  if (!artifacts.every(({ target, ...file }) => hasExpectedFileSize(file, target))) {
+    throw new Error("The model profile is incomplete. Download the missing files instead.");
+  }
+  await adoptExistingModelArtifacts(artifacts, onLog);
+  return localModelStatus(modelsDirectory, profileId, managedModelsRoot);
+}
+
+export async function adoptExistingModelArtifacts(
+  artifacts: ExistingModelArtifact[],
+  onLog: (text: string) => void = () => undefined,
+  metadataReader: typeof fetchHuggingFaceFileMetadata = fetchHuggingFaceFileMetadata,
+): Promise<void> {
+  for (const file of artifacts) {
+    const source = file.sourcePath ?? file.filename;
+    const metadata = await metadataReader(file.repo, source, pinnedRevisionFor(file.repo));
+    if (metadata.bytes !== file.bytes) throw new Error(`Catalog size for ${file.filename} is stale: expected ${file.bytes}, Hugging Face reports ${metadata.bytes}.`);
+    onLog(`[huggingface] verifying existing ${file.filename}\n`);
+    await verifyDownloadedModelOrRemove(file.target, metadata);
+    writeArtifactMetadata(`${file.target}.artifact.json`, {
+      source: `${file.repo}/${source}`,
+      ...metadata,
+      installedAt: new Date().toISOString(),
+    });
+  }
+  onLog("[huggingface] existing model profile verified\n");
 }
 
 export async function getHuggingFaceDownloaderStatus(paths: RuntimePaths, python?: PythonRuntimeStatus): Promise<HuggingFaceDownloaderStatus> {
@@ -208,27 +264,37 @@ export async function downloadLocalProfile(
     }
     for (const file of Object.values(profile.files)) {
       const target = path.join(modelsDirectory, file.folder, file.filename);
-      if (fs.existsSync(target)) {
-        onLog(`[huggingface] exists, skipping ${file.filename}\n`);
-        continue;
-      }
+      const source = file.sourcePath ?? file.filename;
+      const pinnedRevision = pinnedRevisionFor(file.repo);
+      const metadata = await fetchHuggingFaceFileMetadata(file.repo, source, pinnedRevision);
+      if (metadata.bytes !== file.bytes) throw new Error(`Catalog size for ${file.filename} is stale: expected ${file.bytes}, Hugging Face reports ${metadata.bytes}.`);
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      const sourcePath = (file.sourcePath ?? file.filename).split("/").map(encodeURIComponent).join("/");
+      const sourcePath = source.split("/").map(encodeURIComponent).join("/");
       if (mode === "huggingface" && paths) {
-        await downloadWithHuggingFaceHub(statusPythonPath(paths, python), file.repo, file.sourcePath ?? file.filename, path.dirname(target), target, onLog);
+        if (fs.existsSync(target)) {
+          try {
+            await verifyArtifact(target, metadata);
+            onLog(`[huggingface] verified cached ${file.filename}\n`);
+          } catch {
+            fs.rmSync(target, { force: true });
+            fs.rmSync(`${target}.artifact.json`, { force: true });
+          }
+        }
+        if (!fs.existsSync(target)) await downloadWithHuggingFaceHub(statusPythonPath(paths, python), file.repo, source, metadata.revision, path.dirname(target), target, onLog);
+        await verifyDownloadedModelOrRemove(target, metadata);
       } else {
-        const temporary = `${target}.part`;
-        const url = `https://huggingface.co/${file.repo}/resolve/main/${sourcePath}?download=true`;
+        const url = `https://huggingface.co/${file.repo}/resolve/${metadata.revision}/${sourcePath}?download=true`;
         onLog(`[huggingface] downloading ${file.repo}/${sourcePath}\n`);
-        const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(4 * 60 * 60 * 1000) });
-        if (!response.ok || !response.body) throw new Error(`Download failed for ${file.filename}: HTTP ${response.status}`);
-        await pipeline(
-          Readable.fromWeb(response.body as never),
-          progressLogger(file.filename, Number(response.headers.get("content-length")) || file.bytes, onLog),
-          fs.createWriteStream(temporary)
-        );
-        fs.renameSync(temporary, target);
+        let lastPercent = -1;
+        await downloadVerifiedArtifact(url, target, metadata, (received, total) => {
+          const percent = Math.floor(received / total * 100);
+          if (percent !== lastPercent && percent % 5 === 0) {
+            lastPercent = percent;
+            onLog(`[huggingface] ${file.filename}: ${formatBytes(received)} / ${formatBytes(total)} (${percent}%)\n`);
+          }
+        });
       }
+      writeArtifactMetadata(`${target}.artifact.json`, { source: `${file.repo}/${source}`, ...metadata, installedAt: new Date().toISOString() });
       onLog(`[huggingface] saved ${target}\n`);
     }
     onLog("[huggingface] model profile download complete\n");
@@ -242,6 +308,7 @@ async function downloadWithHuggingFaceHub(
   pythonPath: string,
   repo: string,
   sourcePath: string,
+  revision: string,
   localDir: string,
   target: string,
   onLog: (text: string) => void,
@@ -249,15 +316,15 @@ async function downloadWithHuggingFaceHub(
   const script = [
     "import os, shutil, sys",
     "from huggingface_hub import hf_hub_download",
-    "repo, filename, local_dir, target = sys.argv[1:5]",
-    "path = hf_hub_download(repo_id=repo, filename=filename, local_dir=local_dir)",
+    "repo, filename, revision, local_dir, target = sys.argv[1:6]",
+    "path = hf_hub_download(repo_id=repo, filename=filename, revision=revision, local_dir=local_dir)",
     "os.makedirs(os.path.dirname(target), exist_ok=True)",
     "if os.path.abspath(path) != os.path.abspath(target):",
     "    shutil.move(path, target)",
     "print(target)",
   ].join("\n");
   onLog(`[huggingface] downloading with Hugging Face downloader ${repo}/${sourcePath}\n`);
-  await runCommand(pythonPath, ["-c", script, repo, sourcePath, localDir, target], onLog, {
+  await runCommand(pythonPath, ["-c", script, repo, sourcePath, revision, localDir, target], onLog, {
     HF_XET_HIGH_PERFORMANCE: "1",
   });
 }
@@ -272,6 +339,7 @@ export function deleteManagedLocalProfile(modelsDirectory: string, profileId: st
     if (!isWithinOrSame(root, target)) throw new Error(`Refusing to delete unmanaged model path: ${file}`);
     fs.rmSync(target, { force: true });
     fs.rmSync(`${target}.part`, { force: true });
+    fs.rmSync(`${target}.artifact.json`, { force: true });
     pruneEmptyParents(path.dirname(target), root);
   }
   return localModelStatus(modelsDirectory, profileId, managedModelsRoot);
@@ -299,23 +367,70 @@ function getProfile(profileId: string): ProfileDefinition {
   return profile;
 }
 
-function progressLogger(filename: string, totalBytes: number, onLog: (text: string) => void): Transform {
-  let downloaded = 0;
-  let lastPercent = -1;
-  let lastLog = 0;
-  return new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      downloaded += chunk.length;
-      const now = Date.now();
-      const percent = totalBytes > 0 ? Math.floor((downloaded / totalBytes) * 100) : 0;
-      if ((percent !== lastPercent && percent % 5 === 0) || now - lastLog > 10_000) {
-        lastPercent = percent;
-        lastLog = now;
-        onLog(`[huggingface] ${filename}: ${formatBytes(downloaded)} / ${formatBytes(totalBytes)} (${percent}%)\n`);
-      }
-      callback(null, chunk);
-    }
-  });
+export async function fetchHuggingFaceFileMetadata(repo: string, filename: string, expectedRevision: string): Promise<HuggingFaceFileMetadata> {
+  if (!/^[a-f0-9]{40}$/i.test(expectedRevision)) throw new Error(`Invalid pinned Hugging Face revision for ${repo}.`);
+  const response = await fetch(`https://huggingface.co/api/models/${repo}/revision/${expectedRevision}?blobs=true`, { signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) throw new Error(`Could not read Hugging Face metadata for ${repo}: HTTP ${response.status}`);
+  const info = await response.json() as {
+    sha?: string;
+    siblings?: Array<{ rfilename?: string; size?: number; lfs?: { sha256?: string } }>;
+  };
+  const sibling = info.siblings?.find((item) => item.rfilename === filename);
+  const sha256 = sibling?.lfs?.sha256 ?? "";
+  if (info.sha !== expectedRevision || !Number.isSafeInteger(sibling?.size) || (sibling?.size ?? 0) <= 0 || !/^[a-f0-9]{64}$/i.test(sha256)) {
+    throw new Error(`Hugging Face did not provide immutable revision, size, and LFS SHA-256 metadata for ${repo}/${filename}.`);
+  }
+  return { revision: info.sha!, bytes: sibling!.size!, sha256 };
+}
+
+export async function verifyDownloadedModelOrRemove(target: string, metadata: HuggingFaceFileMetadata): Promise<void> {
+  try {
+    await verifyArtifact(target, metadata);
+  } catch (error) {
+    fs.rmSync(target, { force: true });
+    fs.rmSync(`${target}.artifact.json`, { force: true });
+    throw error;
+  }
+}
+
+export function hasExpectedModelMetadata(
+  metadataPath: string,
+  expected: { source: string; revision: string; bytes: number },
+): boolean {
+  try {
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as { source?: string; bytes?: number; sha256?: string; revision?: string };
+    return metadata.source === expected.source
+      && metadata.bytes === expected.bytes
+      && metadata.revision === expected.revision
+      && /^[a-f0-9]{64}$/i.test(metadata.sha256 ?? "");
+  } catch {
+    return false;
+  }
+}
+
+function pinnedRevisionFor(repo: string): string {
+  const revision = PINNED_REVISIONS[repo];
+  if (!revision) throw new Error(`No immutable revision is pinned for ${repo}.`);
+  return revision;
+}
+
+function validCatalogFile(profile: ProfileDefinition, key: keyof ProfileDefinition["files"], file: string, requireMetadata: boolean): boolean {
+  const definition = profile.files[key];
+  if (!definition || !hasExpectedFileSize(definition, file)) return false;
+  if (!requireMetadata) return true;
+  try {
+    return hasExpectedModelMetadata(`${file}.artifact.json`, {
+      source: `${definition.repo}/${definition.sourcePath ?? definition.filename}`,
+      revision: pinnedRevisionFor(definition.repo),
+      bytes: definition.bytes,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function hasExpectedFileSize(definition: ModelFile | undefined, file: string): boolean {
+  return Boolean(definition && file && fs.existsSync(file) && fs.statSync(file).size === definition.bytes);
 }
 
 function formatBytes(bytes: number): string {

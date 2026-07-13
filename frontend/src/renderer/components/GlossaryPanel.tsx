@@ -1,5 +1,6 @@
 import { ChevronDown, FileUp, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { keyboardReorder } from "../lib/keyboardReorder";
 
 type Props = {
   value: string;
@@ -162,6 +163,14 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
     onChange(serializeGlossary(preamble, nextTags, editableRows));
   }
 
+  function reorderTagWithKeyboard(index: number, key: string) {
+    const nextTags = keyboardReorder(tags, index, key);
+    if (!nextTags) return false;
+    setTags(nextTags);
+    onChange(serializeGlossary(preamble, nextTags, editableRows));
+    return true;
+  }
+
   function sortRowsByTags() {
     const tagRank = new Map(tags.map((tag, index) => [tag, index]));
     const nextRows = editableRows
@@ -229,7 +238,7 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                   ALL
                 </label>
               </div>
-              {tags.map((tag) => {
+              {tags.map((tag, tagIndex) => {
                 const taggedRows = editableRows.filter((row) => row.tag === tag);
                 const emptyTag = taggedRows.length === 0;
                 const checked = taggedRows.length > 0 && taggedRows.every((row) => row.enabled);
@@ -248,10 +257,15 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                     }}
                     onDragEnd={() => setDraggingTag("")}
                   >
-                    <span
+                    <button
+                      type="button"
                       className="glossary-drag-handle"
-                      aria-hidden="true"
+                      aria-label={`Reorder ${tag} tag`}
+                      aria-describedby="glossary-reorder-instructions"
                       draggable
+                      onKeyDown={(event) => {
+                        if (reorderTagWithKeyboard(tagIndex, event.key)) event.preventDefault();
+                      }}
                       onDragStart={(event) => {
                         setDraggingTag(tag);
                         event.dataTransfer.effectAllowed = "move";
@@ -259,7 +273,7 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                       }}
                     >
                       ::
-                    </span>
+                    </button>
                     <label className="check">
                       <input
                         type="checkbox"
@@ -274,6 +288,7 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
               })}
             </div>
           )}
+          <span id="glossary-reorder-instructions" className="sr-only">Use arrow keys to move a tag, or Home and End to move it to an edge.</span>
           {mergingTags && (
             <div className="glossary-merge">
               <select aria-label="First tag to merge" value={mergeTagA} onChange={(event) => {

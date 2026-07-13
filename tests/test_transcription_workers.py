@@ -8,9 +8,9 @@ class TranscriptionWorkerTests(unittest.TestCase):
         config = {"backend": {"transcriber": "gemini", "transcription_workers": None}}
         self.assertEqual(transcription_workers(config), 6)
 
-    def test_hosted_explicit_value_below_six_is_raised(self) -> None:
+    def test_hosted_explicit_value_below_six_is_respected(self) -> None:
         config = {"backend": {"transcriber": "openai", "transcription_workers": 2}}
-        self.assertEqual(transcription_workers(config), 6)
+        self.assertEqual(transcription_workers(config), 2)
 
     def test_local_explicit_value_is_not_raised(self) -> None:
         config = {"backend": {"transcriber": "local-gemma", "transcription_workers": 2}}

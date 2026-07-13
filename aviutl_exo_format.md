@@ -3,10 +3,15 @@
 This documents the `.exo` file and text object format used by
 `aviutl_subtitle.py`.
 
-The generated `.exo` file is written as Shift-JIS text:
+The EXO container and literal fields are written as Shift-JIS text. In
+particular, the configured `exo.font` value must be Shift-JIS encodable; the
+generator validates it and reports an error instead of replacing unsupported
+characters. Subtitle and marker payloads are different: their `text=` values
+are UTF-16LE encoded as hexadecimal, so Japanese text support is independent
+of the container's Shift-JIS encoding.
 
 ```python
-open(output_path, "w", encoding="shift_jis", errors="replace")
+open(output_path, "w", encoding="shift_jis")
 ```
 
 ## File Header

@@ -1,4 +1,4 @@
-import { FileVideo, FolderOpen, LoaderCircle } from "lucide-react";
+import { FileSearch, FileVideo, LoaderCircle } from "lucide-react";
 import { useState, type DragEvent } from "react";
 import type { MediaAnalysis } from "../lib/types";
 import TooltipLabel from "./TooltipLabel";
@@ -9,6 +9,7 @@ type Props = {
   analysis: MediaAnalysis | null;
   analyzing: boolean;
   analysisError: string;
+  disabled?: boolean;
   onInput(path: string): void;
   onAudioTrack(value: number): void;
 };
@@ -16,12 +17,14 @@ type Props = {
 export default function InputPanel(props: Props) {
   const [dragging, setDragging] = useState(false);
   async function pickInput() {
-    const path = await window.subtitler.chooseInputFile();
+    if (props.disabled) return;
+    const path = await window.subtitler.chooseInputFile(props.inputPath || undefined);
     if (path) props.onInput(path);
   }
   function drop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     setDragging(false);
+    if (props.disabled) return;
     const file = event.dataTransfer.files[0];
     if (!file) return;
     const path = window.subtitler.filePath(file);
@@ -30,13 +33,13 @@ export default function InputPanel(props: Props) {
   const tracks = props.analysis?.audioTracks ?? [];
   const showPlaceholder = !props.analysis && !props.analyzing;
   return (
-    <section className={`panel input-panel ${dragging ? "drop-active" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
+    <section className={`panel input-panel ${dragging ? "drop-active" : ""}`} onDragOver={(event) => { event.preventDefault(); if (!props.disabled) setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}>
       <div className="panel-title"><span><FileVideo size={18} /> Input</span><span className="drop-hint">Drop media here</span></div>
       <label>
         <TooltipLabel text="Video or audio file to transcribe. You can also drag a media file onto this panel.">Input file</TooltipLabel>
         <div className="row">
-          <input value={props.inputPath} onChange={(event) => props.onInput(event.target.value)} />
-          <button className="icon-button" onClick={pickInput} title="Choose input file"><FolderOpen size={17} /></button>
+          <input disabled={props.disabled} value={props.inputPath} onChange={(event) => props.onInput(event.target.value)} />
+          <button disabled={props.disabled} aria-label="Browse for input media" onClick={pickInput} title="Browse for input media"><FileSearch size={17} /> Browse</button>
         </div>
       </label>
       <div className="media-preview">
@@ -44,8 +47,8 @@ export default function InputPanel(props: Props) {
           {props.analysis?.thumbnailDataUrl
             ? <img src={props.analysis.thumbnailDataUrl} alt="Selected media thumbnail" />
             : props.analyzing
-              ? <LoaderCircle className="spin" size={24} />
-              : <FileVideo size={28} />}
+              ? <LoaderCircle className="spin" size={24} aria-label="Inspecting media" />
+              : <FileVideo size={28} aria-hidden="true" />}
         </div>
         <div className={`media-facts ${showPlaceholder ? "placeholder" : ""}`}>
           {props.analyzing && !props.analysis ? <strong>Inspecting media...</strong> : props.analysis ? <>
@@ -55,14 +58,14 @@ export default function InputPanel(props: Props) {
           </> : <span>{props.inputPath ? "Waiting for media details" : "No media selected"}</span>}
         </div>
       </div>
-      {props.analysisError && <div className="field-error">{props.analysisError}</div>}
+      {props.analysisError && <div className="field-error" role="alert">{props.analysisError}</div>}
       <label>
         <TooltipLabel text="Audio stream passed to FFmpeg. Track codec, language, and channel information is read automatically when media is selected.">Audio track</TooltipLabel>
         {tracks.length ? (
-          <select value={props.audioTrack} onChange={(event) => props.onAudioTrack(Number(event.target.value))}>
+          <select disabled={props.disabled} value={props.audioTrack} onChange={(event) => props.onAudioTrack(Number(event.target.value))}>
             {tracks.map((track) => <option key={track.streamIndex} value={track.audioIndex}>{trackLabel(track)}</option>)}
           </select>
-        ) : <input type="number" min={0} value={props.audioTrack} onChange={(event) => props.onAudioTrack(Number(event.target.value))} />}
+        ) : <input disabled={props.disabled} type="number" min={0} value={props.audioTrack} onChange={(event) => props.onAudioTrack(Number(event.target.value))} />}
       </label>
     </section>
   );

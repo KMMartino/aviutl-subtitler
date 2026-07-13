@@ -35,12 +35,14 @@ run_subtitler_long_stream_hosted_drop.bat
 ```powershell
 python -m venv .venv-win
 .\.venv-win\Scripts\python.exe -m pip install --upgrade pip
-.\.venv-win\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-win\Scripts\python.exe -m pip install -r requirements-lock-win.txt
 ```
 
 ## FFmpeg
 
 Install FFmpeg and make sure `ffmpeg` and `ffprobe` are available on `PATH`.
+
+The Settings screen can instead download the pinned managed FFmpeg build and required forced-alignment model. Complete the Python requirements step first, then download the alignment model (about 1.18 GiB). The app does not enable offline model loading until the managed snapshot has been verified.
 
 ```powershell
 ffmpeg -version

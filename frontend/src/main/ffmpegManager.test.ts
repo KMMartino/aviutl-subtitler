@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { deleteManagedFfmpeg, managedFfmpegBinDir, resolveFfmpegCommand } from "./ffmpegManager";
+import { deleteManagedFfmpeg, FFMPEG_ARTIFACT, managedFfmpegBinDir, resolveFfmpegCommand } from "./ffmpegManager";
 import type { RuntimePaths } from "./paths";
 
 const roots: string[] = [];
@@ -18,6 +18,7 @@ describe("ffmpeg manager", () => {
     fs.mkdirSync(bin, { recursive: true });
     fs.writeFileSync(path.join(bin, "ffmpeg.exe"), "");
     fs.writeFileSync(path.join(bin, "ffprobe.exe"), "");
+    fs.writeFileSync(path.join(paths.managedFfmpegRoot, "current", "artifact.json"), JSON.stringify({ bytes: FFMPEG_ARTIFACT.bytes, sha256: FFMPEG_ARTIFACT.sha256, revision: FFMPEG_ARTIFACT.version }));
 
     if (resolveFfmpegCommand("ffmpeg", paths) === "ffmpeg") {
       expect(resolveFfmpegCommand("ffprobe", paths)).toBe("ffprobe");

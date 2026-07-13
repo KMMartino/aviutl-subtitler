@@ -9,6 +9,7 @@ import {
   deleteManagedLlamaBackend,
   listLlamaBackends,
   managedLlamaInstallDir,
+  migrateLegacyManagedLlamaRoot,
   matchReleaseAsset,
   pruneOldManagedInstalls
 } from "./llamaServerManager";
@@ -38,14 +39,38 @@ describe("llama server manager", () => {
     });
   });
 
+  it("rejects release assets without GitHub integrity metadata", () => {
+    const release = fakeRelease(["llama-b9670-bin-win-vulkan-x64.zip"]);
+    release.assets[0].digest = null;
+    expect(() => matchReleaseAsset(release, "vulkan")).toThrow(/trustworthy SHA-256/);
+  });
+
   it("includes available Windows assets in missing asset errors", () => {
     expect(() => matchReleaseAsset(fakeRelease(["llama-b9670-bin-win-cuda-13.0-x64.zip"]), "vulkan"))
       .toThrow(/Available Windows assets:\n- llama-b9670-bin-win-cuda-13\.0-x64\.zip/);
   });
 
-  it("resolves managed installs under frontend state", () => {
-    const root = path.resolve("C:/repo/subtitler");
-    expect(managedLlamaInstallDir(root, "vulkan", "b9670")).toBe(path.join(root, ".frontend-state", "tools", "llama", "vulkan", "b9670"));
+  it("resolves managed installs under the explicit tools root", () => {
+    const root = path.resolve("C:/repo/subtitler/.frontend-state/tools");
+    expect(managedLlamaInstallDir(root, "vulkan", "b9670")).toBe(path.join(root, "llama", "vulkan", "b9670"));
+  });
+
+  it("migrates the accidental double-nested root without overwriting a target", () => {
+    const stateRoot = makeTempRoot();
+    const toolsRoot = path.join(stateRoot, "tools");
+    const legacy = path.join(stateRoot, ".frontend-state", "tools", "llama", "vulkan", "b1");
+    fs.mkdirSync(legacy, { recursive: true });
+    fs.writeFileSync(path.join(legacy, "marker"), "legacy");
+    expect(migrateLegacyManagedLlamaRoot(stateRoot, toolsRoot)).toBe(true);
+    expect(fs.readFileSync(path.join(toolsRoot, "llama", "vulkan", "b1", "marker"), "utf8")).toBe("legacy");
+    expect(fs.existsSync(path.join(stateRoot, ".frontend-state", "tools", "llama"))).toBe(false);
+
+    const secondLegacy = path.join(stateRoot, ".frontend-state", "tools", "llama", "cuda-12", "b2");
+    fs.mkdirSync(secondLegacy, { recursive: true });
+    fs.writeFileSync(path.join(secondLegacy, "marker"), "second");
+    expect(migrateLegacyManagedLlamaRoot(stateRoot, toolsRoot)).toBe(true);
+    expect(fs.existsSync(path.join(toolsRoot, "llama", "vulkan", "b1", "marker"))).toBe(true);
+    expect(fs.readFileSync(path.join(toolsRoot, "llama", "cuda-12", "b2", "marker"), "utf8")).toBe("second");
   });
 
   it("finds llama-server.exe recursively", () => {
@@ -131,7 +156,9 @@ function fakeRelease(assetNames: string[]) {
     tag_name: "b9670",
     assets: assetNames.map((name) => ({
       name,
-      browser_download_url: `https://example.test/${name}`
+      browser_download_url: `https://example.test/${name}`,
+      size: 123,
+      digest: `sha256:${"a".repeat(64)}`
     }))
   };
 }
@@ -147,5 +174,6 @@ function createManagedServer(root: string, backend: "vulkan" | "cuda-12", releas
   fs.mkdirSync(directory, { recursive: true });
   const server = path.join(directory, "llama-server.exe");
   fs.writeFileSync(server, "");
+  fs.writeFileSync(path.join(managedLlamaInstallDir(root, backend, releaseTag), "artifact.json"), JSON.stringify({ bytes: 123, sha256: "a".repeat(64), revision: releaseTag }));
   return server;
 }

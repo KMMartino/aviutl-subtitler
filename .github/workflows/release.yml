@@ -9,9 +9,41 @@ permissions:
   contents: write
 
 jobs:
+  backend:
+    name: Backend checks
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements-lock-win.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-lock-win.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Static analysis
+        run: |
+          python -m ruff check aviutl_subtitle.py subtitler tests
+          python -m mypy
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
   windows:
     name: Build Windows distributables
     runs-on: windows-latest
+    needs: backend
 
     steps:
       - name: Checkout
@@ -32,9 +64,29 @@ jobs:
         working-directory: frontend
         run: npm run typecheck
 
+      - name: Lint and formatting baseline
+        working-directory: frontend
+        run: |
+          npm run lint
+          npm run format:check
+
+      - name: Release metadata tests
+        working-directory: frontend
+        run: npm run test:release-version
+
       - name: Unit tests
         working-directory: frontend
         run: npm test -- --run
+
+      - name: Dependency audit
+        working-directory: frontend
+        run: npm audit
+
+      - name: Apply release version
+        working-directory: frontend
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: npm run release:version
 
       - name: Build installer and portable app
         working-directory: frontend
@@ -52,14 +104,11 @@ jobs:
           }
 
           $releaseDir = Join-Path $PWD "release"
-          $installerSource = Get-ChildItem $releaseDir -Filter "SubUtl Setup *.exe" |
-            Where-Object { $_.Name -notlike "*.blockmap" } |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-          $portableSource = Join-Path $releaseDir "SubUtl.exe"
+          $installerSource = Join-Path $releaseDir "SubUtlSetup$version.exe"
+          $portableSource = Join-Path $releaseDir "SubUtl$version.exe"
 
-          if ($null -eq $installerSource) {
-            throw "Installer artifact not found under: $releaseDir"
+          if (!(Test-Path $installerSource)) {
+            throw "Installer artifact not found: $installerSource"
           }
           if (!(Test-Path $portableSource)) {
             throw "Portable artifact not found: $portableSource"
@@ -69,7 +118,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
           $installer = Join-Path $assetDir "SubUtlSetup$version.exe"
           $portable = Join-Path $assetDir "SubUtl$version.exe"
-          Copy-Item -LiteralPath $installerSource.FullName -Destination $installer -Force
+          Copy-Item -LiteralPath $installerSource -Destination $installer -Force
           Copy-Item -LiteralPath $portableSource -Destination $portable -Force
 
           $notes = @"

@@ -21,6 +21,9 @@ describe("hosted model verification helpers", () => {
       openaiTranscriptionMini: "gpt-4o-mini-transcribe",
       openaiCleanup: "gpt-5.4-mini",
       openaiCleanup55: "gpt-5.5",
+      openaiCleanup56Sol: "gpt-5.6-sol",
+      openaiCleanup56Terra: "gpt-5.6-terra",
+      openaiCleanup56Luna: "gpt-5.6-luna",
       gemini: "gemini-3.5-flash",
       gemini31Pro: "gemini-3.1-pro-preview",
       gemini31FlashLite: "gemini-3.1-flash-lite"
@@ -64,6 +67,9 @@ describe("hosted model verification helpers", () => {
             { id: "gpt-4o-mini-transcribe-2025-12-15" },
             { id: "gpt-5.4-mini" },
             { id: "gpt-5.5" }
+            ,{ id: "gpt-5.6-sol" }
+            ,{ id: "gpt-5.6-terra" }
+            ,{ id: "gpt-5.6-luna" }
           ]
         }), { status: 200 });
       }

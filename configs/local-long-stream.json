@@ -16,7 +16,7 @@
   },
   "alignment": {
     "max_split_depth": 4,
-    "offline_model_cache": true
+    "offline_model_cache": false
   },
   "cleanup": {
     "backend": "local-llama",

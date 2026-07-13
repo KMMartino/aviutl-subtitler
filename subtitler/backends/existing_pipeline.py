@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -20,24 +21,108 @@ from subtitler.transcriber import ServerGemmaTranscriber
 from subtitler.transcription_backend import (
     BackendCapability,
     BackendDiagnostic,
+    BackendStatus,
     BackendTranscriptResult,
     SpeechRegion,
     TranscriptSegment,
     TranscriptToken,
     TranscriptionRequest,
 )
-from subtitler.vad import segment_speech_with_groups, select_high_activation_chunks
+from subtitler.vad import VadSession, segment_speech_with_groups, select_high_activation_chunks
 
 
 FAILED_TRANSCRIPTION_TEXT = "transcription failed"
 
 
-def default_align_workers() -> int:
-    return max(1, (os.cpu_count() or 4) // 4)
+ALIGNER_CPU_MEMORY_BUDGET_BYTES = 2 * 1024**3
 
 
-def _cleanup_group_max_sec(media_duration_sec: float) -> float:
-    return max(60.0, min(max(0.0, media_duration_sec) / 2.0, 600.0))
+def available_memory_bytes() -> int | None:
+    """Best-effort available-memory reading without adding a runtime dependency."""
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_phys", ctypes.c_ulonglong),
+                    ("avail_phys", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("avail_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("avail_virtual", ctypes.c_ulonglong),
+                    ("avail_extended_virtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.length = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.avail_phys)
+        except (AttributeError, OSError, ValueError):
+            return None
+    try:
+        sysconf = getattr(os, "sysconf")
+        page_size = sysconf("SC_PAGE_SIZE")
+        available_pages = sysconf("SC_AVPHYS_PAGES")
+        return int(page_size * available_pages)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def alignment_uses_gpu(device: str, cuda_available: bool | None = None) -> bool:
+    normalized = device.strip().lower()
+    if normalized != "auto":
+        return normalized != "cpu"
+    if cuda_available is not None:
+        return cuda_available
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except (ImportError, RuntimeError):
+        return False
+
+
+def default_align_workers(
+    device: str = "cpu",
+    available_bytes: int | None = None,
+    cuda_available: bool | None = None,
+) -> int:
+    """Choose a conservative model replica count; explicit config still overrides it."""
+    if alignment_uses_gpu(device, cuda_available):
+        return 1
+    core_limit = max(1, (os.cpu_count() or 4) // 4)
+    memory = available_memory_bytes() if available_bytes is None else available_bytes
+    if memory is None:
+        return core_limit
+    memory_limit = max(1, memory // ALIGNER_CPU_MEMORY_BUDGET_BYTES)
+    return max(1, min(core_limit, memory_limit))
+
+
+@dataclass(frozen=True)
+class CleanupGroupPolicy:
+    min_sec: float = 60.0
+    duration_divisor: float = 2.0
+    max_sec: float = 600.0
+
+    def max_group_sec(self, media_duration_sec: float) -> float:
+        scaled = max(0.0, media_duration_sec) / self.duration_divisor
+        return max(self.min_sec, min(scaled, self.max_sec))
+
+
+def cleanup_group_policy(config: dict[str, Any]) -> CleanupGroupPolicy:
+    cleanup = config.get("cleanup", {})
+    return CleanupGroupPolicy(
+        min_sec=float(cleanup.get("group_min_sec") or 60.0),
+        duration_divisor=float(cleanup.get("group_duration_divisor") or 2.0),
+        max_sec=float(cleanup.get("group_max_sec") or 600.0),
+    )
+
+
+def _cleanup_group_max_sec(media_duration_sec: float, policy: CleanupGroupPolicy | None = None) -> float:
+    return (policy or CleanupGroupPolicy()).max_group_sec(media_duration_sec)
 
 
 @dataclass
@@ -74,7 +159,8 @@ class ExistingPipelineBackend:
         alignment_cfg = self.config["alignment"]
 
         print("Running Silero VAD...")
-        cleanup_group_max_sec = _cleanup_group_max_sec(request.duration_sec)
+        cleanup_group_max_sec = _cleanup_group_max_sec(request.duration_sec, cleanup_group_policy(self.config))
+        vad_session = VadSession()
         chunks, vad_groups = segment_speech_with_groups(
             samples=request.metadata["samples"],
             sample_rate=request.sample_rate,
@@ -86,6 +172,7 @@ class ExistingPipelineBackend:
             temp_dir=request.temp_dir,
             keep_temp=True,
             progress_callback=request.metadata.get("stage_progress_reporter"),
+            session=vad_session,
         )
         print(
             f"VAD chunks: {len(chunks)} fine, {len(vad_groups)} cleanup group(s) "
@@ -106,9 +193,9 @@ class ExistingPipelineBackend:
             f"vad_speech={selection.total_speech_seconds / 60.0:.2f} min)",
             flush=True,
         )
-        cost_cfg = self.config["cost"]
         hosted_run = backend_cfg["transcriber"] in {"gemini", "openai"} or self.config["cleanup"]["backend"] in {"gemini", "openai"}
-        if hosted_run and cost_cfg.get("estimate_cost_only"):
+        _, _, estimate_cost_only = _validated_cost_guard_settings(self.config, estimated_api_cost)
+        if hosted_run and estimate_cost_only:
             return BackendTranscriptResult(
                 backend_name=self.name,
                 model_name=transcription_model(self.config),
@@ -132,7 +219,7 @@ class ExistingPipelineBackend:
         for chunk in selection.selected_chunks:
             self.profiler.start_chunk(chunk.index, chunk.start, chunk.end)
 
-        transcriber = self._build_transcriber(request)
+        transcriber = self._build_transcriber(request, vad_session)
         try:
             split_size = "char" if is_japanese_language(request.language) else "word"
             ctc_language = ctc_language_code(request.language)
@@ -142,7 +229,9 @@ class ExistingPipelineBackend:
                 f"ctc_language={ctc_language}, split_size={split_size}, star_frequency=edges",
                 flush=True,
             )
-            align_workers = int(alignment_cfg["workers"] or default_align_workers())
+            align_workers = int(
+                alignment_cfg["workers"] or default_align_workers(str(alignment_cfg["device"]))
+            )
             torch_threads = alignment_cfg["torch_threads"]
             if torch_threads is None:
                 cpu_count = os.cpu_count() or 4
@@ -157,6 +246,7 @@ class ExistingPipelineBackend:
                 emission_batch_size=int(alignment_cfg["emission_batch_size"]),
                 torch_threads=int(torch_threads),
                 max_split_depth=max(0, int(alignment_cfg["max_split_depth"])),
+                vad_session=vad_session,
             )
             aligned, failed_transcripts = transcribe_and_align(
                 chunks=selection.selected_chunks,
@@ -172,17 +262,23 @@ class ExistingPipelineBackend:
             if close is not None:
                 close()
 
+        segments = aligned_chunks_to_segments(aligned, request.language)
+        status = transcription_result_status(
+            selected_chunk_count=len(selection.selected_chunks),
+            usable_segment_count=sum(bool(segment.text.strip()) for segment in segments),
+            failed_chunk_count=len(failed_transcripts),
+        )
         return BackendTranscriptResult(
             backend_name=self.name,
             model_name=transcription_model(self.config),
-            status="ok",
+            status=status,
             language=request.language,
             duration_sec=request.duration_sec,
-            segments=aligned_chunks_to_segments(aligned, request.language),
+            segments=segments,
             speech_regions=selection.speech_regions,
             diagnostics=[
                 BackendDiagnostic(
-                    level="warning",
+                    level="error" if status == "failed" else "warning",
                     message=f"Transcription failed for chunk {item.chunk.index}",
                     region_index=item.chunk.index,
                     code="transcription_failed",
@@ -193,7 +289,7 @@ class ExistingPipelineBackend:
             metadata=_backend_metadata(self.config, selection, estimated_api_cost),
         )
 
-    def _build_transcriber(self, request: TranscriptionRequest):
+    def _build_transcriber(self, request: TranscriptionRequest, vad_session: VadSession | None = None):
         backend_cfg = self.config["backend"]
         name = backend_cfg["transcriber"]
         model = transcription_model(self.config)
@@ -218,6 +314,7 @@ class ExistingPipelineBackend:
                     if request.sidecar_base is not None
                     else request.temp_dir / "transcription_llama.log"
                 ),
+                vad_session=vad_session,
             )
         if not model:
             raise SubtitlerError("Hosted workflow requires backend.transcription_model")
@@ -301,16 +398,51 @@ def is_hosted_run(config: dict[str, Any]) -> bool:
 
 
 def enforce_cost_guard(config: dict[str, Any], estimated_api_cost: float) -> None:
-    if not is_hosted_run(config):
+    try:
+        hosted_run = is_hosted_run(config)
+    except (KeyError, TypeError) as exc:
+        raise SubtitlerError("Refusing hosted API use: workflow backend configuration is invalid") from exc
+    if not hosted_run:
         return
-    cost_cfg = config["cost"]
-    max_cost = float(cost_cfg.get("max_estimated_api_cost_usd", 0.0))
-    if estimated_api_cost > max_cost and not cost_cfg.get("allow_api_spend"):
+    max_cost, allow_api_spend, _ = _validated_cost_guard_settings(config, estimated_api_cost)
+    if estimated_api_cost > max_cost and not allow_api_spend:
         raise SubtitlerError(
             "estimated hosted API cost "
             f"${estimated_api_cost:.4f} exceeds configured limit ${max_cost:.2f}. "
             "Set cost.allow_api_spend to true in the workflow config to proceed."
         )
+
+
+def _validated_cost_guard_settings(
+    config: dict[str, Any], estimated_api_cost: float
+) -> tuple[float, bool, bool]:
+    cost_cfg = config.get("cost")
+    if not isinstance(cost_cfg, dict):
+        raise SubtitlerError("Refusing hosted API use: cost must be a config object")
+    max_cost = cost_cfg.get("max_estimated_api_cost_usd")
+    allow_api_spend = cost_cfg.get("allow_api_spend")
+    estimate_cost_only = cost_cfg.get("estimate_cost_only")
+    if (
+        isinstance(max_cost, bool)
+        or not isinstance(max_cost, (int, float))
+        or not math.isfinite(max_cost)
+        or max_cost < 0
+    ):
+        raise SubtitlerError(
+            "Refusing hosted API use: cost.max_estimated_api_cost_usd must be a finite non-negative number"
+        )
+    if not isinstance(allow_api_spend, bool):
+        raise SubtitlerError("Refusing hosted API use: cost.allow_api_spend must be a boolean")
+    if not isinstance(estimate_cost_only, bool):
+        raise SubtitlerError("Refusing hosted API use: cost.estimate_cost_only must be a boolean")
+    if (
+        isinstance(estimated_api_cost, bool)
+        or not isinstance(estimated_api_cost, (int, float))
+        or not math.isfinite(estimated_api_cost)
+        or estimated_api_cost < 0
+    ):
+        raise SubtitlerError("Refusing hosted API use: estimated API cost must be a finite non-negative number")
+    return float(max_cost), allow_api_spend, estimate_cost_only
 
 
 def _backend_metadata(config: dict[str, Any], selection: SpeechSelection, estimated_api_cost: float) -> dict[str, Any]:
@@ -322,12 +454,28 @@ def _backend_metadata(config: dict[str, Any], selection: SpeechSelection, estima
     }
 
 
+def transcription_result_status(
+    *, selected_chunk_count: int, usable_segment_count: int, failed_chunk_count: int
+) -> BackendStatus:
+    """Summarize the outcome of selected-speech transcription and alignment.
+
+    A run with no selected chunks is a valid empty result. Once speech chunks are
+    selected, producing no usable aligned segment is a failed result. Otherwise,
+    explicit transcription failures make the usable result partial.
+    """
+    if selected_chunk_count > 0 and usable_segment_count == 0:
+        return "failed"
+    if failed_chunk_count > 0:
+        return "partial"
+    return "ok"
+
+
 def transcription_workers(config: dict[str, Any]) -> int:
     backend = config["backend"]
     explicit = backend.get("transcription_workers")
     hosted = backend["transcriber"] != "local-gemma"
     if explicit is not None:
-        return max(6 if hosted else 1, int(explicit))
+        return max(1, int(explicit))
     return 6 if hosted else 1
 
 

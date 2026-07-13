@@ -1,7 +1,8 @@
 import { dialog, BrowserWindow } from "electron";
 
-export async function chooseInputFile(window: BrowserWindow): Promise<string | null> {
+export async function chooseInputFile(window: BrowserWindow, defaultPath?: string): Promise<string | null> {
   const result = await dialog.showOpenDialog(window, {
+    defaultPath,
     properties: ["openFile"],
     filters: [
       { name: "Media", extensions: ["mkv", "mp4", "m4a", "wav", "aac", "flac", "mp3"] },

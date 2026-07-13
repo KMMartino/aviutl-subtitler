@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any, Callable
 
 from .audio import write_wav_segment
 from .errors import VadError
 from .models import AudioChunk
+
+
+class VadSession:
+    """One serialized Silero model instance shared by a pipeline run."""
+
+    def __init__(self) -> None:
+        self._model: Any | None = None
+        self._lock = threading.Lock()
+        self.inference_count = 0
+
+    def probabilities(
+        self,
+        samples: Any,
+        sample_rate: int,
+        progress_callback: Callable[[float], None] | None = None,
+    ) -> tuple[list[float], int]:
+        try:
+            import torch
+            from silero_vad import load_silero_vad
+        except ImportError as exc:
+            raise VadError("silero-vad and torch are required for VAD") from exc
+        with self._lock:
+            if self._model is None:
+                self._model = load_silero_vad()
+            self.inference_count += 1
+            return _speech_probabilities(
+                torch.from_numpy(samples), self._model, sample_rate, progress_callback
+            )
 
 
 def _merge_speech_timestamps(
@@ -163,22 +192,19 @@ def segment_speech(
     temp_dir: Path | None = None,
     keep_temp: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
+    session: VadSession | None = None,
 ) -> list[AudioChunk]:
     """Run Silero VAD and return speech chunks split only on detected silence."""
     try:
-        import torch
-        from silero_vad import load_silero_vad
+        import torch  # noqa: F401
     except ImportError as exc:
         raise VadError("silero-vad and torch are required for VAD") from exc
 
     if sample_rate != 16000:
         raise VadError("Silero VAD input must be 16 kHz")
     try:
-        model = load_silero_vad()
-        audio_tensor = torch.from_numpy(samples)
-        speech_probs, window_size_samples = _speech_probabilities(
-            audio_tensor,
-            model,
+        speech_probs, window_size_samples = (session or VadSession()).probabilities(
+            samples,
             sample_rate,
             (lambda progress: progress_callback("inference", progress)) if progress_callback else None,
         )
@@ -220,22 +246,19 @@ def segment_speech_with_groups(
     temp_dir: Path | None = None,
     keep_temp: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
+    session: VadSession | None = None,
 ) -> tuple[list[AudioChunk], list[AudioChunk]]:
     """Run fine VAD and tag chunks with cleanup groups split at the largest gaps."""
     try:
-        import torch
-        from silero_vad import load_silero_vad
+        import torch  # noqa: F401
     except ImportError as exc:
         raise VadError("silero-vad and torch are required for VAD") from exc
 
     if sample_rate != 16000:
         raise VadError("Silero VAD input must be 16 kHz")
     try:
-        model = load_silero_vad()
-        audio_tensor = torch.from_numpy(samples)
-        speech_probs, window_size_samples = _speech_probabilities(
-            audio_tensor,
-            model,
+        speech_probs, window_size_samples = (session or VadSession()).probabilities(
+            samples,
             sample_rate,
             (lambda progress: progress_callback("inference", progress)) if progress_callback else None,
         )
@@ -384,6 +407,7 @@ def split_chunk_with_tighter_vad(
     temp_dir: Path | None = None,
     keep_temp: bool = False,
     min_piece_sec: float = 0.25,
+    session: VadSession | None = None,
 ) -> list[AudioChunk]:
     """Rerun VAD on one chunk with tighter settings, falling back to a quiet midpoint split."""
     duration = max(chunk.end - chunk.start, 0.0)
@@ -396,20 +420,28 @@ def split_chunk_with_tighter_vad(
         (max(duration / 3, min_piece_sec), 80, 20),
         (max(duration / 4, min_piece_sec), 40, 0),
     ]
+    try:
+        probabilities, window_size = (session or VadSession()).probabilities(chunk.samples, sample_rate)
+    except Exception:
+        probabilities = []
+        window_size = 512 if sample_rate == 16000 else 256
     for max_chunk_sec, min_silence_ms, speech_pad_ms in attempts:
-        try:
-            local = segment_speech(
-                samples=chunk.samples,
-                sample_rate=sample_rate,
-                max_chunk_sec=max_chunk_sec,
-                min_speech_sec=min_piece_sec,
-                min_silence_ms=min_silence_ms,
-                speech_pad_ms=speech_pad_ms,
-                temp_dir=None,
-                keep_temp=False,
-            )
-        except VadError:
-            continue
+        speech = _speech_timestamps_from_probabilities(
+            probabilities,
+            window_size,
+            sample_rate,
+            len(chunk.samples),
+            max_chunk_sec,
+            min_piece_sec,
+            min_silence_ms,
+            speech_pad_ms,
+        )
+        spans = _merge_speech_timestamps(
+            speech, sample_rate, max_chunk_sec, min_silence_ms, speech_pad_ms, len(chunk.samples)
+        )
+        local = _chunks_from_spans(
+            spans, chunk.samples, sample_rate, probabilities, window_size, None, False
+        )
         adjusted = _offset_subchunks(chunk, local, sample_rate, temp_dir, keep_temp)
         if len(adjusted) >= 2:
             return adjusted

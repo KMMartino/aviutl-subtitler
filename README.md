@@ -157,6 +157,8 @@ Python runtime
 
 The frontend can install a managed `llama-server.exe` under `.frontend-state/tools/llama`. Use **Vulkan** for AMD and broad Windows compatibility, or **CUDA 12.4** for NVIDIA. Downloading a new managed server switches the workflow to it. The app keeps the current and previous managed server builds and prunes older ones, so **Revert server** can switch back to the previous retained build. Manual server paths are still supported, and `install_vulkan_llama.ps1` remains available.
 
+Settings also installs the pinned forced-alignment model into the managed model directory. Offline Hugging Face mode is enabled only after that local snapshot passes size and SHA-256 checks. Managed FFmpeg, llama.cpp archives, and model files are verified against upstream size/digest metadata before they are renamed, extracted, or selected; install metadata is retained beside each artifact.
+
 Each hardware tier also has an experimental **MTP** profile. MTP profiles reuse the standard models and add small matching assistant GGUFs for llama.cpp multi-token prediction. They require a recent llama.cpp build and may not improve every workload or GPU.
 
 Packaged builds are created with:
@@ -178,7 +180,7 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-The release workflow derives the release version from the tag text after `v`, so `v0.1.1` publishes `0.1.1` assets even if `frontend/package.json` has not been edited for that tag.
+The release workflow validates the tag and writes its version into the Electron package metadata before building. Thus `v0.1.1` produces application, installer, and asset metadata for version `0.1.1` even if `frontend/package.json` was not edited beforehand.
 
 GitHub Release assets use short names with no spaces:
 

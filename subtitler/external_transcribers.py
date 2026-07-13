@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -18,6 +15,7 @@ from .audio import write_wav_segment
 from .config import openai_model_available, openai_transcription_aliases
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
+from .hosted_http import request_json, request_json_bytes
 from .models import AudioChunk, TranscriptChunk
 from .transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN, build_transcription_prompt, clean_transcript, _is_suspect_transcript
 
@@ -113,12 +111,12 @@ class GeminiTranscriber:
         }
         data = _request_json(
             "POST",
-            f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent"
-            f"?key={urllib.parse.quote(self.api_key)}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent",
             payload,
             TranscriptionError,
             f"Gemini transcription failed for chunk {chunk.index}",
             timeout_sec=_hosted_transcription_timeout(chunk, self.model, self.timeout_scale),
+            headers={"x-goog-api-key": self.api_key},
             malformed_error_type=MalformedTranscriptionResponse,
             dead_request_error_type=DeadTranscriptionRequest,
         )
@@ -264,10 +262,11 @@ class OpenAITranscriber:
 def verify_gemini_model_available(model: str, api_key: str) -> None:
     data = _request_json(
         "GET",
-        f"https://generativelanguage.googleapis.com/v1beta/models?key={urllib.parse.quote(api_key)}",
+        "https://generativelanguage.googleapis.com/v1beta/models",
         None,
         ModelLoadError,
         "Could not list Gemini models",
+        headers={"x-goog-api-key": api_key},
         timeout_sec=30.0,
     )
     names = [str(item.get("name", "")).removeprefix("models/") for item in data.get("models", [])]
@@ -335,25 +334,17 @@ def _request_json(
     malformed_error_type: type[Exception] | None = None,
     dead_request_error_type: type[Exception] | None = None,
 ) -> dict[str, Any]:
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
-    request_headers = {"Content-Type": "application/json"}
-    if headers:
-        request_headers.update(headers)
-    request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        if dead_request_error_type is not None and exc.code in {408, 504}:
-            raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-        raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-    except Exception as exc:
-        if dead_request_error_type is not None and _is_dead_request_exception(exc):
-            raise dead_request_error_type(f"{message}: {exc}") from exc
-        raise error_type(f"{message}: {exc}") from exc
+    return request_json(
+        method,
+        url,
+        payload,
+        error_type,
+        message,
+        headers=headers,
+        timeout_sec=timeout_sec,
+        malformed_error_type=malformed_error_type,
+        retry_exhausted_error_type=dead_request_error_type,
+    )
 
 
 def _request_multipart(
@@ -370,36 +361,20 @@ def _request_multipart(
 ) -> dict[str, Any]:
     boundary = f"----subtitler-{uuid.uuid4().hex}"
     body = _multipart_body(boundary, fields, file_field, file_path)
-    request = urllib.request.Request(
+    return request_json_bytes(
+        "POST",
         url,
-        data=body,
+        body,
+        error_type,
+        message,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         },
-        method="POST",
+        timeout_sec=timeout_sec,
+        malformed_error_type=malformed_error_type,
+        retry_exhausted_error_type=dead_request_error_type,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise (malformed_error_type or error_type)(f"{message}: malformed JSON response") from exc
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        if dead_request_error_type is not None and exc.code in {408, 504}:
-            raise dead_request_error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-        raise error_type(f"{message}: HTTP {exc.code}: {detail}") from exc
-    except Exception as exc:
-        if dead_request_error_type is not None and _is_dead_request_exception(exc):
-            raise dead_request_error_type(f"{message}: {exc}") from exc
-        raise error_type(f"{message}: {exc}") from exc
-
-
-def _is_dead_request_exception(exc: Exception) -> bool:
-    if isinstance(exc, TimeoutError):
-        return True
-    text = str(exc).lower()
-    return "timed out" in text or "timeout" in text
 
 
 def _multipart_body(boundary: str, fields: dict[str, str], file_field: str, file_path: Path) -> bytes:

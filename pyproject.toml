@@ -1,0 +1,39 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [".venv-win", "release", "frontend"]
+
+[tool.ruff.lint]
+# Start with correctness errors. Formatting and broader modernization rules can be
+# enabled incrementally without forcing an unrelated repository-wide rewrite.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+files = [
+  "subtitler/api_costs.py",
+  "subtitler/config.py",
+  "subtitler/run_artifacts.py",
+  "subtitler/run_context.py",
+  "subtitler/subtitle_stage.py",
+  "subtitler/transcription_stage.py",
+  "subtitler/transcription_backend.py",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+show_error_codes = true
+warn_unused_configs = true
+
+[tool.coverage.run]
+branch = true
+source = ["aviutl_subtitle", "subtitler"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.coverage.html]
+directory = "coverage-html"
+
+[tool.coverage.xml]
+output = "coverage.xml"

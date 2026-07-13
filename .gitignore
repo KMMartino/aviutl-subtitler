@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+coverage-html/
 
 # Virtual environments
 .venv/
@@ -65,6 +68,7 @@ frontend/dist-electron/
 frontend/release/
 release/
 frontend/.vite/
+frontend/coverage/
 frontend/.start-smoke.*.log
 Thumbs.db
 Desktop.ini

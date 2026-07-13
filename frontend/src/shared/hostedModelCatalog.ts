@@ -7,6 +7,9 @@ export const APPROVED_MODELS = {
   openaiTranscriptionMini: "gpt-4o-mini-transcribe",
   openaiCleanup: "gpt-5.4-mini",
   openaiCleanup55: "gpt-5.5",
+  openaiCleanup56Sol: "gpt-5.6-sol",
+  openaiCleanup56Terra: "gpt-5.6-terra",
+  openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
   gemini31Pro: "gemini-3.1-pro-preview",
   gemini31FlashLite: "gemini-3.1-flash-lite"
@@ -64,6 +67,30 @@ export const HOSTED_MODELS: HostedModel[] = [
     emphasis: "quality",
     blurb: "OpenAI's smarter cleanup option for difficult context and ambiguous corrections. More expensive than GPT-5.4 mini; it does not accept audio in this workflow.",
     verification: { cleanup: "cleanup55" }
+  },
+  {
+    provider: "openai",
+    model: APPROVED_MODELS.openaiCleanup56Sol,
+    label: "OpenAI GPT-5.6 Sol",
+    emphasis: "quality",
+    blurb: "Flagship GPT-5.6 cleanup model for the most difficult context and ambiguous corrections.",
+    verification: { cleanup: "cleanup56Sol" }
+  },
+  {
+    provider: "openai",
+    model: APPROVED_MODELS.openaiCleanup56Terra,
+    label: "OpenAI GPT-5.6 Terra",
+    emphasis: "balanced",
+    blurb: "Balanced GPT-5.6 cleanup model with lower cost than Sol.",
+    verification: { cleanup: "cleanup56Terra" }
+  },
+  {
+    provider: "openai",
+    model: APPROVED_MODELS.openaiCleanup56Luna,
+    label: "OpenAI GPT-5.6 Luna",
+    emphasis: "speed",
+    blurb: "Fastest and lowest-cost GPT-5.6 cleanup model.",
+    verification: { cleanup: "cleanup56Luna" }
   },
   {
     provider: "gemini",

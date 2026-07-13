@@ -88,7 +88,7 @@ class SubtitleLeftMergeTests(unittest.TestCase):
             _cleanup_sub("e", 1, 20),
         ]
 
-        windows = _cleanup_windows(subtitles, window_size=10)
+        windows = _cleanup_windows(subtitles)
 
         self.assertEqual(windows, [(0, 2), (2, 4), (4, 5)])
 
@@ -99,6 +99,10 @@ class SubtitleLeftMergeTests(unittest.TestCase):
             _cleanup_sub("c", 1, None),
         ]
 
-        windows = _cleanup_windows(subtitles, window_size=10)
+        windows = _cleanup_windows(subtitles)
 
         self.assertEqual(windows, [(0, 2), (2, 3)])
+
+    def test_cleanup_window_can_cover_a_whole_vad_group(self) -> None:
+        subtitles = [_cleanup_sub(str(index), 0, 7) for index in range(20)]
+        self.assertEqual(_cleanup_windows(subtitles), [(0, 20)])

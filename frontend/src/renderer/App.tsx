@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { ArrowLeft, Settings as SettingsIcon } from "lucide-react";
 import ModeSelector from "./components/ModeSelector";
 import ThemeSelector from "./components/ThemeSelector";
@@ -8,64 +8,104 @@ import GlossaryPanel from "./components/GlossaryPanel";
 import RunPanel from "./components/RunPanel";
 import LogViewer from "./components/LogViewer";
 import OutputPanel from "./components/OutputPanel";
-import TooltipLabel from "./components/TooltipLabel";
+import AdditionalSettingsPanel from "./components/AdditionalSettingsPanel";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PathStatus, RunEvent, RunState, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./lib/types";
+import type { AppSettings, CoreWorkflowSettings, PathStatus, RunEvent, RunState, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
-import { isHostedModelApproved, isHostedModelVerified, recommendedFallbackTranscription, verifiedHostedOptions } from "../shared/hostedModelCatalog";
-
-const emptyEnv: EnvStatus = { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false } };
+import { useBatchedLog } from "./hooks/useBatchedLog";
+import { useMediaAnalysis } from "./hooks/useMediaAnalysis";
+import { useHostedModels } from "./hooks/useHostedModels";
+import { useLocalModels } from "./hooks/useLocalModels";
+import { useManagedLlama as useManagedLlamaController } from "./hooks/useManagedLlama";
+import { useRuntimeSetup } from "./hooks/useRuntimeSetup";
+import { clampResize, resizeFromKey } from "./lib/resizeInteraction";
+import { defaultSettingsExpansion, updateSettingsExpansion, workflowFamily, type SettingsExpansionByFamily } from "./lib/settingsExpansion";
 
 export default function App() {
+  const [startupError, setStartupError] = useState("");
+  const pathRequest = useRef(0);
   const [projectRoot, setProjectRoot] = useState("");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [configs, setConfigs] = useState<Record<WorkflowName, WorkflowConfig> | null>(null);
   const [configPaths, setConfigPaths] = useState<Record<WorkflowName, string> | null>(null);
   const [coreSettings, setCoreSettings] = useState<CoreWorkflowSettings | null>(null);
+  const [settingsExpansion, setSettingsExpansion] = useState<SettingsExpansionByFamily>({});
   const [inputPath, setInputPath] = useState("");
+  const [mediaAnalysisRevision, setMediaAnalysisRevision] = useState(0);
   const [outputPath, setOutputPath] = useState("");
   const [sidecarDir, setSidecarDir] = useState("");
-  const [envStatus, setEnvStatus] = useState<EnvStatus>(emptyEnv);
-  const [hostedVerification, setHostedVerification] = useState<HostedModelVerification | null>(null);
-  const [verifyingHosted, setVerifyingHosted] = useState(false);
-  const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus | null>(null);
-  const [localProfileStatuses, setLocalProfileStatuses] = useState<Record<string, LocalModelStatus>>({});
-  const [localProfiles, setLocalProfiles] = useState<LocalModelProfile[]>([]);
-  const [downloadingModels, setDownloadingModels] = useState(false);
   const [managedDeleteAction, setManagedDeleteAction] = useState("");
-  const [hfDownloaderStatus, setHfDownloaderStatus] = useState<HuggingFaceDownloaderStatus | null>(null);
-  const [installingHfDownloader, setInstallingHfDownloader] = useState(false);
-  const [llamaBackends, setLlamaBackends] = useState<LlamaBackendOption[]>([]);
-  const [llamaRelease, setLlamaRelease] = useState<LlamaReleaseCheck | null>(null);
-  const [managedLlamaStatus, setManagedLlamaStatus] = useState<ManagedLlamaStatus | null>(null);
-  const [currentLlamaState, setCurrentLlamaState] = useState<CurrentLlamaServerState | null>(null);
-  const [downloadingLlama, setDownloadingLlama] = useState(false);
-  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSetupStatus | null>(null);
-  const [runtimeAction, setRuntimeAction] = useState("");
-  const [runtimeFeedback, setRuntimeFeedback] = useState<{ section: "python" | "ffmpeg"; text: string; ok: boolean } | null>(null);
-  const [pythonReady, setPythonReady] = useState(false);
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
-  const [logs, setLogs] = useState("");
+  const { logs, append: appendLog, replace: replaceLogs, clear: clearLogs } = useBatchedLog();
   const [runState, setRunState] = useState<RunState>("idle");
   const [activeRunId, setActiveRunId] = useState("");
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [notice, setNotice] = useState("");
-  const [analysis, setAnalysis] = useState<MediaAnalysis | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysisError, setAnalysisError] = useState("");
+  const workflow = settings?.selectedWorkflow ?? "local";
+  const { envStatus, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
+  const {
+    localModelStatus,
+    setLocalModelStatus,
+    localProfileStatuses,
+    localProfiles,
+    setLocalProfiles,
+    downloadingModels,
+    hfDownloaderStatus,
+    installingHfDownloader,
+    refreshLocalModels,
+    refreshHfDownloaderStatus,
+    installHfDownloader,
+    downloadLocalModels,
+    deleteLocalModels,
+  } = useLocalModels({ settings, coreSettings, setCoreSettings, appendLog, setNotice, setManagedDeleteAction });
+  const {
+    llamaBackends,
+    setLlamaBackends,
+    llamaRelease,
+    managedLlamaStatus,
+    setManagedLlamaStatus,
+    currentLlamaState,
+    setCurrentLlamaState,
+    downloadingLlama,
+    refreshManagedLlama,
+    checkLlamaRelease,
+    downloadLlama,
+    deleteManagedLlama,
+    useManagedLlama,
+  } = useManagedLlamaController({ settings, coreSettings, configs, workflow, setCoreSettings, setConfigs, setManagedDeleteAction, appendLog, setNotice, refreshPathStatus });
+  const {
+    runtimeStatus,
+    runtimeAction,
+    runtimeFeedback,
+    pythonReady,
+    setPythonReady,
+    refreshRuntimeStatus,
+    createManagedPythonEnv,
+    deleteManagedPythonEnv,
+    installPythonRequirements,
+    downloadFfmpeg,
+    deleteManagedFfmpeg,
+    downloadAlignmentModel,
+    deleteManagedAlignmentModel,
+  } = useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs, setCoreSettings, refreshHfDownloaderStatus });
+  const { analysis, analyzing, analysisError, clearAnalysis } = useMediaAnalysis(inputPath, mediaAnalysisRevision, setCoreSettings);
   const [view, setView] = useState<"main" | "settings">("main");
   const [inputWidth, setInputWidth] = useState(48);
   const [logsHeight, setLogsHeight] = useState(24);
 
-  const workflow = settings?.selectedWorkflow ?? "local";
-  const hostedReady = !isHostedWorkflow(workflow) || isHostedSelectionVerified(coreSettings, hostedVerification) || isHostedSelectionConfigured(coreSettings, envStatus);
+  const hostedReady = !isHostedWorkflow(workflow) || hostedSelectionReady;
   const localReady = !isLocalWorkflow(workflow) || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
   const ffmpegReady = Boolean(runtimeStatus?.ffmpeg.ready);
   const pythonRequirementsReady = Boolean(runtimeStatus?.python.requirementsInstalled);
-  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && hostedReady && localReady);
+  const alignmentReady = Boolean(
+    coreSettings?.alignment
+    && (!coreSettings.alignment.offlineModelCache
+      || (runtimeStatus?.alignment.installed && coreSettings.alignment.model === runtimeStatus.alignment.modelPath))
+  );
+  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady);
 
   useEffect(() => {
     void loadInitialState();
@@ -91,44 +131,6 @@ export default function App() {
   }, [inputPath, settings?.selectedWorkflow]);
 
   useEffect(() => {
-    if (!inputPath) {
-      setAnalysis(null);
-      setAnalysisError("");
-      return;
-    }
-    let cancelled = false;
-    const timer = window.setTimeout(async () => {
-      setAnalyzing(true);
-      setAnalysisError("");
-      try {
-        const result = await window.subtitler.analyzeMedia(inputPath);
-        if (cancelled) return;
-        setAnalysis(result);
-        setCoreSettings((current) => {
-          if (!current || !result.audioTracks.length || result.audioTracks.some((track) => track.audioIndex === current.audioTrack)) return current;
-          return { ...current, audioTrack: result.audioTracks[0].audioIndex };
-        });
-      } catch (error) {
-        if (cancelled) return;
-        setAnalysis(null);
-        setAnalysisError(error instanceof Error ? error.message : String(error));
-      } finally {
-        if (!cancelled) setAnalyzing(false);
-      }
-    }, 350);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [inputPath]);
-
-  useEffect(() => {
-    if (!settings) return;
-    setHostedVerification(null);
-    void window.subtitler.getEnvStatus(settings.envFile).then(setEnvStatus);
-  }, [settings?.envFile]);
-
-  useEffect(() => {
     if (!settings) return;
     let cancelled = false;
     void refreshRuntimeStatus().then((status) => {
@@ -150,7 +152,12 @@ export default function App() {
       setCurrentLlamaState(null);
       return;
     }
-    void window.subtitler.getCurrentLlamaServerState(coreSettings.local.llamaServer).then(setCurrentLlamaState);
+    let current = true;
+    const serverPath = coreSettings.local.llamaServer;
+    void window.subtitler.getCurrentLlamaServerState(serverPath).then((state) => {
+      if (current && coreSettings.local?.llamaServer === serverPath) setCurrentLlamaState(state);
+    });
+    return () => { current = false; };
   }, [coreSettings?.local?.llamaServer, workflow]);
 
   useEffect(() => {
@@ -162,32 +169,6 @@ export default function App() {
     if (!settings || !isLocalWorkflow(workflow)) return;
     void refreshManagedLlama(settings.llamaBackend, undefined);
   }, [settings?.llamaBackend, workflow]);
-
-  useEffect(() => {
-    if (!coreSettings?.local || !localModelStatus) return;
-    const files = localModelStatus.files;
-    const profile = localProfiles.find((item) => item.id === settings?.localModelProfile);
-    if (
-      coreSettings.local.model === files.transcription.path
-      && coreSettings.local.mmproj === files.projector.path
-        && coreSettings.local.cleanupModel === files.cleanup.path
-        && coreSettings.local.transcriptionDraftModel === (files.transcriptionDraft?.path ?? "")
-        && coreSettings.local.cleanupDraftModel === (files.cleanupDraft?.path ?? "")
-        && coreSettings.cleanupWindowSubtitles === profile?.cleanupWindowSubtitles
-    ) return;
-    setCoreSettings({
-      ...coreSettings,
-      cleanupWindowSubtitles: profile?.cleanupWindowSubtitles ?? coreSettings.cleanupWindowSubtitles,
-      local: {
-        ...coreSettings.local,
-        model: files.transcription.path,
-        mmproj: files.projector.path,
-        cleanupModel: files.cleanup.path,
-        transcriptionDraftModel: files.transcriptionDraft?.path ?? "",
-        cleanupDraftModel: files.cleanupDraft?.path ?? ""
-      }
-    });
-  }, [localModelStatus, coreSettings, localProfiles, settings?.localModelProfile]);
 
   useEffect(() => {
     if (runState !== "running" || !startedAt) return;
@@ -204,29 +185,38 @@ export default function App() {
   useEffect(() => {
     if (!settings || !configs || !coreSettings) return;
     const timer = window.setTimeout(() => {
-      void persistWorkflowSettings(false);
+      void persistWorkflowSettings(false).catch((error) => setNotice(`Settings were not saved: ${error instanceof Error ? error.message : String(error)}`));
     }, 500);
     return () => window.clearTimeout(timer);
   }, [coreSettings, workflow]);
 
   async function loadInitialState() {
-    const appState = await window.subtitler.getAppState();
-    setProjectRoot(appState.projectRoot);
-    setSettings(appState.settings);
-    setConfigs(appState.configs);
-    setConfigPaths(appState.configPaths);
-    setInputPath(appState.settings.lastInputPath);
-    if (appState.settings.lastInputPath) {
-      setOutputPath(defaultOutputPath(appState.settings.lastInputPath, appState.settings.selectedWorkflow));
-      setSidecarDir(appState.settings.lastSidecarDir || defaultSidecarDir(appState.settings.lastInputPath));
+    try {
+      const appState = await window.subtitler.getAppState();
+      setStartupError("");
+      setProjectRoot(appState.projectRoot);
+      setSettings(appState.settings);
+      setConfigs(appState.configs);
+      setConfigPaths(appState.configPaths);
+      setInputPath(appState.settings.lastInputPath);
+      if (appState.settings.lastInputPath) {
+        setOutputPath(defaultOutputPath(appState.settings.lastInputPath, appState.settings.selectedWorkflow));
+        setSidecarDir(appState.settings.lastSidecarDir || defaultSidecarDir(appState.settings.lastInputPath));
+      }
+      setGlossary(await window.subtitler.readGlossary());
+    } catch (error) {
+      setStartupError(error instanceof Error ? error.message : String(error));
     }
-    setGlossary(await window.subtitler.readGlossary());
   }
 
   async function saveSettings(next = settings, showNotice = true) {
     if (!next) return;
-    await window.subtitler.saveAppSettings({ ...next, lastSidecarDir: sidecarDir });
-    if (showNotice) setNotice("Settings saved");
+    try {
+      await window.subtitler.saveAppSettings({ ...next, lastSidecarDir: sidecarDir });
+      if (showNotice) setNotice("Settings saved");
+    } catch (error) {
+      setNotice(`Settings were not saved: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   async function persistWorkflowSettings(showNotice = true) {
@@ -254,6 +244,7 @@ export default function App() {
   }
 
   async function refreshPathStatus(core: CoreWorkflowSettings) {
+    const request = ++pathRequest.current;
     const local = core.local;
     if (!local) return;
     const entries = {
@@ -263,11 +254,9 @@ export default function App() {
       cleanupModel: local.cleanupModel,
       cleanupLlamaServer: local.cleanupLlamaServer
     };
-    const next: Record<string, PathStatus> = {};
-    for (const [key, value] of Object.entries(entries)) {
-      next[key] = { path: value, exists: Boolean(value) && await window.subtitler.pathExists(value) };
-    }
-    setPathStatus(next);
+    const checked = await Promise.all(Object.entries(entries).map(async ([key, value]) => [key, { path: value, exists: Boolean(value) && await window.subtitler.pathExists(value) }] as const));
+    if (request !== pathRequest.current) return;
+    setPathStatus(Object.fromEntries(checked));
   }
 
   function setWorkflow(nextWorkflow: WorkflowName) {
@@ -286,8 +275,11 @@ export default function App() {
 
   function handleInput(path: string) {
     setInputPath(path);
-    setAnalysis(null);
-    setAnalysisError("");
+    // A file dialog can return the current path again. React will not rerun an
+    // inputPath-dependent effect for the same string, so explicitly identify
+    // every user selection as a fresh analysis request.
+    setMediaAnalysisRevision((revision) => revision + 1);
+    clearAnalysis();
     if (settings) {
       const next = { ...settings, lastInputPath: path, lastOutputDir: "" };
       setSettings(next);
@@ -295,335 +287,11 @@ export default function App() {
     }
   }
 
-  async function verifyHosted() {
-    if (!settings || !coreSettings?.hosted) return;
-    setVerifyingHosted(true);
-    try {
-      const result = await window.subtitler.verifyHostedModels(settings.envFile);
-      setHostedVerification(result);
-      const transcriptionOptions = verifiedHostedOptions(result, "transcription");
-      const cleanupOptions = verifiedHostedOptions(result, "cleanup");
-      const hosted = coreSettings.hosted;
-      const selectedTranscription = matchingHostedOption(transcriptionOptions, hosted.transcriptionProvider, hosted.transcriptionModel)
-        ?? transcriptionOptions.find((option) => option.provider === hosted.transcriptionProvider)
-        ?? transcriptionOptions[0];
-      const recommendedFallback = selectedTranscription
-        ? recommendedFallbackTranscription(selectedTranscription.provider, selectedTranscription.model)
-        : recommendedFallbackTranscription(hosted.transcriptionProvider, hosted.transcriptionModel);
-      const selectedFallbackTranscription = matchingHostedOption(
-        transcriptionOptions,
-        hosted.fallbackTranscriptionProvider,
-        hosted.fallbackTranscriptionModel
-      ) ?? matchingHostedOption(transcriptionOptions, recommendedFallback.provider, recommendedFallback.model)
-        ?? transcriptionOptions.find((option) => option.provider === recommendedFallback.provider)
-        ?? transcriptionOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider)
-        ?? transcriptionOptions[0];
-      const selectedCleanup = matchingHostedOption(cleanupOptions, hosted.cleanupProvider, hosted.cleanupModel)
-        ?? cleanupOptions.find((option) => option.provider === hosted.cleanupProvider)
-        ?? cleanupOptions[0];
-      setCoreSettings({
-        ...coreSettings,
-        hosted: {
-          ...hosted,
-          transcriptionProvider: selectedTranscription?.provider ?? hosted.transcriptionProvider,
-          transcriptionModel: selectedTranscription?.model ?? hosted.transcriptionModel,
-          fallbackTranscriptionProvider: selectedFallbackTranscription?.provider ?? hosted.fallbackTranscriptionProvider,
-          fallbackTranscriptionModel: selectedFallbackTranscription?.model ?? hosted.fallbackTranscriptionModel,
-          cleanupProvider: selectedCleanup?.provider ?? hosted.cleanupProvider,
-          cleanupModel: selectedCleanup?.model ?? hosted.cleanupModel
-        }
-      });
-      setNotice(transcriptionOptions.length && cleanupOptions.length ? "Hosted models verified" : "Model verification completed with unavailable models");
-    } finally {
-      setVerifyingHosted(false);
-    }
-  }
-
-  async function refreshLocalModels(modelsDirectory: string, profileId: string) {
-    const statuses = await Promise.all(localProfiles.map((profile) => window.subtitler.getLocalModelStatus(modelsDirectory, profile.id)));
-    const byProfile = Object.fromEntries(statuses.map((status) => [status.profile, status]));
-    setLocalProfileStatuses(byProfile);
-    setLocalModelStatus(byProfile[profileId] ?? null);
-  }
-
-  async function refreshHfDownloaderStatus() {
-    try {
-      setHfDownloaderStatus(await window.subtitler.getHuggingFaceDownloaderStatus());
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function installHfDownloader() {
-    if (hfDownloaderStatus?.ready) return;
-    if (hfDownloaderStatus?.pythonReady && hfDownloaderStatus.pythonSource !== "managed") {
-      const target = hfDownloaderStatus.pythonPath || "the active Python runtime";
-      if (!window.confirm(`Install Hugging Face downloader packages into this non-managed Python runtime?\n\n${target}`)) return;
-    }
-    setInstallingHfDownloader(true);
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Hugging Face downloader package install\n`);
-    try {
-      const status = await window.subtitler.installHuggingFaceDownloader();
-      setHfDownloaderStatus(status);
-      setNotice("Hugging Face downloader packages installed");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      setInstallingHfDownloader(false);
-    }
-  }
-
-  async function downloadLocalModels() {
-    if (!settings) return;
-    setDownloadingModels(true);
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Hugging Face model download\n`);
-    try {
-      const status = await window.subtitler.downloadLocalProfile(settings.modelsDirectory, settings.localModelProfile, settings.modelDownloadMode ?? "direct");
-      setLocalModelStatus(status);
-      setLocalProfileStatuses((current) => ({ ...current, [status.profile]: status }));
-      if (coreSettings?.local) {
-        const profile = localProfiles.find((item) => item.id === settings.localModelProfile);
-        const next = {
-          ...coreSettings,
-          cleanupWindowSubtitles: profile?.cleanupWindowSubtitles ?? coreSettings.cleanupWindowSubtitles,
-          local: {
-            ...coreSettings.local,
-            model: status.files.transcription.path,
-            mmproj: status.files.projector.path,
-            cleanupModel: status.files.cleanup.path,
-            transcriptionDraftModel: status.files.transcriptionDraft?.path ?? "",
-            cleanupDraftModel: status.files.cleanupDraft?.path ?? ""
-          }
-        };
-        setCoreSettings(next);
-      }
-      setNotice("Local model profile installed");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDownloadingModels(false);
-    }
-  }
-
-  async function deleteLocalModels() {
-    if (!settings || !localModelStatus?.managed) return;
-    if (!window.confirm("Delete this app-managed model profile from disk? User-selected model folders will not be touched.")) return;
-    setManagedDeleteAction("models");
-    try {
-      const status = await window.subtitler.deleteManagedLocalProfile(settings.modelsDirectory, settings.localModelProfile);
-      setLocalModelStatus(status);
-      setLocalProfileStatuses((current) => ({ ...current, [status.profile]: status }));
-      await refreshLocalModels(settings.modelsDirectory, settings.localModelProfile);
-      setNotice("Managed model profile deleted");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      setManagedDeleteAction("");
-    }
-  }
-
-  async function refreshManagedLlama(backend: LlamaBackendId, releaseTag?: string) {
-    const status = await window.subtitler.getManagedLlamaStatus(backend, releaseTag);
-    setManagedLlamaStatus(status);
-  }
-
-  async function refreshRuntimeStatus(action = "", feedbackSection?: "python" | "ffmpeg") {
-    if (action) {
-      setRuntimeAction(action);
-      setRuntimeFeedback(null);
-    }
-    try {
-      const status = await window.subtitler.getRuntimeSetupStatus();
-      setRuntimeStatus(status);
-      setPythonReady(status.python.ready && status.python.requirementsInstalled);
-      void refreshHfDownloaderStatus();
-      if (feedbackSection) {
-        const text = feedbackSection === "python" ? "Python runtime status refreshed" : "FFmpeg status refreshed";
-        setRuntimeFeedback({ section: feedbackSection, text, ok: true });
-        setNotice(text);
-      }
-      return status;
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      if (feedbackSection) setRuntimeFeedback({ section: feedbackSection, text, ok: false });
-      setNotice(text);
-      return null;
-    } finally {
-      if (action) setRuntimeAction("");
-    }
-  }
-
-  async function createManagedPythonEnv() {
-    setRuntimeAction("create-python");
-    setRuntimeFeedback(null);
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ managed Python venv setup\n`);
-    try {
-      await window.subtitler.createManagedPythonEnv();
-      await refreshRuntimeStatus();
-      await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Managed Python venv created", ok: true });
-      setNotice("Managed Python venv created");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setRuntimeFeedback({ section: "python", text, ok: false });
-      setNotice(text);
-    } finally {
-      setRuntimeAction("");
-    }
-  }
-
-  async function deleteManagedPythonEnv() {
-    if (!runtimeStatus?.python.managedInstalled) return;
-    if (!window.confirm("Delete the app-managed Python venv from disk? User-selected Python installs will not be touched.")) return;
-    setRuntimeAction("delete-python");
-    setRuntimeFeedback(null);
-    try {
-      await window.subtitler.deleteManagedPythonEnv();
-      await refreshRuntimeStatus();
-      await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Managed Python venv deleted", ok: true });
-      setNotice("Managed Python venv deleted");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setRuntimeFeedback({ section: "python", text, ok: false });
-      setNotice(text);
-    } finally {
-      setRuntimeAction("");
-    }
-  }
-
-  async function installPythonRequirements() {
-    setRuntimeAction("install-python");
-    setRuntimeFeedback(null);
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ Python requirements install\n`);
-    try {
-      await window.subtitler.installPythonRequirements();
-      await refreshRuntimeStatus();
-      await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Python requirements installed", ok: true });
-      setNotice("Python requirements installed");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setRuntimeFeedback({ section: "python", text, ok: false });
-      setNotice(text);
-    } finally {
-      setRuntimeAction("");
-    }
-  }
-
-  async function downloadFfmpeg() {
-    setRuntimeAction("download-ffmpeg");
-    setRuntimeFeedback(null);
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ FFmpeg download\n`);
-    try {
-      await window.subtitler.downloadManagedFfmpeg();
-      await refreshRuntimeStatus();
-      setRuntimeFeedback({ section: "ffmpeg", text: "FFmpeg downloaded", ok: true });
-      setNotice("FFmpeg downloaded");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
-      setNotice(text);
-    } finally {
-      setRuntimeAction("");
-    }
-  }
-
-  async function deleteManagedFfmpeg() {
-    if (!runtimeStatus?.ffmpeg.managedInstalled) return;
-    if (!window.confirm("Delete app-managed FFmpeg from disk? FFmpeg on PATH will not be touched.")) return;
-    setRuntimeAction("delete-ffmpeg");
-    setRuntimeFeedback(null);
-    try {
-      await window.subtitler.deleteManagedFfmpeg();
-      await refreshRuntimeStatus();
-      setRuntimeFeedback({ section: "ffmpeg", text: "Managed FFmpeg deleted", ok: true });
-      setNotice("Managed FFmpeg deleted");
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
-      setNotice(text);
-    } finally {
-      setRuntimeAction("");
-    }
-  }
-
-  async function checkLlamaRelease() {
-    setLogs((value) => `${value}${value && !value.endsWith("\n") ? "\n" : ""}$ llama.cpp server release check\n`);
-    try {
-      const result = await window.subtitler.checkLatestLlamaRelease();
-      setLlamaRelease(result);
-      if (settings) {
-        const status = await window.subtitler.getManagedLlamaStatus(settings.llamaBackend, undefined);
-        setManagedLlamaStatus(status);
-      }
-      setNotice(`Latest llama.cpp: ${result.releaseTag}`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function downloadLlama() {
-    if (!settings) return;
-    setDownloadingLlama(true);
-    try {
-      const status = await window.subtitler.downloadManagedLlamaServer(settings.llamaBackend);
-      setManagedLlamaStatus(status);
-      setLlamaRelease((current) => current?.releaseTag === status.releaseTag ? current : {
-        releaseTag: status.releaseTag,
-        assets: [],
-        checkedAt: new Date().toISOString()
-      });
-      await useManagedLlama(status.serverPath);
-      setNotice("llama-server downloaded and selected");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDownloadingLlama(false);
-    }
-  }
-
-  async function deleteManagedLlama() {
-    if (!settings || !managedLlamaStatus?.installed) return;
-    if (!window.confirm("Delete this app-managed llama-server backend from disk? Manual server paths will not be touched.")) return;
-    setManagedDeleteAction("llama");
-    try {
-      const status = await window.subtitler.deleteManagedLlamaServer(settings.llamaBackend);
-      setManagedLlamaStatus(status);
-      if (coreSettings?.local) {
-        await refreshPathStatus(coreSettings);
-        setCurrentLlamaState(await window.subtitler.getCurrentLlamaServerState(coreSettings.local.llamaServer));
-      }
-      setNotice("Managed llama-server deleted");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      setManagedDeleteAction("");
-    }
-  }
-
-  async function useManagedLlama(path: string) {
-    if (!coreSettings?.local || !settings || !configs) return;
-    const nextCore = {
-      ...coreSettings,
-      local: {
-        ...coreSettings.local,
-        llamaServer: path,
-        cleanupLlamaServer: path
-      }
-    };
-    setCoreSettings(nextCore);
-    const workflowConfig = applyCoreSettings(configs[workflow], nextCore, workflow);
-    await window.subtitler.saveWorkflowConfig(workflow, workflowConfig);
-    setConfigs({ ...configs, [workflow]: workflowConfig });
-    setNotice("Managed llama-server selected");
-  }
-
   async function startRun() {
     if (!settings || !configPaths || !coreSettings) return;
     try {
       await persistWorkflowSettings(false);
-      setLogs("");
+      clearLogs();
       setRunState("running");
       setElapsedMs(0);
       const result = await window.subtitler.startRun({
@@ -642,7 +310,7 @@ export default function App() {
       const message = error instanceof Error ? error.message : String(error);
       setRunState("failed");
       setActiveRunId("");
-      setLogs(message ? `${message}\n` : "");
+      replaceLogs(message ? `${message}\n` : "");
       setNotice(message || "Run failed to start");
     }
   }
@@ -656,16 +324,16 @@ export default function App() {
     if (event.type === "started") {
       setActiveRunId(event.runId);
       setStartedAt(Date.parse(event.startedAt));
-      setLogs(`$ ${event.commandPreview}\n`);
+      replaceLogs(`$ ${event.commandPreview}\n`);
     } else if (event.type === "stdout" || event.type === "stderr") {
-      setLogs((value) => value + event.text);
+      appendLog(event.text);
     } else if (event.type === "exit") {
       setElapsedMs(event.elapsedMs);
       setRunState(event.cancelled ? "cancelled" : event.code === 0 ? "succeeded" : "failed");
       setActiveRunId("");
     } else if (event.type === "error") {
       setRunState("failed");
-      setLogs((value) => `${value}\n${event.message}\n`);
+      appendLog(`\n${event.message}\n`);
     }
   }
 
@@ -676,14 +344,16 @@ export default function App() {
     const rect = container.getBoundingClientRect();
     const move = (moveEvent: globalThis.PointerEvent) => {
       const percent = ((moveEvent.clientX - rect.left) / rect.width) * 100;
-      setInputWidth(Math.min(72, Math.max(38, percent)));
+      setInputWidth(clampResize(percent, 38, 72));
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
+    window.addEventListener("pointercancel", stop, { once: true });
   }
 
   function startLogResize(event: PointerEvent<HTMLDivElement>) {
@@ -693,20 +363,41 @@ export default function App() {
     const rect = container.getBoundingClientRect();
     const move = (moveEvent: globalThis.PointerEvent) => {
       const percent = ((rect.bottom - moveEvent.clientY) / rect.height) * 100;
-      setLogsHeight(Math.min(48, Math.max(14, percent)));
+      setLogsHeight(clampResize(percent, 14, 48));
     };
     const stop = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
+    window.addEventListener("pointercancel", stop, { once: true });
+  }
+
+  function resizeWithKeyboard(event: KeyboardEvent<HTMLDivElement>, value: number, orientation: "vertical" | "horizontal", minimum: number, maximum: number, update: (next: number) => void) {
+    const next = resizeFromKey(value, event.key, orientation, minimum, maximum, event.shiftKey);
+    if (next === null) return;
+    event.preventDefault();
+    update(next);
   }
 
   const elapsed = useMemo(() => formatElapsed(elapsedMs), [elapsedMs]);
+  if (startupError) {
+    return <div className="loading" role="alert"><p>SubUtl could not load its saved state.</p><p>{startupError}</p><button onClick={() => void loadInitialState()}>Try again</button><button onClick={async () => { await window.subtitler.resetAppState(); await loadInitialState(); }}>Reset saved settings</button></div>;
+  }
   if (!settings || !configs || !configPaths || !coreSettings) {
     return <div className="loading">Loading frontend state...</div>;
   }
+
+  const currentWorkflowFamily = workflowFamily(workflow);
+  const currentSettingsExpansion = settingsExpansion[currentWorkflowFamily] ?? defaultSettingsExpansion({
+    pythonReady,
+    ffmpegReady: Boolean(runtimeStatus?.ffmpeg.ready),
+    alignmentInstalled: Boolean(runtimeStatus?.alignment.installed),
+    envExists: envStatus.exists,
+    serverExists: Boolean(pathStatus.llamaServer?.exists),
+  });
 
   return (
     <main className="app">
@@ -716,7 +407,7 @@ export default function App() {
           <div className="subtle">{projectRoot}</div>
         </div>
         <div className="topbar-controls">
-          <ModeSelector workflow={workflow} onChange={setWorkflow} />
+          <ModeSelector workflow={workflow} onChange={setWorkflow} disabled={runState === "running"} />
           <ThemeSelector value={settings.theme} onChange={(theme) => {
             const next = { ...settings, theme };
             setSettings(next);
@@ -762,6 +453,12 @@ export default function App() {
             sidecarsEnabled={settings.sidecarsEnabled}
             sidecarDir={sidecarDir}
             outputPath={outputPath}
+            runActive={runState === "running"}
+            expansion={currentSettingsExpansion}
+            onToggleExpansion={(section) => setSettingsExpansion((current) => ({
+              ...current,
+              [currentWorkflowFamily]: updateSettingsExpansion(current[currentWorkflowFamily] ?? currentSettingsExpansion, section),
+            }))}
             onChange={setCoreSettings}
             onPythonPath={(pythonPath) => {
               const next = { ...settings, pythonPath };
@@ -812,6 +509,8 @@ export default function App() {
             onDeleteManagedPython={deleteManagedPythonEnv}
             onDownloadFfmpeg={downloadFfmpeg}
             onDeleteFfmpeg={deleteManagedFfmpeg}
+            onDownloadAlignment={downloadAlignmentModel}
+            onDeleteAlignment={deleteManagedAlignmentModel}
           />
         </div>
       ) : (
@@ -824,24 +523,26 @@ export default function App() {
               analysis={analysis}
               analyzing={analyzing}
               analysisError={analysisError}
+              disabled={runState === "running"}
               onInput={handleInput}
               onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
             />
             <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
           </div>
-          <div className="resize-divider column-divider" role="separator" aria-orientation="vertical" title="Drag to resize input and right panels" onPointerDown={startColumnResize} />
+          <div className="resize-divider column-divider" role="separator" aria-label="Resize input and settings panels" aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={`${Math.round(inputWidth)}% input width`} tabIndex={0} title="Drag or use arrow keys to resize input and right panels" onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
           <div className="flow-side">
           <OutputPanel
             outputPath={outputPath}
+            disabled={runState === "running"}
             onOutput={setOutputPath}
           />
-          <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} onChange={setCoreSettings} />
+          <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} disabled={runState === "running"} onChange={setCoreSettings} />
           <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
           </div>
         </div>
-        <div className="resize-divider log-divider" role="separator" aria-orientation="horizontal" title="Drag to resize logs" onPointerDown={startLogResize} />
+        <div className="resize-divider log-divider" role="separator" aria-label="Resize log panel" aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={`${Math.round(logsHeight)}% log height`} tabIndex={0} title="Drag or use arrow keys to resize logs" onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />
         <div className="logs-row">
-          <LogViewer logs={logs} onClear={() => setLogs("")} />
+          <LogViewer logs={logs} onClear={clearLogs} />
         </div>
       </div>
       )}
@@ -855,80 +556,4 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
-}
-
-function isHostedSelectionVerified(settings: CoreWorkflowSettings | null, verification: HostedModelVerification | null): boolean {
-  if (!settings?.hosted || !verification) return false;
-  const transcription = isVerifiedHostedTranscription(
-    settings.hosted.transcriptionProvider,
-    settings.hosted.transcriptionModel,
-    "transcription",
-    verification
-  );
-  const fallbackTranscription = isVerifiedHostedTranscription(
-    settings.hosted.fallbackTranscriptionProvider,
-    settings.hosted.fallbackTranscriptionModel,
-    "transcription",
-    verification
-  );
-  const cleanup = isVerifiedHostedTranscription(settings.hosted.cleanupProvider, settings.hosted.cleanupModel, "cleanup", verification);
-  return transcription && fallbackTranscription && cleanup;
-}
-
-function isVerifiedHostedTranscription(provider: "openai" | "gemini", model: string, role: "transcription" | "cleanup", verification: HostedModelVerification): boolean {
-  return isHostedModelVerified(provider, model, role, verification);
-}
-
-function isHostedSelectionConfigured(settings: CoreWorkflowSettings | null, envStatus: EnvStatus): boolean {
-  if (!settings?.hosted || !envStatus.exists) return false;
-  const hosted = settings.hosted;
-  const transcriptionKeyReady = hosted.transcriptionProvider === "openai"
-    ? envStatus.keysPresent.OPENAI_API_KEY
-    : envStatus.keysPresent.GEMINI_API_KEY;
-  const fallbackTranscriptionKeyReady = hosted.fallbackTranscriptionProvider === "openai"
-    ? envStatus.keysPresent.OPENAI_API_KEY
-    : envStatus.keysPresent.GEMINI_API_KEY;
-  const cleanupKeyReady = hosted.cleanupProvider === "openai"
-    ? envStatus.keysPresent.OPENAI_API_KEY
-    : envStatus.keysPresent.GEMINI_API_KEY;
-  return transcriptionKeyReady && fallbackTranscriptionKeyReady && cleanupKeyReady && isApprovedHostedSelection(hosted);
-}
-
-function isApprovedHostedSelection(hosted: NonNullable<CoreWorkflowSettings["hosted"]>): boolean {
-  return isHostedModelApproved(hosted.transcriptionProvider, hosted.transcriptionModel, "transcription")
-    && isHostedModelApproved(hosted.fallbackTranscriptionProvider, hosted.fallbackTranscriptionModel, "transcription")
-    && isHostedModelApproved(hosted.cleanupProvider, hosted.cleanupModel, "cleanup");
-}
-
-function matchingHostedOption<T extends { provider: "openai" | "gemini"; model: string }>(
-  options: T[],
-  provider: "openai" | "gemini",
-  model: string
-): T | undefined {
-  return options.find((option) => option.provider === provider && option.model === model);
-}
-
-function AdditionalSettingsPanel({ workflow, settings, onChange }: {
-  workflow: WorkflowName;
-  settings: CoreWorkflowSettings;
-  onChange(settings: CoreWorkflowSettings): void;
-}) {
-  const additionalSettings = settings.additionalSettings ?? { youtubeChapters: false };
-  return (
-    <section className="panel additional-settings-panel">
-      <div className="panel-title">Additional Settings</div>
-      {workflow === "hosted" ? (
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={additionalSettings.youtubeChapters}
-            onChange={(event) => onChange({ ...settings, additionalSettings: { ...additionalSettings, youtubeChapters: event.target.checked } })}
-          />
-          <TooltipLabel text="Use the hosted cleanup model to analyze the full final transcript and add YouTube-style chapter title markers to the EXO output.">YouTube chapter markers</TooltipLabel>
-        </label>
-      ) : (
-        <div className="additional-settings-empty">No additional settings</div>
-      )}
-    </section>
-  );
 }

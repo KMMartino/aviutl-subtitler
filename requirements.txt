@@ -1,6 +1,8 @@
-numpy
-soundfile
-pydub
-silero-vad
-torch
-ctc-forced-aligner @ git+https://github.com/MahmoudAshraf97/ctc-forced-aligner.git
+# Exact top-level runtime versions. The managed Windows runtime and CI install
+# the fully resolved requirements-lock-win.txt instead.
+numpy==2.4.6
+soundfile==0.13.1
+pydub==0.25.1
+silero-vad==6.2.1
+torch==2.12.0
+ctc-forced-aligner @ https://github.com/MahmoudAshraf97/ctc-forced-aligner/archive/264e7a1f81bff9ff5e787a5537020c2ad0b0df02.zip

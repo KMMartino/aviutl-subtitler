@@ -36,6 +36,7 @@ aviutl_subtitle.py
 subtitler/
 configs/
 requirements.txt
+requirements-lock-win.txt
 .env.example
 README.md
 WINDOWS_SETUP.md
@@ -87,7 +88,7 @@ ffmpeg/ffprobe on PATH
 missing
 ```
 
-The Settings screen exposes runtime status and actions for creating a managed Python venv, installing Python requirements, and downloading managed FFmpeg.
+The Settings screen exposes runtime status and actions for creating a managed Python venv, installing Python requirements, downloading managed FFmpeg, and acquiring the required alignment model. Downloaded native archives and Hugging Face LFS files are verified before use, and artifact metadata is retained for troubleshooting.
 
 ## Manual Smoke Test
 
@@ -106,5 +107,17 @@ The Settings screen exposes runtime status and actions for creating a managed Py
 
 - The installer is unsigned.
 - Python itself is not bundled; managed venv creation requires a system Python.
-- Python dependency locking is not yet complete; managed requirements currently use `requirements.txt`.
+- The managed Windows runtime installs the fully resolved, hash-checked `requirements-lock-win.txt`. `requirements.txt` records the exact top-level inputs.
 - First-run model and llama-server downloads can be large and require network access.
+
+## Updating Python dependencies
+
+Use Python 3.11 on Windows. Change the exact top-level version in `requirements.txt`, then regenerate and verify the lock:
+
+```powershell
+python -m pip install pip==25.3 pip-tools==7.5.2
+pip-compile --generate-hashes --allow-unsafe --resolver=backtracking --output-file=requirements-lock-win.txt requirements.txt
+python -m pip install --dry-run --ignore-installed -r requirements-lock-win.txt
+```
+
+The forced-aligner source URL must contain a full immutable commit SHA. Review the resolved ML stack, then run static checks, the full Python suite, and a representative local workflow before accepting an updated lock.
