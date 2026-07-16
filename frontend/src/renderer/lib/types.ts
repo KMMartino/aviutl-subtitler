@@ -165,9 +165,6 @@ export type HostedModelVerification = {
     transcription: boolean;
     transcriptionMini: boolean;
     cleanup: boolean;
-    cleanup55: boolean;
-    cleanup56Sol: boolean;
-    cleanup56Terra: boolean;
     cleanup56Luna: boolean;
   };
   gemini: {
@@ -177,8 +174,6 @@ export type HostedModelVerification = {
     transcription31Pro: boolean;
     transcription31FlashLite: boolean;
     cleanup: boolean;
-    cleanup31Pro: boolean;
-    cleanup31FlashLite: boolean;
   };
 };
 

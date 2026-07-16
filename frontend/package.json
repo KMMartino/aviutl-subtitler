@@ -1,6 +1,6 @@
 {
   "name": "subtitler-frontend",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "Electron frontend for the four-workflow subtitler",
   "author": "Kai Martino",
   "license": "SEE LICENSE IN ../LICENSE.txt",

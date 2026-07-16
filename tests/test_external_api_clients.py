@@ -7,13 +7,29 @@ from unittest import mock
 import numpy as np
 
 from subtitler.api_usage import ApiUsageLedger
-from subtitler.external_refiners import GeminiTextRefiner, OpenAITextRefiner, _hosted_text_timeout
+from subtitler.external_refiners import GeminiTextRefiner, HostedTextRefiner, OpenAITextRefiner, _hosted_text_timeout
 from subtitler.external_transcribers import DeadTranscriptionRequest, FallbackTranscriber, GeminiTranscriber, MalformedTranscriptionResponse, OpenAITranscriber, _hosted_transcription_timeout, _request_json, verify_gemini_model_available, verify_openai_model_available
+from subtitler.glossary import GlossaryEntry
 from subtitler.transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN
 from subtitler.models import AudioChunk
 
 
 class ExternalApiClientTests(unittest.TestCase):
+    def test_hosted_cleanup_prompt_treats_glossary_as_spelling_reference(self) -> None:
+        refiner = HostedTextRefiner(
+            "hosted-cleanup",
+            [GlossaryEntry("State of Decay", "game title | Xbox")],
+            ApiUsageLedger(),
+        )
+
+        prompt = refiner._prompt_one("ステートオブプレイについて話します")
+
+        self.assertIn("not as a list of terms expected in the transcript", prompt)
+        self.assertIn("close phonetic or orthographic match", prompt)
+        self.assertIn("if the input is already a plausible different term, preserve it", prompt)
+        self.assertIn("entries are not correction candidates", prompt)
+        self.assertIn("State of Decay", prompt)
+
     def _chunk(self) -> AudioChunk:
         return AudioChunk(index=1, start=0.0, end=1.0, samples=np.zeros(16000, dtype=np.float32))
 
@@ -68,6 +84,21 @@ class ExternalApiClientTests(unittest.TestCase):
         self.assertNotIn("secret-key", url)
         self.assertNotIn("?key=", url)
         self.assertEqual(request.call_args.kwargs["headers"], {"x-goog-api-key": "secret-key"})
+
+    def test_gemini_3_transcription_does_not_force_discouraged_temperature(self) -> None:
+        response = {
+            "candidates": [{"content": {"parts": [{"text": "どうも"}]}}],
+            "usageMetadata": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch("subtitler.external_transcribers.verify_gemini_model_available"), mock.patch(
+                "subtitler.external_transcribers._request_json", return_value=response
+            ) as request:
+                GeminiTranscriber(
+                    "gemini-3.5-flash", Path(temp_name), ApiUsageLedger(), api_key="secret-key"
+                ).transcribe(self._chunk())
+        payload = request.call_args.args[2]
+        self.assertNotIn("generationConfig", payload)
 
     def test_gemini_model_verification_uses_api_key_header_not_query(self) -> None:
         with mock.patch("subtitler.external_transcribers._request_json", return_value={"models": []}) as request:
@@ -185,6 +216,42 @@ class ExternalApiClientTests(unittest.TestCase):
         self.assertNotIn("secret-key", url)
         self.assertNotIn("?key=", url)
         self.assertEqual(request.call_args.kwargs["headers"], {"x-goog-api-key": "secret-key"})
+
+    def test_gemini_3_refiner_sends_thinking_level_without_forced_temperature(self) -> None:
+        response = {"candidates": [{"content": {"parts": [{"text": "clean"}]}}], "usageMetadata": {}}
+        with mock.patch("subtitler.external_refiners.verify_gemini_model_available"), mock.patch(
+            "subtitler.external_refiners._request_json_with_retries", return_value=response
+        ) as request:
+            result = GeminiTextRefiner(
+                "gemini-3.5-flash",
+                [],
+                ApiUsageLedger(),
+                api_key="secret-key",
+                thinking_level="low",
+            )._chat("prompt")
+        self.assertEqual(result, "clean")
+        generation_config = request.call_args.args[2]["generationConfig"]
+        self.assertEqual(generation_config["thinkingConfig"], {"thinkingLevel": "low"})
+        self.assertNotIn("temperature", generation_config)
+
+    def test_openai_refiner_sends_explicit_reasoning_effort(self) -> None:
+        response = {
+            "choices": [{"message": {"content": "clean"}}],
+            "usage": {},
+        }
+        with mock.patch("subtitler.external_refiners.verify_openai_model_available"), mock.patch(
+            "subtitler.external_refiners._request_json_with_retries", return_value=response
+        ) as request:
+            result = OpenAITextRefiner(
+                "gpt-5.6-luna",
+                [],
+                ApiUsageLedger(),
+                api_key="secret-key",
+                reasoning_effort="none",
+            )._chat("prompt")
+        self.assertEqual(result, "clean")
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["reasoning_effort"], "none")
 
     def test_transcription_timeout_scales_with_audio_length_and_caps(self) -> None:
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 2.0, [])), 5.0)

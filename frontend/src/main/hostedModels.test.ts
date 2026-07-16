@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { APPROVED_MODELS, readEnvValues, verifyHostedModels } from "./hostedModels";
-import { recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
+import { hostedCleanupTuning, hostedOptions, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
 
 const files: string[] = [];
 
@@ -20,14 +20,22 @@ describe("hosted model verification helpers", () => {
       openaiTranscription: "gpt-4o-transcribe",
       openaiTranscriptionMini: "gpt-4o-mini-transcribe",
       openaiCleanup: "gpt-5.4-mini",
-      openaiCleanup55: "gpt-5.5",
-      openaiCleanup56Sol: "gpt-5.6-sol",
-      openaiCleanup56Terra: "gpt-5.6-terra",
       openaiCleanup56Luna: "gpt-5.6-luna",
       gemini: "gemini-3.5-flash",
       gemini31Pro: "gemini-3.1-pro-preview",
       gemini31FlashLite: "gemini-3.1-flash-lite"
     });
+  });
+
+  it("offers only the three benchmark-selected cleanup profiles", () => {
+    expect(hostedOptions("cleanup").map(({ provider, model }) => `${provider}:${model}`)).toEqual([
+      "openai:gpt-5.4-mini",
+      "openai:gpt-5.6-luna",
+      "gemini:gemini-3.5-flash"
+    ]);
+    expect(hostedCleanupTuning("openai", "gpt-5.4-mini")).toEqual({ reasoningEffort: "medium", thinkingLevel: null });
+    expect(hostedCleanupTuning("openai", "gpt-5.6-luna")).toEqual({ reasoningEffort: "low", thinkingLevel: null });
+    expect(hostedCleanupTuning("gemini", "gemini-3.5-flash")).toEqual({ reasoningEffort: null, thinkingLevel: "minimal" });
   });
 
   it("reads only supported keys from an env file", () => {

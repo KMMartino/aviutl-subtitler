@@ -133,6 +133,14 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _choice(cleanup.get("backend"), {"none", "local-llama", "gemini", "openai"}, "cleanup.backend")
     _optional_string(cleanup.get("model"), "cleanup.model")
     _optional_string(cleanup.get("api_model"), "cleanup.api_model")
+    if cleanup.get("reasoning_effort") is not None:
+        _choice(
+            cleanup.get("reasoning_effort"),
+            {"none", "minimal", "low", "medium", "high", "xhigh"},
+            "cleanup.reasoning_effort",
+        )
+    if cleanup.get("thinking_level") is not None:
+        _choice(cleanup.get("thinking_level"), {"minimal", "low", "medium", "high"}, "cleanup.thinking_level")
     _optional_string(cleanup.get("llama_server"), "cleanup.llama_server")
     _port(cleanup.get("server_port"), "cleanup.server_port")
     _int_min(cleanup.get("ctx_size"), 1, "cleanup.ctx_size")
@@ -212,6 +220,12 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
                 _existing_path(cleanup.get("spec_draft_model"), "cleanup.spec_draft_model")
     elif cleanup["backend"] in {"gemini", "openai"}:
         _non_empty_string(cleanup.get("api_model"), "cleanup.api_model")
+        if (
+            cleanup["backend"] == "gemini"
+            and cleanup.get("api_model") == "gemini-3.1-pro-preview"
+            and cleanup.get("thinking_level") == "minimal"
+        ):
+            raise SubtitlerError("gemini-3.1-pro-preview does not support cleanup.thinking_level=minimal")
 
     if is_hosted:
         approved_transcription = {
@@ -294,6 +308,8 @@ def _defaults() -> dict[str, Any]:
             "backend": "none",
             "model": "",
             "api_model": "",
+            "reasoning_effort": None,
+            "thinking_level": None,
             "llama_server": "",
             "server_port": 8082,
             "ctx_size": 4096,

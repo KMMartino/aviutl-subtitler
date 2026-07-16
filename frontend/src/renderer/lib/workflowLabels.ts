@@ -11,7 +11,7 @@ export const workflowLabels: Record<WorkflowName, string> = {
 
 export const workflowDescriptions: Record<WorkflowName, string> = {
   local: "Local Gemma transcription and local cleanup",
-  hosted: "Gemini transcription and OpenAI cleanup",
+  hosted: "Hosted transcription and tested cleanup profiles",
   "local-long-stream": "Local transcription for selected high-activation speech",
   "hosted-long-stream": "Hosted transcription for selected high-activation speech"
 };

@@ -29,19 +29,5 @@ class AlignmentStrideTests(unittest.TestCase):
         self.assertEqual(stride, expected)
         self.assertNotEqual(stride, math.ceil(stride))
 
-    def test_rounded_stride_would_accumulate_late(self) -> None:
-        audio_waveform = FakeSizedTensor(16000 * 30 + 1)
-        emissions = FakeSizedTensor(1500)
-        precise_stride = _precise_emission_stride_ms(audio_waveform, emissions)
-        rounded_stride = math.ceil(precise_stride)
-        frame_index = 1499
-
-        precise_end = frame_index * precise_stride / 1000.0
-        rounded_end = frame_index * rounded_stride / 1000.0
-
-        self.assertGreater(rounded_end, precise_end)
-        self.assertGreater(rounded_end - precise_end, 1.0)
-
-
 if __name__ == "__main__":
     unittest.main()

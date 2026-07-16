@@ -244,7 +244,12 @@ class SubtitleRefinerFactoryTests(unittest.TestCase):
             )
             with mock.patch("subtitler.subtitle_stage.OpenAITextRefiner") as refiner_type:
                 build_refiner(context.config, glossary, usage, context.artifacts.base)
-        refiner_type.assert_called_once_with(model="hosted-cleanup", glossary=glossary, usage=usage)
+        refiner_type.assert_called_once_with(
+            model="hosted-cleanup",
+            glossary=glossary,
+            usage=usage,
+            reasoning_effort=None,
+        )
 
 
 if __name__ == "__main__":

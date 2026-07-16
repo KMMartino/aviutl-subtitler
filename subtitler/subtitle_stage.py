@@ -157,9 +157,19 @@ def build_refiner(
             ),
         )
     if backend == "openai":
-        return OpenAITextRefiner(model=cleanup["api_model"], glossary=glossary, usage=api_usage)
+        return OpenAITextRefiner(
+            model=cleanup["api_model"],
+            glossary=glossary,
+            usage=api_usage,
+            reasoning_effort=cleanup.get("reasoning_effort"),
+        )
     if backend == "gemini":
-        return GeminiTextRefiner(model=cleanup["api_model"], glossary=glossary, usage=api_usage)
+        return GeminiTextRefiner(
+            model=cleanup["api_model"],
+            glossary=glossary,
+            usage=api_usage,
+            thinking_level=cleanup.get("thinking_level"),
+        )
     raise SubtitlerError(f"Unknown cleanup backend: {backend}")
 
 

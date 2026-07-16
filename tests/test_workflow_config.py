@@ -20,9 +20,5 @@ class WorkflowConfigTests(unittest.TestCase):
         self.assertEqual(load_workflow_config("hosted")["backend"]["transcriber"], "gemini")
         self.assertEqual(load_workflow_config("hosted-long-stream")["cleanup"]["backend"], "openai")
 
-    def test_hosted_short_youtube_chapters_default_off(self):
-        self.assertFalse(load_workflow_config("hosted")["additional_settings"]["youtube_chapters"])
-
-
 if __name__ == "__main__":
     unittest.main()

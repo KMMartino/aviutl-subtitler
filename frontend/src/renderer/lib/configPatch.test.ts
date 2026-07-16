@@ -109,4 +109,27 @@ describe("config patching", () => {
     expect(core.hosted?.fallbackTranscriptionProvider).toBe("gemini");
     expect(core.hosted?.fallbackTranscriptionModel).toBe("gemini-3.1-pro-preview");
   });
+
+  it.each([
+    ["openai", "gpt-5.4-mini", "medium", null],
+    ["openai", "gpt-5.6-luna", "low", null],
+    ["gemini", "gemini-3.5-flash", null, "minimal"],
+  ] as const)("pins the tested cleanup tuning for %s:%s", (provider, model, reasoning, thinking) => {
+    const next = applyCoreSettings({}, {
+      audioTrack: 1,
+      hosted: {
+        transcriptionProvider: "gemini",
+        transcriptionModel: "gemini-3.5-flash",
+        fallbackTranscriptionProvider: "gemini",
+        fallbackTranscriptionModel: "gemini-3.1-pro-preview",
+        cleanupProvider: provider,
+        cleanupModel: model,
+        envFile: ""
+      },
+      diagnostics: { profile: true }
+    }, "hosted");
+
+    expect(next.cleanup?.reasoning_effort).toBe(reasoning);
+    expect(next.cleanup?.thinking_level).toBe(thinking);
+  });
 });

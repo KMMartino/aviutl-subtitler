@@ -8,7 +8,7 @@ The supported product surface is intentionally small: four workflows, each backe
 
 ```text
 local                Local Gemma transcription + local cleanup
-hosted               Gemini transcription + OpenAI cleanup
+hosted               Hosted transcription + tested cloud cleanup
 local-long-stream    Full VAD markers, selected local transcription chunks
 hosted-long-stream   Full VAD markers, selected hosted transcription chunks
 ```
@@ -190,3 +190,9 @@ SubUtl0.1.1.exe       portable version
 ```
 
 The installer and portable app do not bundle model files, llama.cpp server binaries, Python, FFmpeg, or user secrets. Those are managed from inside the app.
+
+## For Agents
+
+Do not use subagents unless user specified or when you are confident that breaking out the task to a smaller model will result in higher quality code or in lower usage.
+
+Always strive for simpler code in less lines. Avoid redundant checks, excessive testing, and checking the results of an action you just performed if the action has propper error logging and no errors were reported.

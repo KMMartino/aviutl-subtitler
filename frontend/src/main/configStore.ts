@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, AppState, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { workflows } from "../renderer/lib/workflowLabels";
-import { APPROVED_MODELS, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
+import { APPROVED_MODELS, hostedCleanupTuning, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
 import { defaultPythonPath } from "./python";
 import { runtimePaths, type RuntimePaths } from "./paths";
 
@@ -336,6 +336,24 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
     if (oldHostedDefaultFallback && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
       config.cleanup.skip_final_review = false;
       changed = true;
+    }
+    if (config.cleanup?.backend === "openai" || config.cleanup?.backend === "gemini") {
+      let tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model ?? ""));
+      if (!tuning) {
+        config.cleanup.api_model = config.cleanup.backend === "gemini"
+          ? APPROVED_MODELS.gemini
+          : APPROVED_MODELS.openaiCleanup;
+        tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model));
+        changed = true;
+      }
+      if (config.cleanup.reasoning_effort !== tuning?.reasoningEffort) {
+        config.cleanup.reasoning_effort = tuning?.reasoningEffort ?? null;
+        changed = true;
+      }
+      if (config.cleanup.thinking_level !== tuning?.thinkingLevel) {
+        config.cleanup.thinking_level = tuning?.thinkingLevel ?? null;
+        changed = true;
+      }
     }
     if (changed) atomicWriteJson(file, config);
   }

@@ -26,6 +26,8 @@ def cleanup_base_rules(mode: str, *, include_glossary: bool = True) -> str:
     }.get(mode, "Clean the subtitle text conservatively.")
     rules = [
         "Faithfully preserve what was likely spoken.",
+        "Do not change semantic or factual content, including names, titles, products, events, dates, numbers, or negation.",
+        "Do not replace one plausible proper noun or title with a different one based on subject knowledge or surrounding context.",
         "Keep the same language.",
         "Do not translate.",
         "Do not summarize.",
@@ -35,7 +37,15 @@ def cleanup_base_rules(mode: str, *, include_glossary: bool = True) -> str:
         "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
     ]
     if include_glossary:
-        rules.insert(-1, "Keep technical terms exactly as written in the glossary.")
+        rules.insert(
+            -1,
+            "Treat the glossary only as a spelling reference, not as a list of terms expected in the transcript.",
+        )
+        rules.insert(
+            -1,
+            "Use a glossary spelling only when the input is a close phonetic or orthographic match for that same term; "
+            "if the input is already a plausible different term, preserve it.",
+        )
     return "\n".join(f"- {rule}" for rule in rules)
 
 

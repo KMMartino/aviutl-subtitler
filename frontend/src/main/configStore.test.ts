@@ -143,7 +143,7 @@ describe("config store runtime paths", () => {
     expect(state.configs.hosted.cleanup.skip_final_review).toBe(false);
   });
 
-  it("does not migrate user-selected hosted fallbacks", () => {
+  it("keeps a user-selected fallback while migrating an obsolete cleanup model", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -165,6 +165,9 @@ describe("config store runtime paths", () => {
 
     expect(state.configs.hosted.backend.fallback_transcriber).toBe("openai");
     expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(state.configs.hosted.cleanup.backend).toBe("gemini");
+    expect(state.configs.hosted.cleanup.api_model).toBe("gemini-3.5-flash");
+    expect(state.configs.hosted.cleanup.thinking_level).toBe("minimal");
     expect(state.configs.hosted.cleanup.skip_final_review).toBe(true);
   });
 

@@ -14,7 +14,7 @@ export async function verifyHostedModels(envFile: string): Promise<HostedModelVe
 }
 
 async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["openai"]> {
-  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false, cleanup56Sol: false, cleanup56Terra: false, cleanup56Luna: false };
+  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup56Luna: false };
   try {
     const response = await fetch("https://api.openai.com/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -30,18 +30,15 @@ async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["opena
       transcription: hasAlias(APPROVED_MODELS.openaiTranscription),
       transcriptionMini: hasAlias(APPROVED_MODELS.openaiTranscriptionMini),
       cleanup: names.has(APPROVED_MODELS.openaiCleanup),
-      cleanup55: names.has(APPROVED_MODELS.openaiCleanup55),
-      cleanup56Sol: names.has(APPROVED_MODELS.openaiCleanup56Sol),
-      cleanup56Terra: names.has(APPROVED_MODELS.openaiCleanup56Terra),
       cleanup56Luna: names.has(APPROVED_MODELS.openaiCleanup56Luna)
     };
   } catch (error) {
-    return { keyPresent: true, error: errorMessage(error), transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false, cleanup56Sol: false, cleanup56Terra: false, cleanup56Luna: false };
+    return { keyPresent: true, error: errorMessage(error), transcription: false, transcriptionMini: false, cleanup: false, cleanup56Luna: false };
   }
 }
 
 async function verifyGemini(apiKey = ""): Promise<HostedModelVerification["gemini"]> {
-  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcription31Pro: false, transcription31FlashLite: false, cleanup: false, cleanup31Pro: false, cleanup31FlashLite: false };
+  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcription31Pro: false, transcription31FlashLite: false, cleanup: false };
   try {
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}&pageSize=1000`, {
       signal: AbortSignal.timeout(30000)
@@ -58,12 +55,10 @@ async function verifyGemini(apiKey = ""): Promise<HostedModelVerification["gemin
       transcription: gemini35,
       transcription31Pro: supports(APPROVED_MODELS.gemini31Pro),
       transcription31FlashLite: supports(APPROVED_MODELS.gemini31FlashLite),
-      cleanup: gemini35,
-      cleanup31Pro: supports(APPROVED_MODELS.gemini31Pro),
-      cleanup31FlashLite: supports(APPROVED_MODELS.gemini31FlashLite)
+      cleanup: gemini35
     };
   } catch (error) {
-    return { keyPresent: true, error: errorMessage(error), transcription: false, transcription31Pro: false, transcription31FlashLite: false, cleanup: false, cleanup31Pro: false, cleanup31FlashLite: false };
+    return { keyPresent: true, error: errorMessage(error), transcription: false, transcription31Pro: false, transcription31FlashLite: false, cleanup: false };
   }
 }
 

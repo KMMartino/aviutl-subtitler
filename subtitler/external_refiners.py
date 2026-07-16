@@ -188,7 +188,7 @@ class HostedTextRefiner(TextRefiner):
 
     def _prompt_one(self, line: str) -> str:
         glossary = format_glossary(self.glossary)
-        glossary_block = f"\nGlossary:\n{glossary}\n" if glossary else ""
+        glossary_block = f"\nSpelling-reference glossary (entries are not correction candidates):\n{glossary}\n" if glossary else ""
         return (
             "Task:\nClean this subtitle text.\n\n"
             f"Rules:\n{self._base_rules()}\n"
@@ -198,7 +198,7 @@ class HostedTextRefiner(TextRefiner):
 
     def _prompt_many(self, lines: list[str]) -> str:
         glossary = format_glossary(self.glossary)
-        glossary_block = f"\nGlossary:\n{glossary}\n" if glossary else ""
+        glossary_block = f"\nSpelling-reference glossary (entries are not correction candidates):\n{glossary}\n" if glossary else ""
         numbered = "\n".join(f"{i + 1}. {line}" for i, line in enumerate(lines))
         return (
             "Task:\nClean these subtitle lines.\n\n"
@@ -377,9 +377,17 @@ def _parse_chapter_cuts(value: Any) -> list[dict[str, Any]]:
 class OpenAITextRefiner(HostedTextRefiner):
     provider = "openai"
 
-    def __init__(self, model: str, glossary: list[GlossaryEntry], usage: ApiUsageLedger, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        glossary: list[GlossaryEntry],
+        usage: ApiUsageLedger,
+        api_key: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
         super().__init__(model, glossary, usage)
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
+        self.reasoning_effort = reasoning_effort
         verify_openai_model_available(model, self.api_key)
 
     def _chat(self, prompt: str, max_tokens: int = 512, operation: str = "cleanup") -> str:
@@ -392,6 +400,8 @@ class OpenAITextRefiner(HostedTextRefiner):
         }
         if not self.model.startswith("gpt-5"):
             payload["temperature"] = 0.0
+        if self.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.reasoning_effort
         payload[_openai_max_tokens_key(self.model)] = max_tokens
         data = _request_json_with_retries(
             "POST",
@@ -418,18 +428,32 @@ class OpenAITextRefiner(HostedTextRefiner):
 class GeminiTextRefiner(HostedTextRefiner):
     provider = "gemini"
 
-    def __init__(self, model: str, glossary: list[GlossaryEntry], usage: ApiUsageLedger, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        glossary: list[GlossaryEntry],
+        usage: ApiUsageLedger,
+        api_key: str | None = None,
+        thinking_level: str | None = None,
+    ) -> None:
         super().__init__(model, glossary, usage)
         self.api_key = api_key or require_api_key("GEMINI_API_KEY")
+        self.thinking_level = thinking_level
         verify_gemini_model_available(model, self.api_key)
 
     def _chat(self, prompt: str, max_tokens: int = 512, operation: str = "cleanup") -> str:
+        generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
+        if self.model.startswith("gemini-3"):
+            if self.thinking_level is not None:
+                generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
+        else:
+            generation_config["temperature"] = 0.0
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "systemInstruction": {
                 "parts": [{"text": "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."}]
             },
-            "generationConfig": {"temperature": 0.0, "maxOutputTokens": max_tokens},
+            "generationConfig": generation_config,
         }
         data = _request_json_with_retries(
             "POST",

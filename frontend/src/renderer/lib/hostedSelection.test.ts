@@ -20,8 +20,8 @@ describe("hosted selection", () => {
   it("keeps an available primary selection and chooses available fallback and cleanup models", () => {
     const verification: HostedModelVerification = {
       checkedAt: "now",
-      openai: { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup55: false, cleanup56Sol: false, cleanup56Terra: false, cleanup56Luna: false },
-      gemini: { keyPresent: true, error: "", transcription: true, transcription31Pro: true, transcription31FlashLite: false, cleanup: true, cleanup31Pro: true, cleanup31FlashLite: false },
+      openai: { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup56Luna: false },
+      gemini: { keyPresent: true, error: "", transcription: true, transcription31Pro: true, transcription31FlashLite: false, cleanup: true },
     };
 
     const result = selectVerifiedHostedSettings(settings, verification);

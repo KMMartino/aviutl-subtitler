@@ -1,5 +1,5 @@
 import type { CoreWorkflowSettings, WorkflowConfig, WorkflowName } from "./types";
-import { recommendedFallbackTranscription } from "../../shared/hostedModelCatalog";
+import { hostedCleanupTuning, recommendedFallbackTranscription } from "../../shared/hostedModelCatalog";
 
 export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSettings {
   const transcriptionProvider = config.backend?.transcriber === "openai" ? "openai" : "gemini";
@@ -83,6 +83,9 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
     next.backend.fallback_transcriber = settings.hosted?.fallbackTranscriptionProvider ?? next.backend.fallback_transcriber ?? "openai";
     next.cleanup.api_model = settings.hosted?.cleanupModel ?? next.cleanup.api_model ?? "";
     next.cleanup.backend = settings.hosted?.cleanupProvider ?? next.cleanup.backend ?? "openai";
+    const tuning = hostedCleanupTuning(next.cleanup.backend as "openai" | "gemini", String(next.cleanup.api_model));
+    next.cleanup.reasoning_effort = tuning?.reasoningEffort ?? null;
+    next.cleanup.thinking_level = tuning?.thinkingLevel ?? null;
   }
   next.diagnostics.profile = settings.diagnostics.profile;
   next.cost.max_estimated_api_cost_usd = settings.cost?.maxEstimatedApiCostUsd ?? next.cost.max_estimated_api_cost_usd ?? 5;

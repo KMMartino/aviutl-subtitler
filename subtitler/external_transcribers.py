@@ -107,8 +107,9 @@ class GeminiTranscriber:
                     ],
                 }
             ],
-            "generationConfig": {"temperature": 0.0},
         }
+        if not self.model.startswith("gemini-3"):
+            payload["generationConfig"] = {"temperature": 0.0}
         data = _request_json(
             "POST",
             f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent",

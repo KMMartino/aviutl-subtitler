@@ -6,14 +6,29 @@ export const APPROVED_MODELS = {
   openaiTranscription: "gpt-4o-transcribe",
   openaiTranscriptionMini: "gpt-4o-mini-transcribe",
   openaiCleanup: "gpt-5.4-mini",
-  openaiCleanup55: "gpt-5.5",
-  openaiCleanup56Sol: "gpt-5.6-sol",
-  openaiCleanup56Terra: "gpt-5.6-terra",
   openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
   gemini31Pro: "gemini-3.1-pro-preview",
   gemini31FlashLite: "gemini-3.1-flash-lite"
 } as const;
+
+export type HostedCleanupTuning = {
+  reasoningEffort: "low" | "medium" | null;
+  thinkingLevel: "minimal" | null;
+};
+
+export function hostedCleanupTuning(provider: HostedProvider, model: string): HostedCleanupTuning | null {
+  if (provider === "openai" && model === APPROVED_MODELS.openaiCleanup) {
+    return { reasoningEffort: "medium", thinkingLevel: null };
+  }
+  if (provider === "openai" && model === APPROVED_MODELS.openaiCleanup56Luna) {
+    return { reasoningEffort: "low", thinkingLevel: null };
+  }
+  if (provider === "gemini" && model === APPROVED_MODELS.gemini) {
+    return { reasoningEffort: null, thinkingLevel: "minimal" };
+  }
+  return null;
+}
 
 export const OPENAI_TRANSCRIPTION_MODEL_ALIASES: Record<string, string[]> = {
   [APPROVED_MODELS.openaiTranscription]: [APPROVED_MODELS.openaiTranscription],
@@ -55,49 +70,25 @@ export const HOSTED_MODELS: HostedModel[] = [
   {
     provider: "openai",
     model: APPROVED_MODELS.openaiCleanup,
-    label: "OpenAI GPT-5.4 mini",
-    emphasis: "speed",
-    blurb: "Fast, lower-cost cleanup model for routine transcript correction and subtitle decisions. Less capable than GPT-5.5 on difficult context.",
+    label: "OpenAI GPT-5.4 mini · Medium",
+    emphasis: "quality",
+    blurb: "High-accuracy tested profile. Medium reasoning repaired difficult cleanup defects while preserving title content on the benchmark.",
     verification: { cleanup: "cleanup" }
   },
   {
     provider: "openai",
-    model: APPROVED_MODELS.openaiCleanup55,
-    label: "OpenAI GPT-5.5",
-    emphasis: "quality",
-    blurb: "OpenAI's smarter cleanup option for difficult context and ambiguous corrections. More expensive than GPT-5.4 mini; it does not accept audio in this workflow.",
-    verification: { cleanup: "cleanup55" }
-  },
-  {
-    provider: "openai",
-    model: APPROVED_MODELS.openaiCleanup56Sol,
-    label: "OpenAI GPT-5.6 Sol",
-    emphasis: "quality",
-    blurb: "Flagship GPT-5.6 cleanup model for the most difficult context and ambiguous corrections.",
-    verification: { cleanup: "cleanup56Sol" }
-  },
-  {
-    provider: "openai",
-    model: APPROVED_MODELS.openaiCleanup56Terra,
-    label: "OpenAI GPT-5.6 Terra",
-    emphasis: "balanced",
-    blurb: "Balanced GPT-5.6 cleanup model with lower cost than Sol.",
-    verification: { cleanup: "cleanup56Terra" }
-  },
-  {
-    provider: "openai",
     model: APPROVED_MODELS.openaiCleanup56Luna,
-    label: "OpenAI GPT-5.6 Luna",
+    label: "OpenAI GPT-5.6 Luna · Low",
     emphasis: "speed",
-    blurb: "Fastest and lowest-cost GPT-5.6 cleanup model.",
+    blurb: "Budget-quality tested profile. Low reasoning provided meaningful cleanup while preserving semantic content.",
     verification: { cleanup: "cleanup56Luna" }
   },
   {
     provider: "gemini",
     model: APPROVED_MODELS.gemini,
-    label: "Gemini 3.5 Flash",
+    label: "Gemini 3.5 Flash · Minimal",
     emphasis: "balanced",
-    blurb: "Balanced Gemini option with strong intelligence, speed, and cost. Accepts audio directly and can transcribe, timestamp, summarize, or reason about recordings.",
+    blurb: "Tested Gemini cleanup profile. Minimal thinking was faster and followed the cleanup format more reliably than low or medium.",
     verification: { transcription: "transcription", cleanup: "cleanup" }
   },
   {
@@ -106,7 +97,7 @@ export const HOSTED_MODELS: HostedModel[] = [
     label: "Gemini 3.1 Pro Preview",
     emphasis: "quality",
     blurb: "Google's highest-intelligence option in this selector. Accepts audio and can transcribe and analyze it, but is slower, more expensive, and currently a preview model.",
-    verification: { transcription: "transcription31Pro", cleanup: "cleanup31Pro" }
+    verification: { transcription: "transcription31Pro" }
   },
   {
     provider: "gemini",
@@ -114,7 +105,7 @@ export const HOSTED_MODELS: HostedModel[] = [
     label: "Gemini 3.1 Flash-Lite",
     emphasis: "speed",
     blurb: "Fastest and lowest-cost Gemini option here. Accepts audio and is explicitly documented for transcription, but has less reasoning depth than Pro or 3.5 Flash.",
-    verification: { transcription: "transcription31FlashLite", cleanup: "cleanup31FlashLite" }
+    verification: { transcription: "transcription31FlashLite" }
   }
 ];
 

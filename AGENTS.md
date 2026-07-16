@@ -2,73 +2,49 @@
 
 ## Checks
 
-For frontend changes, run:
+Run the checks matching the changed code without waiting for approval.
+
+For backend changes:
+
+```powershell
+python -m ruff check aviutl_subtitle.py subtitler tests
+python -m mypy
+python -m unittest discover -s tests
+```
+
+For frontend changes:
 
 ```powershell
 cd frontend
-npm run typecheck
-npm test -- --run
+npm run quality
+npm test
 ```
 
-For distributable-app changes, also run:
-
-```powershell
-cd frontend
-npm run dist
-```
-
-`npm run dist` writes local ignored artifacts under `release/`.
-
-For EXO-only styling/layout changes, the focused check is:
+For EXO-only styling or layout changes, the focused check is sufficient:
 
 ```powershell
 .\.venv-win\Scripts\python.exe -m unittest tests.test_exo_markers
 ```
 
-Normal subtitle EXO objects intentionally include the two `アニメーション効果` filters used by the sample animation reference. QA/mistranscription diagnostic markers intentionally occupy timeline `layer=2` while rendering above the normal subtitle on screen.
+## App Testing
 
-## Baseline Testing and Deployment
+`npm run dist` creates ignored artifacts under `release/` and always requires user approval. Propose a rebuild after a significant product change or an accumulation of smaller changes.
 
-For minor code changes, run only the standard code-level checks that match the files changed. Do this automatically when appropriate rather than waiting for user approval.
+After an approved rebuild, copy the portable artifact to `C:\tools\personal\Subtitler-latest\SubUtl.exe` for user testing. Do not push until the user has tested and approved the build.
 
-For frontend changes, the standard checks are:
+For EXO styling or layout changes, also generate a short EXO under `testing-grounds/` for visual inspection before pushing.
 
-```powershell
-cd frontend
-npm run typecheck
-npm test -- --run
-```
+## EXO Invariants
 
-When a significant change has been made, or several smaller changes have accumulated into a significant product change, propose a distributable rebuild. Always check with the user before triggering a rebuild.
-
-After each approved rebuild, copy the portable executable into:
-
-```text
-C:\tools\personal\Subtitler-latest
-```
-
-This path is on the user's `PATH` and is used for local usage testing.
-
-After the user has completed actual usage testing and approves pushing, push the changes. Do not push before user usage testing approval.
-
-For EXO layout or styling changes, generate one short test EXO under `testing-grounds/` and let the user visually inspect it before pushing.
+Normal subtitle objects include the sample reference's two `アニメーション効果` filters. QA/mistranscription markers use timeline `layer=2` while rendering above the normal subtitle on screen.
 
 ## Releases
 
-Normal commits to `main` should run CI only. Do not publish a distributable for every commit.
-
-To publish a Windows release, push a version tag:
+Normal pushes to `main` run CI only. Publish Windows artifacts by pushing a version tag, for example:
 
 ```powershell
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow derives the asset version from the tag text after `v`, not from `frontend/package.json`.
-
-The release workflow builds on `windows-latest` and uploads two GitHub Release assets:
-
-- `SubUtlSetup<version>.exe`: installer version.
-- `SubUtl<version>.exe`: portable version, meant to run without installation.
-
-The installer and portable builds intentionally do not bundle model files, llama.cpp server binaries, Python, FFmpeg, or user secrets.
+The workflow takes the asset version from the tag rather than `frontend/package.json` and publishes `SubUtlSetup<version>.exe` and portable `SubUtl<version>.exe`. Neither bundles models, llama.cpp, Python, FFmpeg, or secrets.
