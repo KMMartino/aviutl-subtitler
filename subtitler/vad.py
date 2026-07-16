@@ -129,6 +129,8 @@ def _speech_timestamps_from_probabilities(
     triggered = False
     current_start = 0
     temp_end = 0
+    prev_end = 0
+    next_start = 0
     possible_ends: list[tuple[int, int]] = []
     speeches: list[dict] = []
 
@@ -140,6 +142,8 @@ def _speech_timestamps_from_probabilities(
             if silence_duration > min_silence_at_max_speech:
                 possible_ends.append((temp_end, silence_duration))
             temp_end = 0
+            if next_start < prev_end:
+                next_start = current_sample
 
         if probability >= threshold and not triggered:
             triggered = True
@@ -152,16 +156,22 @@ def _speech_timestamps_from_probabilities(
                 end_sample, silence_duration = max(possible_ends, key=lambda item: item[1])
                 if end_sample - current_start >= min_speech_samples:
                     speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
-                current_start = min(total_samples, end_sample + silence_duration)
+                next_start = min(total_samples, end_sample + silence_duration)
+                if next_start < end_sample + current_sample:
+                    current_start = next_start
+                else:
+                    triggered = False
+                prev_end = 0
+                next_start = 0
                 temp_end = 0
                 possible_ends = []
-                if probability < threshold:
-                    triggered = False
             else:
                 end_sample = current_sample
                 if end_sample - current_start >= min_speech_samples:
                     speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
-                current_start = current_sample
+                triggered = False
+                prev_end = 0
+                next_start = 0
                 temp_end = 0
                 possible_ends = []
             continue
@@ -174,6 +184,8 @@ def _speech_timestamps_from_probabilities(
                 if end_sample - current_start >= min_speech_samples:
                     speeches.append({"start": current_start, "end": min(total_samples, end_sample)})
                 triggered = False
+                prev_end = 0
+                next_start = 0
                 temp_end = 0
                 possible_ends = []
 

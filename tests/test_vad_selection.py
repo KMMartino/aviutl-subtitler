@@ -63,6 +63,43 @@ class VadSelectionTests(unittest.TestCase):
 
         self.assertEqual(timestamps, [{"start": 100, "end": 300}, {"start": 500, "end": 700}])
 
+    def test_max_speech_cut_resets_trigger_before_following_silence(self) -> None:
+        timestamps = _speech_timestamps_from_probabilities(
+            [0.9] * 11 + [0.1] * 5 + [0.9] * 3,
+            window_size_samples=100,
+            sample_rate=1000,
+            total_samples=1900,
+            max_chunk_sec=1.1,
+            min_speech_sec=0.1,
+            min_silence_ms=300,
+            speech_pad_ms=0,
+        )
+
+        self.assertEqual(timestamps, [{"start": 0, "end": 1100}, {"start": 1600, "end": 1900}])
+
+    def test_max_speech_cut_keeps_active_span_after_candidate_silence(self) -> None:
+        probabilities = [0.9, 0.9, 0.1, 0.1] + [0.9] * 7 + [0.4] + [0.9] * 7
+
+        timestamps = _speech_timestamps_from_probabilities(
+            probabilities,
+            window_size_samples=100,
+            sample_rate=1000,
+            total_samples=1900,
+            max_chunk_sec=1.1,
+            min_speech_sec=0.1,
+            min_silence_ms=500,
+            speech_pad_ms=0,
+        )
+
+        self.assertEqual(
+            timestamps,
+            [
+                {"start": 0, "end": 200},
+                {"start": 400, "end": 1500},
+                {"start": 1600, "end": 1900},
+            ],
+        )
+
     def test_cleanup_groups_split_oversized_runs_at_largest_gap(self) -> None:
         chunks = [
             AudioChunk(index=0, start=0.0, end=10.0, samples=[]),
