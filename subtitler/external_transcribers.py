@@ -17,7 +17,13 @@ from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .hosted_http import request_json, request_json_bytes
 from .models import AudioChunk, TranscriptChunk
-from .transcriber import UNTRANSCRIBABLE_AUDIO_TOKEN, build_transcription_prompt, clean_transcript, _is_suspect_transcript
+from .transcriber import (
+    UNTRANSCRIBABLE_AUDIO_TOKEN,
+    _is_suspect_transcript,
+    _repeats_context,
+    build_transcription_prompt,
+    clean_transcript,
+)
 
 
 def require_api_key(name: str) -> str:
@@ -53,19 +59,10 @@ class FallbackTranscriber:
         self.provider = getattr(primary, "provider", "")
         self.model = getattr(primary, "model", "")
 
-    def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
-        try:
+    def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
+        if previous_transcript is None:
             return self.primary.transcribe(chunk)
-        except (MalformedTranscriptionResponse, DeadTranscriptionRequest) as exc:
-            if self.fallback is None:
-                raise
-            reason = "dead request" if isinstance(exc, DeadTranscriptionRequest) else "malformed response"
-            print(
-                f"Warning: {reason} from {self.primary.provider} transcription for chunk {chunk.index}; "
-                f"falling back to {self.fallback.provider}:{self.fallback.model}. {exc}",
-                flush=True,
-            )
-            return self.fallback.transcribe(chunk)
+        return self.primary.transcribe(chunk, previous_transcript)
 
 
 class GeminiTranscriber:
@@ -85,14 +82,15 @@ class GeminiTranscriber:
         self.usage = usage
         self.api_key = api_key or require_api_key("GEMINI_API_KEY")
         self.prompt = build_transcription_prompt(glossary)
+        self.glossary = glossary
         self.timeout_scale = max(1.0, timeout_scale)
         verify_gemini_model_available(self.model, self.api_key)
 
-    def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
-        text = self._transcribe_once(chunk)
+    def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
+        text = self._transcribe_once(chunk, previous_transcript)
         return TranscriptChunk(chunk=chunk, text=text)
 
-    def _transcribe_once(self, chunk: AudioChunk) -> str:
+    def _transcribe_once(self, chunk: AudioChunk, previous_transcript: str | None = None) -> str:
         wav_path = chunk.wav_path or self.temp_dir / f"gemini_transcribe_{chunk.index:05d}.wav"
         if chunk.wav_path is None:
             write_wav_segment(chunk.samples, 16000, wav_path)
@@ -102,7 +100,7 @@ class GeminiTranscriber:
                 {
                     "role": "user",
                     "parts": [
-                        {"text": self.prompt},
+                        {"text": build_transcription_prompt(self.glossary, previous_transcript)},
                         {"inline_data": {"mime_type": "audio/wav", "data": audio_data}},
                     ],
                 }
@@ -130,6 +128,8 @@ class GeminiTranscriber:
             raise MalformedTranscriptionResponse(f"Gemini returned an empty transcript for chunk {chunk.index}")
         if _is_external_suspect(text, chunk):
             raise MalformedTranscriptionResponse(f"Gemini returned a suspect transcript for chunk {chunk.index}")
+        if previous_transcript and _repeats_context(text, previous_transcript):
+            raise MalformedTranscriptionResponse(f"Gemini repeated preceding context for chunk {chunk.index}")
         return text
 
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
@@ -172,22 +172,23 @@ class OpenAITranscriber:
         self.usage = usage
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
         self.prompt = build_transcription_prompt(glossary)
+        self.glossary = glossary
         self.language = language
         self.timeout_scale = max(1.0, timeout_scale)
         self._available_model = verify_openai_model_available(self.model, self.api_key)
 
-    def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
-        text = self._transcribe_once(chunk)
+    def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
+        text = self._transcribe_once(chunk, previous_transcript)
         return TranscriptChunk(chunk=chunk, text=text)
 
-    def _transcribe_once(self, chunk: AudioChunk) -> str:
+    def _transcribe_once(self, chunk: AudioChunk, previous_transcript: str | None = None) -> str:
         wav_path = chunk.wav_path or self.temp_dir / f"openai_transcribe_{chunk.index:05d}.wav"
         if chunk.wav_path is None:
             write_wav_segment(chunk.samples, 16000, wav_path)
         fields = {
             "model": self.model,
             "language": self.language,
-            "prompt": self.prompt,
+            "prompt": build_transcription_prompt(self.glossary, previous_transcript),
             "response_format": "json",
             "temperature": "0",
         }
@@ -211,6 +212,8 @@ class OpenAITranscriber:
             raise MalformedTranscriptionResponse(f"OpenAI returned an empty transcript for chunk {chunk.index}")
         if _is_external_suspect(text, chunk):
             raise MalformedTranscriptionResponse(f"OpenAI returned a suspect transcript for chunk {chunk.index}")
+        if previous_transcript and _repeats_context(text, previous_transcript):
+            raise MalformedTranscriptionResponse(f"OpenAI repeated preceding context for chunk {chunk.index}")
         return text
 
     def _request_transcription(self, chunk: AudioChunk, wav_path: Path, fields: dict[str, str]) -> dict[str, Any]:

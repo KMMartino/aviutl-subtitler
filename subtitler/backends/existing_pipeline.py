@@ -7,14 +7,19 @@ import os
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from subtitler.aligner import ctc_language_code, is_japanese_language
 from subtitler.alignment_pool import AlignmentConfig, AlignmentPool
 from subtitler.api_costs import estimate_run_cost
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.errors import SubtitlerError
-from subtitler.external_transcribers import FallbackTranscriber, GeminiTranscriber, OpenAITranscriber
+from subtitler.external_transcribers import (
+    FallbackTranscriber,
+    GeminiTranscriber,
+    MalformedTranscriptionResponse,
+    OpenAITranscriber,
+)
 from subtitler.models import AlignedChunk, AudioChunk, TranscriptChunk
 from subtitler.profiling import PipelineProfiler, now
 from subtitler.transcriber import ServerGemmaTranscriber
@@ -132,6 +137,16 @@ class SpeechSelection:
     speech_regions: list[SpeechRegion]
     selected_speech_seconds: float
     total_speech_seconds: float
+
+
+@dataclass
+class HostedAttemptOutcome:
+    chunk: AudioChunk
+    status: Literal["success", "untranscribable", "quality_failure", "transport_failure"]
+    transcript: TranscriptChunk | None = None
+    error: Exception | None = None
+    provider: str = ""
+    model: str = ""
 
 
 class ExistingPipelineBackend:
@@ -581,6 +596,10 @@ def transcribe_and_align(
     align_workers: int,
     transcription_workers: int = 1,
 ):
+    if isinstance(transcriber, FallbackTranscriber):
+        return transcribe_and_align_hosted(
+            chunks, transcriber, alignment_config, profiler, transcription_workers, align_workers
+        )
     if hasattr(transcriber, "prepare_payload") and hasattr(transcriber, "transcribe_payload"):
         return transcribe_and_align_server(chunks, transcriber, alignment_config, profiler, audio_prep_workers, align_workers)
     if transcription_workers > 1:
@@ -598,6 +617,115 @@ def transcribe_and_align(
             print(f"Warning: empty transcript for chunk {chunk.index}")
             continue
         pool.submit(transcript)
+    print("Waiting for alignment workers...", flush=True)
+    aligned = pool.close_and_collect()
+    print_transcription_failure_summary(failed)
+    return aligned, failed
+
+
+def hosted_attempt(transcriber, chunk: AudioChunk, previous_transcript: str | None = None) -> HostedAttemptOutcome:
+    try:
+        transcript = transcriber.transcribe(chunk, previous_transcript)
+        status: Literal["success", "untranscribable"] = "success" if transcript.text.strip() else "untranscribable"
+        return HostedAttemptOutcome(
+            chunk=chunk,
+            status=status,
+            transcript=transcript,
+            provider=getattr(transcriber, "provider", ""),
+            model=getattr(transcriber, "model", ""),
+        )
+    except MalformedTranscriptionResponse as exc:
+        return HostedAttemptOutcome(
+            chunk=chunk,
+            status="quality_failure",
+            error=exc,
+            provider=getattr(transcriber, "provider", ""),
+            model=getattr(transcriber, "model", ""),
+        )
+    except Exception as exc:
+        return HostedAttemptOutcome(
+            chunk=chunk,
+            status="transport_failure",
+            error=exc,
+            provider=getattr(transcriber, "provider", ""),
+            model=getattr(transcriber, "model", ""),
+        )
+
+
+def transcribe_and_align_hosted(
+    chunks,
+    transcriber: FallbackTranscriber,
+    alignment_config: AlignmentConfig,
+    profiler: PipelineProfiler,
+    workers: int,
+    align_workers: int,
+):
+    ordered = sorted(chunks, key=lambda item: (item.start, item.end, item.index))
+    normal: dict[int, HostedAttemptOutcome] = {}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as transcribe_pool:
+        futures = {}
+        for i, chunk in enumerate(ordered, start=1):
+            if len(ordered) <= 10 or i <= 5 or i > len(ordered) - 5:
+                print(f"Queueing transcription chunk {i}/{len(ordered)} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
+            start = now()
+            future = transcribe_pool.submit(hosted_attempt, transcriber.primary, chunk)
+            futures[future] = (i, chunk, start)
+        for future in as_completed(futures):
+            i, chunk, start = futures[future]
+            profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
+            normal[chunk.index] = future.result()
+            print(f"Transcription complete: {i}/{len(ordered)} [{chunk.start:.2f}-{chunk.end:.2f}s]", flush=True)
+
+    resolved: dict[int, TranscriptChunk | None] = {}
+    failed: list[TranscriptChunk] = []
+    for position, chunk in enumerate(ordered):
+        outcome = normal[chunk.index]
+        final = outcome
+        previous = resolved.get(ordered[position - 1].index) if position > 0 else None
+        previous_text = previous.text if previous is not None and previous.text.strip() else None
+        if outcome.status == "quality_failure":
+            print(f"Warning: primary model returned bad output for chunk {chunk.index}. {outcome.error}", flush=True)
+            if previous_text:
+                print(f"Retrying hosted chunk {chunk.index} with preceding transcript context...", flush=True)
+                final = hosted_attempt(transcriber.primary, chunk, previous_text)
+            else:
+                print(
+                    f"Warning: contextual retry skipped for chunk {chunk.index}; preceding transcript unavailable.",
+                    flush=True,
+                )
+        elif outcome.status == "transport_failure":
+            print(
+                f"Warning: primary transport failure for chunk {chunk.index}; routing directly to backup. {outcome.error}",
+                flush=True,
+            )
+
+        needs_backup = (
+            outcome.status == "transport_failure"
+            or (outcome.status == "quality_failure" and (not previous_text or final.status not in {"success", "untranscribable"}))
+        )
+        if needs_backup and transcriber.fallback is not None:
+            print(
+                f"Invoking backup transcription for chunk {chunk.index}: "
+                f"{transcriber.fallback.provider}:{transcriber.fallback.model}.",
+                flush=True,
+            )
+            final = hosted_attempt(transcriber.fallback, chunk)
+
+        if final.status == "success" and final.transcript is not None:
+            resolved[chunk.index] = final.transcript
+        elif final.status == "untranscribable":
+            resolved[chunk.index] = None
+        else:
+            exc = final.error or RuntimeError("hosted transcription produced no usable output")
+            failed_item = failed_transcript(chunk, exc)
+            failed.append(failed_item)
+            resolved[chunk.index] = None
+
+    pool = AlignmentPool(align_workers, alignment_config, profiler)
+    for chunk in ordered:
+        transcript = resolved[chunk.index]
+        if transcript is not None:
+            pool.submit(transcript)
     print("Waiting for alignment workers...", flush=True)
     aligned = pool.close_and_collect()
     print_transcription_failure_summary(failed)
@@ -668,6 +796,7 @@ def transcribe_and_align_server(
     total = len(chunks)
     pool = AlignmentPool(align_workers, alignment_config, profiler)
     failed: list[TranscriptChunk] = []
+    previous_text: str | None = None
     with ThreadPoolExecutor(max_workers=audio_prep_workers) as prep_pool:
         while next_to_submit < min(audio_prep_workers, total):
             chunk = chunks[next_to_submit]
@@ -684,15 +813,18 @@ def transcribe_and_align_server(
                     prep_futures[upcoming.index] = prep_pool.submit(prepare_payload, transcriber, upcoming, profiler)
                     next_to_submit += 1
                 start = now()
-                text = transcriber.transcribe_payload(chunk, payload)
+                text = transcriber.transcribe_payload(chunk, payload, previous_text)
                 profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
                 if not text:
                     print(f"Warning: empty transcript for chunk {chunk.index}")
+                    previous_text = None
                     continue
                 pool.submit(TranscriptChunk(chunk=chunk, text=text))
+                previous_text = text
             except Exception as exc:
                 profiler.mark_error(chunk.index, exc)
                 failed.append(failed_transcript(chunk, exc))
+                previous_text = None
     print("Waiting for alignment workers...", flush=True)
     aligned = pool.close_and_collect()
     print_transcription_failure_summary(failed)

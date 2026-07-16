@@ -142,31 +142,25 @@ class ExternalApiClientTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 verify_openai_model_available("gpt-4o-mini-transcribe", "key")
 
-    def test_fallback_transcriber_uses_fallback_on_malformed_response(self) -> None:
+    def test_fallback_transcriber_exposes_primary_quality_failure(self) -> None:
         chunk = self._chunk()
         primary = mock.Mock(provider="gemini", model="gemini-3.5-flash")
         fallback = mock.Mock(provider="openai", model="gpt-4o-mini-transcribe")
         primary.transcribe.side_effect = MalformedTranscriptionResponse("empty response")
-        fallback.transcribe.return_value = mock.Mock(text="fallback transcript")
-
-        result = FallbackTranscriber(primary, fallback).transcribe(chunk)
-
-        self.assertEqual(result.text, "fallback transcript")
+        with self.assertRaises(MalformedTranscriptionResponse):
+            FallbackTranscriber(primary, fallback).transcribe(chunk)
         primary.transcribe.assert_called_once_with(chunk)
-        fallback.transcribe.assert_called_once_with(chunk)
+        fallback.transcribe.assert_not_called()
 
-    def test_fallback_transcriber_uses_fallback_on_dead_request(self) -> None:
+    def test_fallback_transcriber_exposes_primary_transport_failure(self) -> None:
         chunk = self._chunk()
         primary = mock.Mock(provider="gemini", model="gemini-3.5-flash")
         fallback = mock.Mock(provider="openai", model="gpt-4o-mini-transcribe")
         primary.transcribe.side_effect = DeadTranscriptionRequest("read operation timed out")
-        fallback.transcribe.return_value = mock.Mock(text="fallback transcript")
-
-        result = FallbackTranscriber(primary, fallback).transcribe(chunk)
-
-        self.assertEqual(result.text, "fallback transcript")
+        with self.assertRaises(DeadTranscriptionRequest):
+            FallbackTranscriber(primary, fallback).transcribe(chunk)
         primary.transcribe.assert_called_once_with(chunk)
-        fallback.transcribe.assert_called_once_with(chunk)
+        fallback.transcribe.assert_not_called()
 
     def test_transcription_timeout_request_can_be_classified_for_fallback(self) -> None:
         with mock.patch("subtitler.hosted_http.urllib.request.urlopen", side_effect=TimeoutError("timed out")), mock.patch(

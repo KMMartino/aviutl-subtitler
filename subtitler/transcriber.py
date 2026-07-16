@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import re
-import time
 import urllib.request
 from pathlib import Path
 
@@ -27,20 +26,35 @@ PROMPT = (
 )
 
 TRANSCRIPTION_STOP = ["<|im_end|>", "<end_of_turn>", "<|end|>", "<|eot_id|>"]
-EMPTY_TRANSCRIPT_ATTEMPTS = 2
-
-
-def build_transcription_prompt(glossary: list[GlossaryEntry] | None = None) -> str:
+def build_transcription_prompt(
+    glossary: list[GlossaryEntry] | None = None,
+    previous_transcript: str | None = None,
+) -> str:
     if not glossary:
-        return PROMPT
-    hints = format_glossary(glossary)
-    return (
+        prompt = PROMPT
+    else:
+        hints = format_glossary(glossary)
+        prompt = (
         "この音声の日本語の発話を、聞こえた順番どおりに一字一句そのまま文字起こししてください。\n"
         "翻訳、要約、補足、タイムスタンプ、記号トークンは出力しないでください。\n"
         f"音声が判別不能、無音、ノイズのみ、または日本語の発話として文字起こしできない場合は、必ず {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力してください。\n"
         "文字起こし本文だけを出力してください。\n"
         "以下の語彙ヒントは、音声として聞こえる場合だけ使ってください:\n"
         f"{hints}"
+        )
+    if not previous_transcript:
+        return prompt
+    safe_context = previous_transcript.replace("<previous_transcript>", "＜previous_transcript＞").replace(
+        "</previous_transcript>", "＜/previous_transcript＞"
+    )
+    return (
+        f"{prompt}\n\n"
+        "直前の音声区間の文字起こしを文脈として示します:\n"
+        "<previous_transcript>\n"
+        f"{safe_context}\n"
+        "</previous_transcript>\n\n"
+        "これは文脈参照専用です。添付された現在の音声区間だけを文字起こししてください。\n"
+        "現在の音声で実際に聞こえない内容を補完したり、直前の文字起こしを繰り返したりしないでください。"
     )
 
 
@@ -117,6 +131,7 @@ class ServerGemmaTranscriber:
         self.port = port
         self.base_url = f"http://{host}:{port}"
         self.prompt = build_transcription_prompt(glossary)
+        self.glossary = glossary
         self.max_transcription_split_depth = max(0, max_transcription_split_depth)
         self.vad_session = vad_session
         extra_args: list[str] = []
@@ -146,12 +161,12 @@ class ServerGemmaTranscriber:
         )
         self.process = self._server.process
 
-    def transcribe(self, chunk: AudioChunk) -> TranscriptChunk:
+    def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
         payload = self.prepare_payload(chunk)
-        text = self.transcribe_payload(chunk, payload)
+        text = self.transcribe_payload(chunk, payload, previous_transcript)
         return TranscriptChunk(chunk=chunk, text=text)
 
-    def prepare_payload(self, chunk: AudioChunk) -> dict:
+    def prepare_payload(self, chunk: AudioChunk, previous_transcript: str | None = None) -> dict:
         wav_path = chunk.wav_path or self.temp_dir / f"server_transcribe_{chunk.index:05d}.wav"
         if chunk.wav_path is None:
             write_wav_segment(chunk.samples, 16000, wav_path)
@@ -165,57 +180,69 @@ class ServerGemmaTranscriber:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": self.prompt},
+                        {"type": "text", "text": build_transcription_prompt(self.glossary, previous_transcript)},
                         {"type": "input_audio", "input_audio": {"data": audio_data, "format": "wav"}},
                     ],
                 }
             ],
         }
 
-    def transcribe_payload(self, chunk: AudioChunk, payload: dict, depth: int = 0) -> str:
-        cleaned = self._transcribe_payload_with_empty_retry(chunk, payload)
-        if not cleaned:
+    def transcribe_payload(self, chunk: AudioChunk, payload: dict, previous_transcript: str | None = None) -> str:
+        cleaned = self._transcribe_payload_once(chunk, payload)
+        if cleaned == UNTRANSCRIBABLE_AUDIO_TOKEN:
             return ""
-        if _is_suspect_transcript(cleaned, chunk) and depth < self.max_transcription_split_depth:
-            subchunks = split_chunk_with_tighter_vad(
-                chunk,
-                sample_rate=16000,
-                temp_dir=self.temp_dir,
-                keep_temp=True,
-                session=self.vad_session,
+        if cleaned and not _is_suspect_transcript(cleaned, chunk):
+            return cleaned
+        recovered = self._recover_with_split(chunk, depth=0)
+        if recovered:
+            return recovered
+        if not previous_transcript:
+            print(
+                f"Warning: contextual retry skipped for chunk {chunk.index}; preceding transcript unavailable.",
+                flush=True,
             )
-            if len(subchunks) >= 2:
-                print(
-                    f"Warning: suspect transcription for chunk {chunk.index} "
-                    f"[{chunk.start:.2f}-{chunk.end:.2f}s]; retrying as {len(subchunks)} subchunks.",
-                    flush=True,
-                )
-                parts = []
-                for subchunk in subchunks:
-                    subpayload = self.prepare_payload(subchunk)
-                    parts.append(self.transcribe_payload(subchunk, subpayload, depth + 1))
-                merged = _merge_transcript_parts(parts)
-                if merged:
-                    return merged
-        return cleaned
+            return ""
+        print(f"Retrying chunk {chunk.index} with preceding transcript context...", flush=True)
+        contextual_payload = self.prepare_payload(chunk, previous_transcript)
+        contextual = self._transcribe_payload_once(chunk, contextual_payload)
+        if contextual == UNTRANSCRIBABLE_AUDIO_TOKEN:
+            return ""
+        if contextual and not _is_suspect_transcript(contextual, chunk) and not _repeats_context(contextual, previous_transcript):
+            return contextual
+        print(f"Warning: contextual transcription failed for chunk {chunk.index}; giving up.", flush=True)
+        return ""
 
-    def _transcribe_payload_with_empty_retry(self, chunk: AudioChunk, payload: dict) -> str:
-        for attempt in range(EMPTY_TRANSCRIPT_ATTEMPTS):
-            cleaned = self._transcribe_payload_once(chunk, payload)
-            if cleaned:
-                return cleaned
-            if attempt < EMPTY_TRANSCRIPT_ATTEMPTS - 1:
-                print(
-                    f"Warning: llama-server returned an empty transcript for chunk {chunk.index}; "
-                    f"retrying attempt {attempt + 2}/{EMPTY_TRANSCRIPT_ATTEMPTS}.",
-                    flush=True,
-                )
-                time.sleep(1)
+    def _recover_with_split(self, chunk: AudioChunk, depth: int) -> str:
+        if depth >= self.max_transcription_split_depth:
+            return ""
+        subchunks = split_chunk_with_tighter_vad(
+            chunk,
+            sample_rate=16000,
+            temp_dir=self.temp_dir,
+            keep_temp=True,
+            session=self.vad_session,
+        )
+        if len(subchunks) < 2:
+            return ""
         print(
-            f"Warning: llama-server returned an empty transcript for chunk {chunk.index} "
-            f"after {EMPTY_TRANSCRIPT_ATTEMPTS} attempts; skipping this chunk.",
+            f"Warning: unusable transcription for chunk {chunk.index} "
+            f"[{chunk.start:.2f}-{chunk.end:.2f}s]; retrying as {len(subchunks)} subchunks.",
             flush=True,
         )
+        parts: list[str] = []
+        for subchunk in subchunks:
+            subpayload = self.prepare_payload(subchunk)
+            part = self._transcribe_payload_once(subchunk, subpayload)
+            if part == UNTRANSCRIBABLE_AUDIO_TOKEN:
+                continue
+            if not part or _is_suspect_transcript(part, subchunk):
+                part = self._recover_with_split(subchunk, depth + 1)
+            if part:
+                parts.append(part)
+        merged = _merge_transcript_parts(parts)
+        if merged and not _is_suspect_transcript(merged, chunk):
+            return merged
+        print(f"Warning: tighter-VAD recovery exhausted for chunk {chunk.index}.", flush=True)
         return ""
 
     def _transcribe_payload_once(self, chunk: AudioChunk, payload: dict) -> str:
@@ -243,6 +270,15 @@ class ServerGemmaTranscriber:
 def _merge_transcript_parts(parts: list[str]) -> str:
     cleaned = [part.strip() for part in parts if part.strip()]
     return "".join(cleaned)
+
+
+def _repeats_context(text: str, previous_transcript: str) -> bool:
+    normalized = re.sub(r"\s+", "", text)
+    previous = re.sub(r"\s+", "", previous_transcript)
+    if not normalized or not previous:
+        return False
+    maximum = min(len(normalized), len(previous), 24)
+    return any(normalized[:overlap] == previous[-overlap:] for overlap in range(maximum, 7, -1))
 
 
 def _is_suspect_transcript(text: str, chunk: AudioChunk) -> bool:

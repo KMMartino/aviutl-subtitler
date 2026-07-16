@@ -122,7 +122,7 @@ class HostedHttpTests(unittest.TestCase):
     @mock.patch("subtitler.hosted_http.random.uniform", return_value=0.0)
     @mock.patch("subtitler.hosted_http.time.sleep")
     @mock.patch("subtitler.hosted_http.urllib.request.urlopen")
-    def test_fallback_runs_only_after_primary_retry_exhaustion(self, urlopen, sleep, _uniform) -> None:
+    def test_dead_request_is_exposed_after_primary_retry_exhaustion(self, urlopen, sleep, _uniform) -> None:
         urlopen.side_effect = [_http_error(503), _http_error(503), _http_error(503)]
         chunk = AudioChunk(index=1, start=0.0, end=1.0, samples=[])
 
@@ -142,14 +142,11 @@ class HostedHttpTests(unittest.TestCase):
                 raise AssertionError("unreachable")
 
         fallback = mock.Mock(provider="openai", model="fallback")
-        fallback.transcribe.return_value = TranscriptChunk(chunk=chunk, text="recovered")
-
-        result = FallbackTranscriber(Primary(), fallback).transcribe(chunk)
-
-        self.assertEqual(result.text, "recovered")
+        with self.assertRaises(DeadTranscriptionRequest):
+            FallbackTranscriber(Primary(), fallback).transcribe(chunk)
         self.assertEqual(urlopen.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
-        fallback.transcribe.assert_called_once_with(chunk)
+        fallback.transcribe.assert_not_called()
 
     def test_nonretryable_primary_failure_does_not_invoke_fallback(self) -> None:
         chunk = AudioChunk(index=1, start=0.0, end=1.0, samples=[])

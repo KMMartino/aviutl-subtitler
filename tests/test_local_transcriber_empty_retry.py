@@ -1,54 +1,79 @@
 import contextlib
 import io
 import unittest
+from unittest import mock
 
 from subtitler.models import AudioChunk
-from subtitler.transcriber import ServerGemmaTranscriber
+from subtitler.transcriber import ServerGemmaTranscriber, UNTRANSCRIBABLE_AUDIO_TOKEN
 
 
 def _chunk(index: int = 370) -> AudioChunk:
     return AudioChunk(index=index, start=0.0, end=3.0, samples=[])
 
 
-class LocalTranscriberEmptyRetryTests(unittest.TestCase):
-    def test_empty_llama_server_transcript_retries_then_returns_empty(self) -> None:
-        transcriber = ServerGemmaTranscriber.__new__(ServerGemmaTranscriber)
-        transcriber.max_transcription_split_depth = 2
-        calls = []
+def _transcriber() -> ServerGemmaTranscriber:
+    transcriber = ServerGemmaTranscriber.__new__(ServerGemmaTranscriber)
+    transcriber.max_transcription_split_depth = 2
+    transcriber.glossary = None
+    return transcriber
 
-        def empty_once(chunk, payload):
-            calls.append((chunk, payload))
-            return ""
 
-        transcriber._transcribe_payload_once = empty_once
+class LocalTranscriberRecoveryTests(unittest.TestCase):
+    def test_usable_normal_transcript_returns_without_recovery(self) -> None:
+        transcriber = _transcriber()
+        transcriber._transcribe_payload_once = mock.Mock(return_value="正常な文字起こし")
+        transcriber._recover_with_split = mock.Mock()
+
+        text = transcriber.transcribe_payload(_chunk(), {"messages": []}, "直前の文")
+
+        self.assertEqual(text, "正常な文字起こし")
+        transcriber._recover_with_split.assert_not_called()
+
+    def test_empty_transcript_runs_split_then_skips_context_without_predecessor(self) -> None:
+        transcriber = _transcriber()
+        transcriber._transcribe_payload_once = mock.Mock(return_value="")
+        transcriber._recover_with_split = mock.Mock(return_value="")
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             text = transcriber.transcribe_payload(_chunk(), {"messages": []})
 
         self.assertEqual(text, "")
-        self.assertEqual(len(calls), 2)
-        self.assertIn("retrying attempt 2/2", output.getvalue())
-        self.assertIn("skipping this chunk", output.getvalue())
+        transcriber._recover_with_split.assert_called_once()
+        self.assertEqual(transcriber._transcribe_payload_once.call_count, 1)
+        self.assertIn("preceding transcript unavailable", output.getvalue())
 
-    def test_empty_llama_server_transcript_can_recover_on_retry(self) -> None:
-        transcriber = ServerGemmaTranscriber.__new__(ServerGemmaTranscriber)
-        transcriber.max_transcription_split_depth = 2
-        responses = ["", "復帰しました"]
+    def test_failed_split_retries_original_with_context(self) -> None:
+        transcriber = _transcriber()
+        transcriber._transcribe_payload_once = mock.Mock(side_effect=["", "文脈で復帰しました"])
+        transcriber._recover_with_split = mock.Mock(return_value="")
+        transcriber.prepare_payload = mock.Mock(return_value={"contextual": True})
+        chunk = _chunk()
 
-        def recover_on_retry(chunk, payload):
-            return responses.pop(0)
+        text = transcriber.transcribe_payload(chunk, {"normal": True}, "前の発話です")
 
-        transcriber._transcribe_payload_once = recover_on_retry
+        self.assertEqual(text, "文脈で復帰しました")
+        transcriber.prepare_payload.assert_called_once_with(chunk, "前の発話です")
+        self.assertEqual(transcriber._transcribe_payload_once.call_args_list[-1].args, (chunk, {"contextual": True}))
 
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            text = transcriber.transcribe_payload(_chunk(), {"messages": []})
+    def test_successful_split_prevents_context_retry(self) -> None:
+        transcriber = _transcriber()
+        transcriber._transcribe_payload_once = mock.Mock(return_value="")
+        transcriber._recover_with_split = mock.Mock(return_value="分割で復帰しました")
+        transcriber.prepare_payload = mock.Mock()
 
-        self.assertEqual(text, "復帰しました")
-        self.assertEqual(responses, [])
-        self.assertIn("retrying attempt 2/2", output.getvalue())
-        self.assertNotIn("skipping this chunk", output.getvalue())
+        text = transcriber.transcribe_payload(_chunk(), {"messages": []}, "前の発話")
+
+        self.assertEqual(text, "分割で復帰しました")
+        transcriber.prepare_payload.assert_not_called()
+
+    def test_untranscribable_response_does_not_recover(self) -> None:
+        transcriber = _transcriber()
+        transcriber._transcribe_payload_once = mock.Mock(return_value=UNTRANSCRIBABLE_AUDIO_TOKEN)
+        transcriber._recover_with_split = mock.Mock()
+
+        self.assertEqual(transcriber.transcribe_payload(_chunk(), {"messages": []}, "前の発話"), "")
+        transcriber._recover_with_split.assert_not_called()
 
 
 if __name__ == "__main__":
