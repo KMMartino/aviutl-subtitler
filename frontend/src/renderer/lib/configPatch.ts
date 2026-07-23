@@ -37,7 +37,11 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
       estimateCostOnly: Boolean(config.cost?.estimate_cost_only)
     },
     additionalSettings: {
-      youtubeChapters: Boolean(config.additional_settings?.youtube_chapters)
+      youtubeChapters: Boolean(config.additional_settings?.youtube_chapters),
+      cutSilenceMode: ["automatic", "review"].includes(String(config.additional_settings?.cut_silence_mode))
+        ? config.additional_settings?.cut_silence_mode as "automatic" | "review"
+        : "off",
+      renderCutVideo: Boolean(config.additional_settings?.render_cut_video)
     },
     cleanupGroupPolicy: {
       minSec: Number(config.cleanup?.group_min_sec ?? 60),
@@ -92,6 +96,12 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.cost.allow_api_spend = settings.cost?.allowApiSpend ?? false;
   next.cost.estimate_cost_only = settings.cost?.estimateCostOnly ?? false;
   next.additional_settings.youtube_chapters = workflow === "hosted" ? settings.additionalSettings?.youtubeChapters ?? false : false;
+  next.additional_settings.cut_silence_mode = workflow === "local" || workflow === "hosted"
+    ? settings.additionalSettings?.cutSilenceMode ?? "off"
+    : "off";
+  next.additional_settings.render_cut_video = workflow === "local" || workflow === "hosted"
+    ? settings.additionalSettings?.renderCutVideo ?? false
+    : false;
   if (settings.cleanupGroupPolicy !== undefined) {
     next.cleanup.group_min_sec = settings.cleanupGroupPolicy.minSec;
     next.cleanup.group_duration_divisor = settings.cleanupGroupPolicy.durationDivisor;

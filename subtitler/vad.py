@@ -259,7 +259,7 @@ def segment_speech_with_groups(
     keep_temp: bool = False,
     progress_callback: Callable[[str, float], None] | None = None,
     session: VadSession | None = None,
-) -> tuple[list[AudioChunk], list[AudioChunk]]:
+) -> tuple[list[AudioChunk], list[AudioChunk], list[tuple[float, float]]]:
     """Run fine VAD and tag chunks with cleanup groups split at the largest gaps."""
     try:
         import torch  # noqa: F401
@@ -300,7 +300,12 @@ def segment_speech_with_groups(
         keep_temp=keep_temp,
     )
     groups = assign_vad_groups_by_largest_gaps(fine_chunks, max_group_sec=max(cleanup_group_max_sec, max_chunk_sec))
-    return fine_chunks, groups
+    raw_intervals = [
+        (float(item["start"]) / sample_rate, float(item["end"]) / sample_rate)
+        for item in fine_speech
+        if int(item["end"]) > int(item["start"])
+    ]
+    return fine_chunks, groups, raw_intervals
 
 
 def assign_vad_groups_by_largest_gaps(chunks: list[AudioChunk], max_group_sec: float) -> list[AudioChunk]:

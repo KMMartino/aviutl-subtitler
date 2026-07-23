@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .errors import ExoWriteError
-from .models import ExoMarker, ExoSettings, Subtitle
+from .models import ExoMarker, ExoMediaPlan, ExoMediaSegment, ExoSettings, Subtitle
 
 
 def encode_text_for_exo(text: str) -> str:
@@ -145,6 +146,53 @@ Z=0.0
 blend=0"""
 
 
+def generate_exo_video_object(index: int, segment: ExoMediaSegment, source_path: str) -> str:
+    return f"""[{index}]
+start={segment.output_start_frame}
+end={segment.output_end_frame}
+layer=1
+group={segment.group_id}
+overlay=1
+camera=0
+[{index}.0]
+_name=動画ファイル
+再生位置={segment.source_start_frame}
+再生速度=100.0
+ループ再生=0
+アルファチャンネルを読み込む=0
+file={source_path}
+[{index}.1]
+_name=標準描画
+X=0.0
+Y=0.0
+Z=0.0
+拡大率=100.00
+透明度=0.0
+回転=0.00
+blend=0"""
+
+
+def generate_exo_audio_object(index: int, segment: ExoMediaSegment, source_path: str) -> str:
+    return f"""[{index}]
+start={segment.output_start_frame}
+end={segment.output_end_frame}
+layer=2
+group={segment.group_id}
+overlay=1
+audio=1
+[{index}.0]
+_name=音声ファイル
+再生位置=0.00
+再生速度=100.0
+ループ再生=0
+動画ファイルと連携=1
+file={source_path}
+[{index}.1]
+_name=標準再生
+音量=100.0
+左右=0.0"""
+
+
 def generate_exo_file(
     subtitles: list[Subtitle],
     settings: ExoSettings,
@@ -152,8 +200,13 @@ def generate_exo_file(
     insert_initial_empty: bool = True,
     chapter_markers: list[ExoMarker] | None = None,
     mistranscription_markers: list[ExoMarker] | None = None,
+    media_plan: ExoMediaPlan | None = None,
 ) -> str:
     _validate_shift_jis_literal("exo.font", settings.font)
+    media_source = ""
+    if media_plan is not None:
+        media_source = str(media_plan.source_path.resolve())
+        _validate_media_path(media_source)
     total_frames = time_to_frame(total_duration, settings.rate)
     header = f"""[exedit]
 width={settings.width}
@@ -182,11 +235,21 @@ audio_ch={settings.audio_ch}"""
 
     objects = []
     index = 0
+    if media_plan is not None:
+        for segment in media_plan.segments:
+            objects.append(generate_exo_video_object(index, segment, media_source))
+            index += 1
+        for segment in media_plan.segments:
+            objects.append(generate_exo_audio_object(index, segment, media_source))
+            index += 1
+    subtitle_layer = 3 if media_plan is not None else 1
+    qa_layer = 4 if media_plan is not None else 2
+    chapter_layer = 5 if media_plan is not None else 3
     for start, end, text in frame_ranges:
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=1, include_animation=True))
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=subtitle_layer, include_animation=True))
         index += 1
     for start, end, text in _marker_frame_ranges(chapter_markers or [], settings.rate):
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=3))
+        objects.append(generate_exo_object(index, start, end, text, settings, layer=chapter_layer))
         index += 1
     for start, end, text in _marker_frame_ranges(mistranscription_markers or [], settings.rate):
         objects.append(
@@ -196,7 +259,7 @@ audio_ch={settings.audio_ch}"""
                 end,
                 text,
                 settings,
-                layer=2,
+                layer=qa_layer,
                 font_size=max(24, int(settings.font_size * 0.55)),
                 text_color=_diagnostic_text_color(text),
                 y_position=max(40.0, settings.y_position - settings.font_size * 1.25),
@@ -204,6 +267,12 @@ audio_ch={settings.audio_ch}"""
         )
         index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
+
+
+def _validate_media_path(value: str) -> None:
+    if "\r" in value or "\n" in value:
+        raise ExoWriteError("EXO media path cannot contain a line break")
+    _validate_shift_jis_literal("media_plan.source_path", value)
 
 
 def _diagnostic_text_color(text: str) -> str:
@@ -241,9 +310,15 @@ def write_exo(path: Path, content: str) -> None:
             f"unsupported character {unsupported!r} at character offset {exc.start}"
         ) from exc
     try:
-        path.write_text(content, encoding="shift_jis")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(content, encoding="shift_jis")
+        os.replace(temporary, path)
     except OSError as exc:
         raise ExoWriteError(f"Could not write EXO file: {path}") from exc
+    finally:
+        if "temporary" in locals():
+            temporary.unlink(missing_ok=True)
 
 
 def _validate_shift_jis_literal(field: str, value: str) -> None:

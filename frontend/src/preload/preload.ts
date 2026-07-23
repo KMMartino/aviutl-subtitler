@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
-import type { AppSettings, LlamaBackendId, RunEvent, RunRequest, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
+import type { AppSettings, LlamaBackendId, RunEvent, RunRequest, SilenceCutDecision, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 
 contextBridge.exposeInMainWorld("subtitler", {
   chooseInputFile: (defaultPath?: string) => ipcRenderer.invoke("dialog:input-file", defaultPath),
@@ -42,6 +42,11 @@ contextBridge.exposeInMainWorld("subtitler", {
   downloadAlignmentModel: () => ipcRenderer.invoke("runtime:download-alignment"),
   deleteAlignmentModel: () => ipcRenderer.invoke("runtime:delete-alignment"),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),
+  submitSilenceReview: (runId: string, reviewId: string, decisions: Array<{ candidateId: string; decision: SilenceCutDecision }>) => ipcRenderer.invoke("run:submit-silence-review", runId, reviewId, decisions),
+  probeCutSilenceEncoders: () => ipcRenderer.invoke("silence:probe-encoders"),
+  getSilenceSource: (runId: string) => ipcRenderer.invoke("silence:source", runId),
+  getSilenceProxy: (runId: string, candidateId: string, variant: "original" | "seam") => ipcRenderer.invoke("silence:proxy", runId, candidateId, variant),
+  prefetchSilenceProxies: (runId: string, candidateIds: string[]) => ipcRenderer.invoke("silence:prefetch", runId, candidateIds),
   cancelRun: (runId: string) => ipcRenderer.invoke("run:cancel", runId),
   onRunEvent: (callback: (event: RunEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, runEvent: RunEvent) => callback(runEvent);

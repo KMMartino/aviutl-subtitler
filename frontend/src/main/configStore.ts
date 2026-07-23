@@ -7,7 +7,7 @@ import { defaultPythonPath } from "./python";
 import { runtimePaths, type RuntimePaths } from "./paths";
 
 const legacyUserDataDirName = "subtitler-frontend";
-const settingsSchemaVersion = 2;
+const settingsSchemaVersion = 3;
 const remoteAlignmentModel = "MahmoudAshraf/mms-300m-1130-forced-aligner";
 const appStateMarkers = ["settings.json", "settings.json.bak", "configs", ".env", "glossary.txt", "tools", "models", "python"];
 
@@ -41,6 +41,9 @@ export function defaultSettings(paths = runtimePaths()): AppSettings {
     modelDownloadMode: "direct",
     alignmentModel: remoteAlignmentModel,
     alignmentOfflineModelCache: false,
+    cutSilenceEncoderPreset: "unconfigured",
+    silencePreviewHeight: 360,
+    silencePreviewFps: 8,
   };
 }
 
@@ -209,6 +212,9 @@ function validateSettings(value: unknown, paths: RuntimePaths): AppSettings {
   if (!["vulkan", "cuda-12"].includes(String(merged.llamaBackend))) throw new Error("Settings contain an invalid llama backend.");
   if (!["auto", "managed", "path"].includes(String(merged.ffmpegMode))) throw new Error("Settings contain an invalid FFmpeg mode.");
   if (!["direct", "huggingface"].includes(String(merged.modelDownloadMode))) throw new Error("Settings contain an invalid model download mode.");
+  if (!["unconfigured", "hevc-amf-cqp21", "hevc-nvenc-qp21", "hevc-qsv-q21", "libx265-crf21"].includes(String(merged.cutSilenceEncoderPreset))) throw new Error("Settings contain an invalid Cut silence encoder.");
+  if (![240, 360, 480, 720].includes(Number(merged.silencePreviewHeight))) throw new Error("Settings contain an invalid silence preview height.");
+  if (![4, 8, 12, 24].includes(Number(merged.silencePreviewFps))) throw new Error("Settings contain an invalid silence preview frame rate.");
   for (const key of ["pythonPath", "envFile", "lastInputPath", "lastOutputDir", "lastSidecarDir", "modelsDirectory", "localModelProfile", "alignmentModel"] as const) {
     if (typeof merged[key] !== "string") throw new Error(`Settings field ${key} must be a string.`);
   }

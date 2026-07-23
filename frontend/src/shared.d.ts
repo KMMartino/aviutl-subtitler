@@ -1,4 +1,4 @@
-import type { AlignmentModelStatus, AppSettings, AppState, CurrentLlamaServerState, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
+import type { AlignmentModelStatus, AppSettings, AppState, CurrentLlamaServerState, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
 
 export {};
 
@@ -45,6 +45,11 @@ declare global {
       downloadAlignmentModel(): Promise<AlignmentModelStatus>;
       deleteAlignmentModel(): Promise<AlignmentModelStatus>;
       startRun(request: RunRequest): Promise<{ runId: string }>;
+      submitSilenceReview(runId: string, reviewId: string, decisions: Array<{ candidateId: string; decision: SilenceCutDecision }>): Promise<void>;
+      probeCutSilenceEncoders(): Promise<EncoderProbeResult[]>;
+      getSilenceSource(runId: string): Promise<{ url: string }>;
+      getSilenceProxy(runId: string, candidateId: string, variant: "original" | "seam"): Promise<{ url: string }>;
+      prefetchSilenceProxies(runId: string, candidateIds: string[]): Promise<void>;
       cancelRun(runId: string): Promise<void>;
       onRunEvent(callback: (event: RunEvent) => void): () => void;
       openPath(path: string): Promise<string>;

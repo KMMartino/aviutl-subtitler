@@ -28,6 +28,13 @@ from subtitler.run_context import (
     default_output_path,
     prepare_run_context,
 )
+from subtitler.silence_cut import (
+    ENCODER_ARGS,
+    build_cut_candidates,
+    emit_frontend_event,
+    execute_silence_cut,
+    write_silence_manifest,
+)
 from subtitler.subtitle_stage import (
     build_refiner,
     count_progress_reporter,
@@ -65,12 +72,16 @@ def parse_args() -> CliArguments:
     parser.add_argument("--no-sidecars", action="store_true", help="Do not create diagnostic or intermediate sidecar files")
     parser.add_argument("--glossary", help="Glossary text file. Defaults to auto-discovery beside input or project")
     parser.add_argument("--no-glossary", action="store_true", help="Disable glossary loading")
+    parser.add_argument("--frontend-protocol", choices=["stdio-v1"], help=argparse.SUPPRESS)
+    parser.add_argument("--cut-silence-encoder", choices=sorted(ENCODER_ARGS), help="Encoder preset for Cut silence")
     return CliArguments(**vars(parser.parse_args()))
 
 
 def main() -> int:
     started = time.monotonic()
     args = parse_args()
+    pending_cut_video: Path | None = None
+    output_committed = False
     try:
         context = prepare_run_context(args)
         input_path = context.input_path
@@ -132,6 +143,76 @@ def main() -> int:
             chapter_markers = subtitle_result.chapter_markers
             mistranscription_markers = subtitle_result.mistranscription_markers
 
+            exo_cfg = config["exo"]
+            settings = ExoSettings(
+                width=int(exo_cfg["width"]),
+                height=int(exo_cfg["height"]),
+                rate=int(exo_cfg["fps"]),
+                font=exo_cfg["font"],
+                font_size=int(exo_cfg["font_size"]),
+                y_position=float(exo_cfg["y_position"]),
+            )
+
+            cut_mode = config["additional_settings"]["cut_silence_mode"]
+            render_cut_video = bool(config["additional_settings"].get("render_cut_video", False))
+            raw_vad_intervals = backend_result.raw_vad_speech_intervals
+            cut_candidates = build_cut_candidates(raw_vad_intervals) if cut_mode != "off" else []
+            cut_outcome = execute_silence_cut(
+                mode=cut_mode,
+                candidates=cut_candidates,
+                raw_intervals=raw_vad_intervals,
+                subtitles=subtitles,
+                chapter_markers=chapter_markers,
+                qa_markers=mistranscription_markers,
+                duration_sec=duration,
+                input_path=input_path,
+                exo_path=output_path,
+                encoder_preset=args.cut_silence_encoder,
+                frontend_protocol=args.frontend_protocol,
+                render_cut_video=render_cut_video,
+                project_fps=settings.rate,
+            )
+            pending_cut_video = cut_outcome.cut_video_path
+            subtitles = cut_outcome.subtitles
+            chapter_markers = cut_outcome.chapter_markers
+            mistranscription_markers = cut_outcome.qa_markers
+            duration = cut_outcome.duration_sec
+            backend_result.metadata["silence_cut"] = {
+                "mode": cut_mode,
+                "candidate_count": len(cut_candidates),
+                "accepted_cut_count": len(cut_outcome.accepted_cuts),
+                "removed_duration_sec": sum(end - start for start, end in cut_outcome.accepted_cuts),
+                "output_strategy": cut_outcome.output_strategy,
+                "media_source_path": str(cut_outcome.media_source_path) if cut_outcome.media_source_path else None,
+                "media_segment_count": len(cut_outcome.media_plan.segments) if cut_outcome.media_plan else 0,
+                "frame_rate_mode": cut_outcome.frame_rate_mode,
+                "cut_video_path": str(cut_outcome.cut_video_path) if cut_outcome.cut_video_path else None,
+                "omitted_streams": cut_outcome.omitted_streams,
+            }
+            if artifacts.silence_cuts is not None and cut_mode != "off":
+                write_silence_manifest(
+                    artifacts.silence_cuts,
+                    raw_intervals=raw_vad_intervals,
+                    candidates=cut_candidates,
+                    outcome=cut_outcome,
+                    encoder_preset=args.cut_silence_encoder,
+                    project_fps=settings.rate,
+                )
+            if cut_mode != "off":
+                if cut_outcome.cut_video_path is not None:
+                    print(f"Cut video: {cut_outcome.cut_video_path}", flush=True)
+                    if cut_outcome.omitted_streams:
+                        print(f"Warning: Cut video omitted {', '.join(cut_outcome.omitted_streams)}.", flush=True)
+                elif cut_outcome.output_strategy == "exo-source":
+                    segment_count = len(cut_outcome.media_plan.segments) if cut_outcome.media_plan else 0
+                    print(
+                        f"EXO silence cutting: {segment_count} source video/audio segment(s); "
+                        "no cut video was rendered.",
+                        flush=True,
+                    )
+                else:
+                    print("No silence cuts were selected; no media output was created.", flush=True)
+
             profiler.write()
             if artifacts.api_usage is not None:
                 api_usage.write_csv(artifacts.api_usage)
@@ -150,35 +231,43 @@ def main() -> int:
                     argv=sys.argv[1:],
                 )
 
-            exo_cfg = config["exo"]
-            settings = ExoSettings(
-                width=int(exo_cfg["width"]),
-                height=int(exo_cfg["height"]),
-                rate=int(exo_cfg["fps"]),
-                font=exo_cfg["font"],
-                font_size=int(exo_cfg["font_size"]),
-                y_position=float(exo_cfg["y_position"]),
-            )
-            content = generate_exo_file(
-                subtitles,
-                settings,
-                duration,
-                insert_initial_empty=True,
-                chapter_markers=chapter_markers,
-                mistranscription_markers=mistranscription_markers,
-            )
-            write_exo(output_path, content)
+            try:
+                content = generate_exo_file(
+                    subtitles,
+                    settings,
+                    duration,
+                    insert_initial_empty=True,
+                    chapter_markers=chapter_markers,
+                    mistranscription_markers=mistranscription_markers,
+                    media_plan=cut_outcome.media_plan,
+                )
+                write_exo(output_path, content)
+                output_committed = True
+                if cut_outcome.cut_video_path is not None and args.frontend_protocol:
+                    emit_frontend_event("silence-cut-output", path=str(cut_outcome.cut_video_path))
+            except Exception:
+                if cut_outcome.cut_video_path is not None:
+                    cut_outcome.cut_video_path.unlink(missing_ok=True)
+                raise
 
         print(f"Successfully generated: {output_path}")
         print(f"Total subtitles: {len(subtitles)}")
         print(f"Run time: {_format_elapsed(time.monotonic() - started)}")
         return 0
     except SubtitlerError as exc:
+        if pending_cut_video is not None and not output_committed:
+            pending_cut_video.unlink(missing_ok=True)
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        if pending_cut_video is not None and not output_committed:
+            pending_cut_video.unlink(missing_ok=True)
         print("Interrupted.", file=sys.stderr)
         return 130
+    except Exception:
+        if pending_cut_video is not None and not output_committed:
+            pending_cut_video.unlink(missing_ok=True)
+        raise
 
 
 def _build_backend(config: dict, api_usage: ApiUsageLedger, profiler: PipelineProfiler):

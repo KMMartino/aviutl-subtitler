@@ -93,6 +93,20 @@ class ExoSettings:
     y_position: float = 717.0
 
 
+@dataclass(frozen=True)
+class ExoMediaSegment:
+    output_start_frame: int
+    output_end_frame: int
+    source_start_frame: int
+    group_id: int
+
+
+@dataclass(frozen=True)
+class ExoMediaPlan:
+    source_path: Path
+    segments: list[ExoMediaSegment]
+
+
 @dataclass
 class SplitPlanResult:
     lines: list[str] | None

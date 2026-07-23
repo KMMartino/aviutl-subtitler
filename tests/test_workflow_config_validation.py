@@ -152,6 +152,35 @@ class WorkflowConfigValidationTests(unittest.TestCase):
                 with self.assertRaises(SubtitlerError):
                     validate_workflow_config(config, workflow=workflow, check_paths=False)
 
+    def test_cut_silence_modes_are_allowed_for_short_workflows(self):
+        for workflow in ("local", "hosted"):
+            for mode in ("automatic", "review"):
+                with self.subTest(workflow=workflow, mode=mode):
+                    config = load_workflow_config(workflow)
+                    config["additional_settings"]["cut_silence_mode"] = mode
+                    validate_workflow_config(config, workflow=workflow, check_paths=False)
+
+    def test_cut_silence_is_rejected_for_long_stream_workflows(self):
+        for workflow in ("local-long-stream", "hosted-long-stream"):
+            config = load_workflow_config(workflow)
+            config["additional_settings"]["cut_silence_mode"] = "automatic"
+            with self.assertRaises(SubtitlerError):
+                validate_workflow_config(config, workflow=workflow, check_paths=False)
+
+    def test_invalid_cut_silence_mode_is_rejected(self):
+        self.assert_invalid_field("additional_settings", "cut_silence_mode", "sometimes")
+
+    def test_render_cut_video_is_allowed_only_for_short_workflows(self):
+        for workflow in ("local", "hosted"):
+            config = load_workflow_config(workflow)
+            config["additional_settings"]["render_cut_video"] = True
+            validate_workflow_config(config, workflow=workflow, check_paths=False)
+        for workflow in ("local-long-stream", "hosted-long-stream"):
+            config = load_workflow_config(workflow)
+            config["additional_settings"]["render_cut_video"] = True
+            with self.assertRaises(SubtitlerError):
+                validate_workflow_config(config, workflow=workflow, check_paths=False)
+
     def test_boolean_fields_require_actual_booleans(self):
         fields = (
             ("alignment", "offline_model_cache"),
@@ -162,6 +191,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("cost", "allow_api_spend"),
             ("cost", "estimate_cost_only"),
             ("additional_settings", "youtube_chapters"),
+            ("additional_settings", "render_cut_video"),
         )
         for section, field in fields:
             with self.subTest(field=f"{section}.{field}"):

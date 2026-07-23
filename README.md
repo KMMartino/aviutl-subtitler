@@ -54,6 +54,7 @@ input
 --profile
 --audio-track N
 --sidecar-dir PATH
+--cut-silence-encoder hevc-amf-cqp21|hevc-nvenc-qp21|hevc-qsv-q21|libx265-crf21
 ```
 
 Everything else is configured in JSON.
@@ -144,6 +145,8 @@ Glossary   edit project glossary.txt
 ```
 
 The **Outputs** panel owns output paths. The EXO folder button opens the EXO location. Sidecar files can be enabled or disabled there; if the sidecar directory has not been generated yet, the sidecar location button opens its parent directory.
+
+The short local and hosted workflows also offer **Cut silence** under Additional Settings. Proposed removals shorter than 0.5 seconds are ignored so tiny edits do not disrupt the video's flow. Enable **Review cuts** to open a full-window visual/audio seam review with **Accept cut**, **Reject cut**, and **Mark and reject** decisions; otherwise every safe VAD-derived internal cut is accepted automatically. By default, accepted cuts are non-destructive: the EXO contains contiguous video and linked-audio objects referencing the original constant-frame-rate source, using AviUtl's default first audio track. Keep the referenced source at the same path, as with ordinary AviUtl media objects. **Re-encode cut video** optionally creates a collision-safe constant-frame-rate `.cut.mkv`, retains all audio tracks as AAC, and makes the EXO reference that MKV; only this optional mode requires a validated encoder and `--cut-silence-encoder` for CLI use. Variable-frame-rate sources are warned about but never switch modes automatically.
 
 For local workflows, the frontend manages selectable **8 GB**, **12 GB**, and **16 GB GPU Profiles (Gemma)** under its configurable models directory. Each profile installs an appropriately quantized transcription model, matching audio projector, and cleanup model while reserving VRAM for runtime context.
 

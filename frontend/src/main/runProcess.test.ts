@@ -22,12 +22,13 @@ vi.mock("./python", () => ({
   }),
 }));
 
-import { cancelRun, shutdownActiveRun, startRun, terminateProcessTree } from "./runProcess";
+import { cancelRun, shutdownActiveRun, startRun, submitSilenceReview, terminateProcessTree } from "./runProcess";
 
 class FixtureChild extends EventEmitter {
   pid = 43210;
   stdout = new PassThrough();
   stderr = new PassThrough();
+  stdin = new PassThrough();
   kill = vi.fn(() => true);
 }
 
@@ -167,5 +168,22 @@ describe("workflow process lifecycle", () => {
     expect(send).not.toHaveBeenCalled();
     expect(child.stdout.destroyed).toBe(true);
     expect(child.stderr.destroyed).toBe(true);
+  });
+
+  it("parses split control records without leaking them into stdout and submits matching decisions", async () => {
+    const child = new FixtureChild();
+    mocks.spawn.mockReturnValue(child);
+    const send = vi.fn();
+    const { runId } = startRun(fixtureWindow(send) as never, {} as never, "python.exe", {} as never);
+    const candidate = { id: "silence-0001", silenceStart: 2, silenceEnd: 7, cutStart: 2.5, cutEnd: 6.8, cutDuration: 4.3 };
+    const line = `@@SUBUTL_EVENT@@${JSON.stringify({ type: "silence-review-required", reviewId: "review-1", candidates: [candidate] })}\n`;
+    child.stdout.emit("data", Buffer.from(line.slice(0, 25)));
+    child.stdout.emit("data", Buffer.from(line.slice(25)));
+    expect(send).toHaveBeenCalledWith("run:event", expect.objectContaining({ type: "silence-review-required", reviewId: "review-1" }));
+    expect(send).not.toHaveBeenCalledWith("run:event", expect.objectContaining({ type: "stdout", text: expect.stringContaining("SUBUTL_EVENT") }));
+    const write = vi.spyOn(child.stdin, "write");
+    submitSilenceReview(runId, "review-1", [{ candidateId: "silence-0001", decision: "mark_and_reject" }]);
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('"decision":"mark_and_reject"'));
+    child.emit("close", 0, null);
   });
 });

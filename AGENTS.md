@@ -36,7 +36,7 @@ For EXO styling or layout changes, also generate a short EXO under `testing-grou
 
 ## EXO Invariants
 
-Normal subtitle objects include the sample reference's two `アニメーション効果` filters. QA/mistranscription markers use timeline `layer=2` while rendering above the normal subtitle on screen.
+Normal subtitle objects include the sample reference's two `アニメーション効果` filters. In subtitle-only EXOs, QA/mistranscription markers use timeline `layer=2` above normal subtitles on layer 1. Composite media EXOs reserve layers 1-2 for linked video/audio, use layer 3 for normal subtitles, layer 4 for QA markers, and layer 5 for chapters.
 
 ## Releases
 

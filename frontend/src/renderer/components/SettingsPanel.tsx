@@ -1,11 +1,12 @@
 import { Settings } from "lucide-react";
-import type { CoreWorkflowSettings, CurrentLlamaServerState, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
+import type { CoreWorkflowSettings, CurrentLlamaServerState, CutSilenceEncoderPreset, EncoderProbeResult, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import type { SettingsExpansion } from "../lib/settingsExpansion";
 import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
 import OutputSettingsSection from "./settings/OutputSettingsSection";
 import HostedSettingsSection from "./settings/HostedSettingsSection";
 import LocalSettingsSection from "./settings/LocalSettingsSection";
 import RuntimeSettingsSection from "./settings/RuntimeSettingsSection";
+import CutSilenceSettingsSection from "./settings/CutSilenceSettingsSection";
 
 type Props = {
   workflow: WorkflowName;
@@ -68,9 +69,18 @@ type Props = {
   onDeleteFfmpeg(): void;
   onDownloadAlignment(): void;
   onDeleteAlignment(): void;
+  cutSilenceEncoderPreset: CutSilenceEncoderPreset;
+  silencePreviewHeight: 240 | 360 | 480 | 720;
+  silencePreviewFps: 4 | 8 | 12 | 24;
+  encoderProbes: EncoderProbeResult[];
+  probingEncoders: boolean;
+  onCutSilenceEncoder(value: CutSilenceEncoderPreset): void;
+  onSilencePreviewHeight(value: 240 | 360 | 480 | 720): void;
+  onSilencePreviewFps(value: 4 | 8 | 12 | 24): void;
+  onProbeEncoders(): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onDownloadAlignment, onDeleteAlignment }: Props) {
+export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onDownloadAlignment, onDeleteAlignment, cutSilenceEncoderPreset, silencePreviewHeight, silencePreviewFps, encoderProbes, probingEncoders, onCutSilenceEncoder, onSilencePreviewHeight, onSilencePreviewFps, onProbeEncoders }: Props) {
   return (
     <section className="panel">
       <div className="panel-title">
@@ -137,6 +147,7 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           <HostedSettingsSection settings={settings} envFile={envFile} envStatus={envStatus} verification={hostedVerification} verifying={verifyingHosted} expanded={expansion.env} onToggle={() => onToggleExpansion("env")} onChange={onChange} onEnvFile={onEnvFile} onVerify={onVerifyHosted} />
         )}
         <OutputSettingsSection settings={settings} enabled={sidecarsEnabled} directory={sidecarDir} outputPath={outputPath} onChange={onChange} onDirectory={onSidecar} onEnabled={onSidecarsEnabled} />
+        {(workflow === "local" || workflow === "hosted") && <CutSilenceSettingsSection encoder={cutSilenceEncoderPreset} previewHeight={silencePreviewHeight} previewFps={silencePreviewFps} probes={encoderProbes} probing={probingEncoders} renderEnabled={Boolean(settings.additionalSettings?.renderCutVideo)} expanded={expansion.cutSilence} onToggle={() => onToggleExpansion("cutSilence")} onEncoder={onCutSilenceEncoder} onPreviewHeight={onSilencePreviewHeight} onPreviewFps={onSilencePreviewFps} onProbe={onProbeEncoders} />}
       </fieldset>
     </section>
   );

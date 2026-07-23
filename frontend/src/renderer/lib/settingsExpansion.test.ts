@@ -15,6 +15,7 @@ describe("settings expansion state", () => {
       ffmpeg: false,
       alignment: false,
       env: false,
+      cutSilence: false,
     });
   });
 

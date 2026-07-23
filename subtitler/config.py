@@ -180,11 +180,21 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _boolean(cost.get("allow_api_spend"), "cost.allow_api_spend")
     _boolean(cost.get("estimate_cost_only"), "cost.estimate_cost_only")
     _boolean(additional_settings.get("youtube_chapters"), "additional_settings.youtube_chapters")
+    _choice(
+        additional_settings.get("cut_silence_mode"),
+        {"off", "automatic", "review"},
+        "additional_settings.cut_silence_mode",
+    )
+    _boolean(additional_settings.get("render_cut_video"), "additional_settings.render_cut_video")
 
     expected_mode = "long-stream" if workflow.endswith("-long-stream") else "full"
     is_hosted = workflow.startswith("hosted")
     if additional_settings["youtube_chapters"] and workflow != "hosted":
         raise SubtitlerError("additional_settings.youtube_chapters is only supported by the hosted short workflow")
+    if additional_settings["cut_silence_mode"] != "off" and workflow not in {"local", "hosted"}:
+        raise SubtitlerError("additional_settings.cut_silence_mode is only supported by short workflows")
+    if additional_settings["render_cut_video"] and workflow not in {"local", "hosted"}:
+        raise SubtitlerError("additional_settings.render_cut_video is only supported by short workflows")
     valid_pairing = (
         backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"gemini", "openai"}
         if is_hosted
@@ -351,6 +361,8 @@ def _defaults() -> dict[str, Any]:
         },
         "additional_settings": {
             "youtube_chapters": False,
+            "cut_silence_mode": "off",
+            "render_cut_video": False,
         },
     }
 

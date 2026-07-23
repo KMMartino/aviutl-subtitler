@@ -36,6 +36,8 @@
     "llm_split_diagnostics": true
   },
   "additional_settings": {
-    "youtube_chapters": false
+    "youtube_chapters": false,
+    "cut_silence_mode": "off",
+    "render_cut_video": false
   }
 }

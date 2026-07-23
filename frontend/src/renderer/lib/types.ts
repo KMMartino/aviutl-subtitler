@@ -26,6 +26,30 @@ export type AppSettings = {
   modelDownloadMode?: "direct" | "huggingface";
   alignmentModel: string;
   alignmentOfflineModelCache: boolean;
+  cutSilenceEncoderPreset: CutSilenceEncoderPreset;
+  silencePreviewHeight: 240 | 360 | 480 | 720;
+  silencePreviewFps: 4 | 8 | 12 | 24;
+};
+
+export type CutSilenceMode = "off" | "automatic" | "review";
+export type CutSilenceEncoderPreset = "unconfigured" | "hevc-amf-cqp21" | "hevc-nvenc-qp21" | "hevc-qsv-q21" | "libx265-crf21";
+export type SilenceCutDecision = "accept_cut" | "reject_cut" | "mark_and_reject";
+export type MediaFrameRateMode = "reported-cfr" | "possible-vfr" | "unknown";
+
+export type SilenceCutCandidate = {
+  id: string;
+  silenceStart: number;
+  silenceEnd: number;
+  cutStart: number;
+  cutEnd: number;
+  cutDuration: number;
+};
+
+export type EncoderProbeResult = {
+  preset: Exclude<CutSilenceEncoderPreset, "unconfigured">;
+  label: string;
+  available: boolean;
+  error: string;
 };
 
 export type LlamaBackendId = "vulkan" | "cuda-12";
@@ -207,6 +231,8 @@ export type CoreWorkflowSettings = {
   };
   additionalSettings?: {
     youtubeChapters: boolean;
+    cutSilenceMode?: CutSilenceMode;
+    renderCutVideo?: boolean;
   };
   cleanupGroupPolicy?: CleanupGroupPolicy;
   alignment?: {
@@ -239,6 +265,9 @@ export type RunRequest = {
   sidecarDir?: string;
   profile: boolean;
   sidecarsEnabled: boolean;
+  cutSilenceEncoderPreset: CutSilenceEncoderPreset;
+  silencePreviewHeight: 240 | 360 | 480 | 720;
+  silencePreviewFps: 4 | 8 | 12 | 24;
 };
 
 export type RunEvent =
@@ -246,9 +275,12 @@ export type RunEvent =
   | { type: "stdout"; runId: string; text: string }
   | { type: "stderr"; runId: string; text: string }
   | { type: "exit"; runId: string; code: number | null; signal: string | null; elapsedMs: number; cancelled: boolean }
-  | { type: "error"; runId: string; message: string };
+  | { type: "error"; runId: string; message: string }
+  | { type: "silence-candidates"; runId: string; workflow: WorkflowName; candidates: SilenceCutCandidate[] }
+  | { type: "silence-review-required"; runId: string; reviewId: string; candidates: SilenceCutCandidate[] }
+  | { type: "silence-cut-output"; runId: string; path: string };
 
-export type RunState = "idle" | "running" | "succeeded" | "failed" | "cancelled";
+export type RunState = "idle" | "running" | "reviewing" | "succeeded" | "failed" | "cancelled";
 
 export type AppState = {
   settings: AppSettings;
@@ -279,6 +311,9 @@ export type MediaAnalysis = {
   videoCodec: string;
   width: number | null;
   height: number | null;
+  averageFrameRate: number | null;
+  nominalFrameRate: number | null;
+  frameRateMode: MediaFrameRateMode;
   thumbnailDataUrl: string;
   audioTracks: AudioTrackInfo[];
 };

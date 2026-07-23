@@ -9,6 +9,7 @@ const noArgs = new Set([
   "llama:check-latest", "glossary:read", "glossary:import", "runtime:setup-status", "runtime:create-managed-python",
   "runtime:install-python-requirements", "runtime:delete-managed-python", "runtime:download-ffmpeg", "runtime:delete-ffmpeg",
   "runtime:download-alignment", "runtime:delete-alignment",
+  "silence:probe-encoders",
 ]);
 
 export function assertTrustedSender(event: Pick<IpcMainInvokeEvent, "senderFrame">, packaged: boolean, expectedUrl?: string): void {
@@ -45,6 +46,10 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
     case "llama:download": case "llama:delete-managed": return enumArg(args, backends);
     case "glossary:save": exact(args, 1); if (typeof args[0] !== "string" || args[0].length > 5_000_000) fail(); return;
     case "run:cancel": exact(args, 1); assertShortString(args[0]); return;
+    case "silence:source": return shortStringArg(args);
+    case "silence:proxy": exact(args, 3); assertShortString(args[0]); assertShortString(args[1]); assertEnum(args[2], new Set(["original", "seam"])); return;
+    case "silence:prefetch": exact(args, 2); assertShortString(args[0]); if (!Array.isArray(args[1]) || args[1].length > 2) fail(); for (const item of args[1]) assertShortString(item); return;
+    case "run:submit-silence-review": return validateSilenceReview(args);
     case "run:start": exact(args, 1); validateRunRequest(args[0]); return;
     default: throw new Error(`No IPC validation policy for ${channel}`);
   }
@@ -66,21 +71,32 @@ export function installNavigationGuards(window: { webContents: GuardedWebContent
 export function contentSecurityPolicy(packaged: boolean): string {
   const scripts = packaged ? "script-src 'self'" : "script-src 'self' 'unsafe-inline'";
   const connections = packaged ? "connect-src 'self'" : "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*";
-  return `default-src 'self'; ${scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; ${connections}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+  return `default-src 'self'; ${scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' subutl-media: blob:; ${connections}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 }
 
 function validateRunRequest(value: unknown): void {
   assertPlainObject(value);
   const request = value as Record<string, unknown>;
-  const allowed = new Set(["workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled"]);
+  const allowed = new Set(["workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps"]);
   if (Object.keys(request).some((key) => !allowed.has(key))) fail();
   assertEnum(request.workflow, workflows);
   for (const key of ["inputPath", "outputPath", "configPath", "envFile"]) assertAbsolutePath(request[key]);
   if (request.sidecarDir !== undefined) assertAbsolutePath(request.sidecarDir);
   if (request.audioTrack !== undefined && (!Number.isSafeInteger(request.audioTrack) || Number(request.audioTrack) < 0)) fail();
   if (typeof request.profile !== "boolean" || typeof request.sidecarsEnabled !== "boolean") fail();
+  assertEnum(request.cutSilenceEncoderPreset, new Set(["unconfigured", "hevc-amf-cqp21", "hevc-nvenc-qp21", "hevc-qsv-q21", "libx265-crf21"]));
+  if (![240, 360, 480, 720].includes(Number(request.silencePreviewHeight)) || ![4, 8, 12, 24].includes(Number(request.silencePreviewFps))) fail();
+}
+function validateSilenceReview(args: unknown[]): void {
+  exact(args, 3); assertShortString(args[0]); assertShortString(args[1]);
+  if (!Array.isArray(args[2]) || args[2].length > 10_000) fail();
+  for (const item of args[2]) {
+    assertPlainObject(item); assertShortString(item.candidateId);
+    assertEnum(item.decision, new Set(["accept_cut", "reject_cut", "mark_and_reject"]));
+  }
 }
 function absolutePathArg(args: unknown[]): void { exact(args, 1); assertAbsolutePath(args[0]); }
+function shortStringArg(args: unknown[]): void { exact(args, 1); assertShortString(args[0]); }
 function optionalAbsolutePath(args: unknown[]): void { exactRange(args, 0, 1); if (args[0] !== undefined) assertAbsolutePath(args[0]); }
 function objectArg(args: unknown[]): void { exact(args, 1); assertPlainObject(args[0]); }
 function enumArg(args: unknown[], values: Set<string>): void { exact(args, 1); assertEnum(args[0], values); }

@@ -20,8 +20,14 @@ describe("IPC security boundary", () => {
     expect(() => validateIpcArguments("run:start", [{
       workflow: "local", inputPath: "C:\\media\\in.mp4", outputPath: "C:\\media\\out.exo",
       configPath: "C:\\config\\local.json", envFile: "C:\\config\\.env", profile: false, sidecarsEnabled: false,
+      cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
     }])).not.toThrow();
     expect(() => validateIpcArguments("run:start", [{ workflow: "local", inputPath: "C:\\in.mp4" }])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("silence:source", ["run-1"])).not.toThrow();
+    expect(() => validateIpcArguments("silence:proxy", ["run-1", "silence-0001", "seam"])).not.toThrow();
+    expect(() => validateIpcArguments("silence:proxy", ["run-1", "silence-0001", "file"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "accept_cut" }]])).not.toThrow();
+    expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "maybe" }]])).toThrow(/Invalid IPC/);
   });
 
   it("denies new windows and all top-level navigation", () => {
@@ -43,5 +49,6 @@ describe("IPC security boundary", () => {
     expect(contentSecurityPolicy(true)).not.toContain("ws://127.0.0.1");
     expect(contentSecurityPolicy(false)).toContain("connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*");
     expect(contentSecurityPolicy(true)).toContain("object-src 'none'");
+    expect(contentSecurityPolicy(true)).toContain("media-src 'self' subutl-media: blob:");
   });
 });

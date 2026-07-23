@@ -95,6 +95,17 @@ describe("config patching", () => {
     expect(next.backend!.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
   });
 
+  it("applies Cut silence only to short workflows", () => {
+    const core = extractCoreSettings({ additional_settings: { cut_silence_mode: "review", render_cut_video: true } });
+    expect(core.additionalSettings?.cutSilenceMode).toBe("review");
+    expect(core.additionalSettings?.renderCutVideo).toBe(true);
+    expect(applyCoreSettings({}, core, "local").additional_settings?.cut_silence_mode).toBe("review");
+    expect(applyCoreSettings({}, core, "hosted").additional_settings?.cut_silence_mode).toBe("review");
+    expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.cut_silence_mode).toBe("off");
+    expect(applyCoreSettings({}, core, "local").additional_settings?.render_cut_video).toBe(true);
+    expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.render_cut_video).toBe(false);
+  });
+
   it("defaults hosted fallback transcription to the recommended model pair", () => {
     const core = extractCoreSettings({
       audio: { track: 1 },

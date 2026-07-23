@@ -9,9 +9,10 @@ import RunPanel from "./components/RunPanel";
 import LogViewer from "./components/LogViewer";
 import OutputPanel from "./components/OutputPanel";
 import AdditionalSettingsPanel from "./components/AdditionalSettingsPanel";
+import SilenceReviewScreen from "./components/SilenceReviewScreen";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, CoreWorkflowSettings, PathStatus, RunEvent, RunState, WorkflowConfig, WorkflowName } from "./lib/types";
+import type { AppSettings, CoreWorkflowSettings, CutSilenceEncoderPreset, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
 import { useBatchedLog } from "./hooks/useBatchedLog";
 import { useMediaAnalysis } from "./hooks/useMediaAnalysis";
@@ -44,6 +45,9 @@ export default function App() {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [notice, setNotice] = useState("");
+  const [encoderProbes, setEncoderProbes] = useState<EncoderProbeResult[]>([]);
+  const [probingEncoders, setProbingEncoders] = useState(false);
+  const [silenceReview, setSilenceReview] = useState<{ runId: string; reviewId: string; candidates: SilenceCutCandidate[] } | null>(null);
   const workflow = settings?.selectedWorkflow ?? "local";
   const { envStatus, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
   const {
@@ -105,7 +109,14 @@ export default function App() {
     && (!coreSettings.alignment.offlineModelCache
       || (runtimeStatus?.alignment.installed && coreSettings.alignment.model === runtimeStatus.alignment.modelPath))
   );
-  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady);
+  const cutSilenceEnabled = (coreSettings?.additionalSettings?.cutSilenceMode ?? "off") !== "off";
+  const renderCutVideo = cutSilenceEnabled && Boolean(coreSettings?.additionalSettings?.renderCutVideo);
+  const selectedEncoderProbe = encoderProbes.find((probe) => probe.preset === settings?.cutSilenceEncoderPreset);
+  const cutSilenceReady = !cutSilenceEnabled || Boolean(
+    analysis?.videoCodec
+    && (!renderCutVideo || (settings?.cutSilenceEncoderPreset !== "unconfigured" && selectedEncoderProbe?.available && !probingEncoders))
+  );
+  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady && cutSilenceReady);
 
   useEffect(() => {
     void loadInitialState();
@@ -143,6 +154,11 @@ export default function App() {
   }, [settings?.pythonPath]);
 
   useEffect(() => {
+    if (!runtimeStatus?.ffmpeg.ready) { setEncoderProbes([]); return; }
+    void probeEncoders();
+  }, [runtimeStatus?.ffmpeg.ffmpegPath, runtimeStatus?.ffmpeg.version]);
+
+  useEffect(() => {
     if (!coreSettings || !isLocalWorkflow(workflow)) return;
     void refreshPathStatus(coreSettings);
   }, [coreSettings, workflow]);
@@ -171,7 +187,7 @@ export default function App() {
   }, [settings?.llamaBackend, workflow]);
 
   useEffect(() => {
-    if (runState !== "running" || !startedAt) return;
+    if ((runState !== "running" && runState !== "reviewing") || !startedAt) return;
     const timer = window.setInterval(() => setElapsedMs(Date.now() - startedAt), 500);
     return () => window.clearInterval(timer);
   }, [runState, startedAt]);
@@ -303,7 +319,10 @@ export default function App() {
         audioTrack: coreSettings.audioTrack,
         sidecarDir: settings.sidecarsEnabled ? sidecarDir : undefined,
         sidecarsEnabled: settings.sidecarsEnabled,
-        profile: coreSettings.diagnostics.profile
+        profile: coreSettings.diagnostics.profile,
+        cutSilenceEncoderPreset: settings.cutSilenceEncoderPreset,
+        silencePreviewHeight: settings.silencePreviewHeight,
+        silencePreviewFps: settings.silencePreviewFps
       });
       setActiveRunId(result.runId);
     } catch (error) {
@@ -331,10 +350,63 @@ export default function App() {
       setElapsedMs(event.elapsedMs);
       setRunState(event.cancelled ? "cancelled" : event.code === 0 ? "succeeded" : "failed");
       setActiveRunId("");
+      setSilenceReview(null);
     } else if (event.type === "error") {
       setRunState("failed");
       appendLog(`\n${event.message}\n`);
+    } else if (event.type === "silence-review-required") {
+      setRunState("reviewing");
+      setSilenceReview({ runId: event.runId, reviewId: event.reviewId, candidates: event.candidates });
+    } else if (event.type === "silence-cut-output") {
+      appendLog(`\nCut video: ${event.path}\n`);
+      setNotice("Cut video created");
+    } else if (event.type === "silence-candidates" && event.workflow === "hosted" && event.candidates.length) {
+      void preflightHostedSilencePreview(event.runId, event.candidates);
     }
+  }
+
+  async function preflightHostedSilencePreview(runId: string, candidates: SilenceCutCandidate[]) {
+    try {
+      const source = await window.subtitler.getSilenceSource(runId);
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      const supported = await new Promise<boolean>((resolve) => {
+        const timer = window.setTimeout(() => resolve(false), 5000);
+        video.onloadedmetadata = () => { window.clearTimeout(timer); resolve(true); };
+        video.onerror = () => { window.clearTimeout(timer); resolve(false); };
+        video.src = source.url;
+      });
+      video.removeAttribute("src");
+      video.load();
+      if (!supported) await window.subtitler.prefetchSilenceProxies(runId, candidates.slice(0, 2).map((candidate) => candidate.id));
+    } catch { /* Preview fallback is retried on the review screen. */ }
+  }
+
+  async function probeEncoders() {
+    setProbingEncoders(true);
+    try { setEncoderProbes(await window.subtitler.probeCutSilenceEncoders()); }
+    catch (error) { setNotice(`Encoder check failed: ${error instanceof Error ? error.message : String(error)}`); }
+    finally { setProbingEncoders(false); }
+  }
+
+  function updateMachineSettings(patch: Partial<AppSettings>) {
+    if (!settings) return;
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    void saveSettings(next, false);
+  }
+
+  async function submitSilenceReview(decisions: Array<{ candidateId: string; decision: SilenceCutDecision }>) {
+    if (!silenceReview) return;
+    await window.subtitler.submitSilenceReview(silenceReview.runId, silenceReview.reviewId, decisions);
+    setSilenceReview(null);
+    setRunState("running");
+  }
+
+  function openCutSilenceSettings() {
+    setView("settings");
+    const family = workflowFamily(workflow);
+    setSettingsExpansion((current) => ({ ...current, [family]: { ...(current[family] ?? currentSettingsExpansion), cutSilence: true } }));
   }
 
   function startColumnResize(event: PointerEvent<HTMLDivElement>) {
@@ -389,6 +461,8 @@ export default function App() {
   if (!settings || !configs || !configPaths || !coreSettings) {
     return <div className="loading">Loading frontend state...</div>;
   }
+
+  if (silenceReview) return <SilenceReviewScreen runId={silenceReview.runId} reviewId={silenceReview.reviewId} candidates={silenceReview.candidates} onSubmit={submitSilenceReview} onCancel={() => void cancelRun()} />;
 
   const currentWorkflowFamily = workflowFamily(workflow);
   const currentSettingsExpansion = settingsExpansion[currentWorkflowFamily] ?? defaultSettingsExpansion({
@@ -511,6 +585,15 @@ export default function App() {
             onDeleteFfmpeg={deleteManagedFfmpeg}
             onDownloadAlignment={downloadAlignmentModel}
             onDeleteAlignment={deleteManagedAlignmentModel}
+            cutSilenceEncoderPreset={settings.cutSilenceEncoderPreset}
+            silencePreviewHeight={settings.silencePreviewHeight}
+            silencePreviewFps={settings.silencePreviewFps}
+            encoderProbes={encoderProbes}
+            probingEncoders={probingEncoders}
+            onCutSilenceEncoder={(cutSilenceEncoderPreset: CutSilenceEncoderPreset) => updateMachineSettings({ cutSilenceEncoderPreset })}
+            onSilencePreviewHeight={(silencePreviewHeight) => updateMachineSettings({ silencePreviewHeight })}
+            onSilencePreviewFps={(silencePreviewFps) => updateMachineSettings({ silencePreviewFps })}
+            onProbeEncoders={() => void probeEncoders()}
           />
         </div>
       ) : (
@@ -536,7 +619,7 @@ export default function App() {
             disabled={runState === "running"}
             onOutput={setOutputPath}
           />
-          <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} disabled={runState === "running"} onChange={setCoreSettings} />
+           <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />
           <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
           </div>
         </div>

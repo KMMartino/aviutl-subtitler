@@ -26,7 +26,9 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
     "--env-file",
     request.envFile,
     "--output",
-    request.outputPath
+    request.outputPath,
+    "--frontend-protocol",
+    "stdio-v1"
   ];
   if (request.audioTrack !== undefined) {
     args.push("--audio-track", String(request.audioTrack));
@@ -42,6 +44,9 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
   }
   if (request.profile) {
     args.push("--profile");
+  }
+  if (request.cutSilenceEncoderPreset !== "unconfigured") {
+    args.push("--cut-silence-encoder", request.cutSilenceEncoderPreset);
   }
   return {
     command: pythonPath,

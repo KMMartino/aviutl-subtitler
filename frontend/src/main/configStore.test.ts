@@ -50,6 +50,10 @@ describe("config store runtime paths", () => {
     expect(fs.existsSync(path.join(paths.userConfigRoot, "local.json"))).toBe(true);
     expect(fs.existsSync(path.join(paths.stateRoot, "settings.json"))).toBe(true);
     expect(fs.existsSync(paths.envFile)).toBe(true);
+    const settings = loadAppState(paths).settings;
+    expect(settings.cutSilenceEncoderPreset).toBe("unconfigured");
+    expect(settings.silencePreviewHeight).toBe(360);
+    expect(settings.silencePreviewFps).toBe(8);
   });
 
   it("does not overwrite existing user workflow configs", () => {

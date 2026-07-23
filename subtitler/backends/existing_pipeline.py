@@ -29,11 +29,13 @@ from subtitler.transcription_backend import (
     BackendStatus,
     BackendTranscriptResult,
     SpeechRegion,
+    RawVadSpeechInterval,
     TranscriptSegment,
     TranscriptToken,
     TranscriptionRequest,
 )
 from subtitler.vad import VadSession, segment_speech_with_groups, select_high_activation_chunks
+from subtitler.silence_cut import build_cut_candidates
 
 
 FAILED_TRANSCRIPTION_TEXT = "transcription failed"
@@ -176,7 +178,7 @@ class ExistingPipelineBackend:
         print("Running Silero VAD...")
         cleanup_group_max_sec = _cleanup_group_max_sec(request.duration_sec, cleanup_group_policy(self.config))
         vad_session = VadSession()
-        chunks, vad_groups = segment_speech_with_groups(
+        vad_segmentation = segment_speech_with_groups(
             samples=request.metadata["samples"],
             sample_rate=request.sample_rate,
             max_chunk_sec=float(vad_cfg["max_chunk_sec"]),
@@ -189,12 +191,26 @@ class ExistingPipelineBackend:
             progress_callback=request.metadata.get("stage_progress_reporter"),
             session=vad_session,
         )
+        if len(vad_segmentation) == 2:  # Backward-compatible test/plugin seam.
+            chunks, vad_groups = vad_segmentation
+            raw_vad_intervals = [(chunk.start, chunk.end) for chunk in chunks]
+        else:
+            chunks, vad_groups, raw_vad_intervals = vad_segmentation
         print(
             f"VAD chunks: {len(chunks)} fine, {len(vad_groups)} cleanup group(s) "
             f"(cleanup_group_max_sec={cleanup_group_max_sec:.2f})",
             flush=True,
         )
         selection = build_speech_selection(workflow_cfg, chunks, request.duration_sec)
+        normalized_raw_vad = [RawVadSpeechInterval(start, end) for start, end in raw_vad_intervals]
+        control_event = request.metadata.get("control_event")
+        cut_mode = self.config["additional_settings"].get("cut_silence_mode", "off")
+        if callable(control_event) and cut_mode == "review":
+            control_event(
+                "silence-candidates",
+                workflow=request.workflow,
+                candidates=[candidate.to_frontend() for candidate in build_cut_candidates(normalized_raw_vad)],
+            )
 
         if request.profile_enabled and request.sidecar_base is not None:
             write_vad_selection(request.sidecar_base.with_suffix(".vad_selection.csv"), chunks, selection.selected_chunks)
@@ -219,6 +235,7 @@ class ExistingPipelineBackend:
                 duration_sec=request.duration_sec,
                 segments=[],
                 speech_regions=selection.speech_regions,
+                raw_vad_speech_intervals=normalized_raw_vad,
                 diagnostics=[
                     BackendDiagnostic(
                         level="info",
@@ -291,6 +308,7 @@ class ExistingPipelineBackend:
             duration_sec=request.duration_sec,
             segments=segments,
             speech_regions=selection.speech_regions,
+            raw_vad_speech_intervals=normalized_raw_vad,
             diagnostics=[
                 BackendDiagnostic(
                     level="error" if status == "failed" else "warning",

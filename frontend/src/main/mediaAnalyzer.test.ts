@@ -11,7 +11,7 @@ vi.mock("node:child_process", () => ({
 }));
 vi.mock("./ffmpegManager", () => ({ resolveFfmpegCommand: (name: string) => name }));
 
-import { MediaAnalysisCoordinator, runBounded } from "./mediaAnalyzer";
+import { classifyFrameRate, MediaAnalysisCoordinator, parseFrameRate, runBounded } from "./mediaAnalyzer";
 
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
@@ -80,5 +80,18 @@ describe("bounded media process", () => {
 
     await firstAssertion;
     await expect(second).resolves.toMatchObject({ audioTracks: [], thumbnailDataUrl: "" });
+  });
+});
+
+describe("frame-rate metadata", () => {
+  it("parses rational rates", () => {
+    expect(parseFrameRate("60000/1001")).toBeCloseTo(59.94, 2);
+    expect(parseFrameRate("0/0")).toBeNull();
+  });
+
+  it("classifies equal, differing, and missing rates", () => {
+    expect(classifyFrameRate(60, 60)).toBe("reported-cfr");
+    expect(classifyFrameRate(59.94, 60)).toBe("possible-vfr");
+    expect(classifyFrameRate(null, 60)).toBe("unknown");
   });
 });

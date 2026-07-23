@@ -17,6 +17,7 @@ from .run_artifacts import write_aligned_text
 from .run_context import RunContext
 from .transcript_normalizer import backend_result_to_aligned_chunks
 from .transcription_backend import BackendTranscriptResult, TranscriptionBackend, TranscriptionRequest
+from .silence_cut import emit_frontend_event
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ def run_transcription_stage(
         metadata={
             "samples": samples,
             "stage_progress_reporter": stage_progress_reporter("VAD"),
+            "control_event": emit_frontend_event if context.args.frontend_protocol == "stdio-v1" else None,
         },
     )
     backend_result = backend.transcribe(request)

@@ -34,6 +34,26 @@ def _config() -> dict:
 
 
 class RunContextTests(unittest.TestCase):
+    def test_exo_cutting_does_not_require_encoder_but_rendering_does(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            input_path = root / "video.mkv"
+            input_path.touch()
+            base = _config()
+            base["additional_settings"] = {"cut_silence_mode": "automatic", "render_cut_video": False}
+            args = _arguments(input=str(input_path))
+            with mock.patch("subtitler.run_context.load_workflow_config", return_value=base), mock.patch(
+                "subtitler.run_context.validate_workflow_config"
+            ), mock.patch("subtitler.run_context.load_env_file", return_value=[]), mock.patch(
+                "subtitler.run_context.configure_alignment_offline_mode", return_value=False
+            ):
+                prepare_run_context(args, cwd=root)
+            base["additional_settings"]["render_cut_video"] = True
+            with mock.patch("subtitler.run_context.load_workflow_config", return_value=base), mock.patch(
+                "subtitler.run_context.validate_workflow_config"
+            ), self.assertRaisesRegex(SubtitlerError, "cut-silence-encoder"):
+                prepare_run_context(args, cwd=root)
+
     def test_prepares_overrides_paths_environment_and_diagnostics_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)

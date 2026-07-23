@@ -26,6 +26,8 @@ class CliArguments:
     no_sidecars: bool
     glossary: str | None
     no_glossary: bool
+    frontend_protocol: str | None = None
+    cut_silence_encoder: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,12 @@ def prepare_run_context(args: CliArguments, *, cwd: Path | None = None) -> RunCo
     if args.profile:
         config["diagnostics"]["profile"] = True
     validate_workflow_config(config, workflow=args.workflow)
+    cut_mode = config.get("additional_settings", {}).get("cut_silence_mode", "off")
+    render_cut_video = bool(config.get("additional_settings", {}).get("render_cut_video", False))
+    if cut_mode != "off" and render_cut_video and not args.cut_silence_encoder:
+        raise SubtitlerError("Cut silence requires --cut-silence-encoder with an explicitly selected preset")
+    if cut_mode == "review" and args.frontend_protocol != "stdio-v1":
+        raise SubtitlerError("Cut silence review mode requires the SubUtl desktop review interface")
 
     env_path = Path(args.env_file)
     if not env_path.is_absolute():

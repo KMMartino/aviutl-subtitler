@@ -39,6 +39,7 @@ class RunArtifactPaths:
     boundary_timing_profile: Path | None
     planning_profile: Path | None
     chapter_markers: Path | None
+    silence_cuts: Path | None
 
 
 def build_run_artifact_paths(
@@ -73,6 +74,7 @@ def build_run_artifact_paths(
         boundary_timing_profile=suffix(".boundary_timing.csv"),
         planning_profile=suffix(".planning.csv"),
         chapter_markers=suffix(".youtube_chapters.json"),
+        silence_cuts=suffix(".silence_cuts.json"),
     )
 
 

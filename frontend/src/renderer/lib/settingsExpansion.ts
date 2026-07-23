@@ -7,6 +7,7 @@ export type SettingsExpansion = {
   ffmpeg: boolean;
   alignment: boolean;
   env: boolean;
+  cutSilence: boolean;
 };
 
 export type WorkflowFamily = "local" | "hosted";
@@ -31,6 +32,7 @@ export function defaultSettingsExpansion(readiness: {
     ffmpeg: !readiness.ffmpegReady,
     alignment: !readiness.alignmentInstalled,
     env: !readiness.envExists,
+    cutSilence: false,
   };
 }
 

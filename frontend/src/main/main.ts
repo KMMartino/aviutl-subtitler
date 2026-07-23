@@ -17,7 +17,7 @@ import {
   saveWorkflowConfig,
   workflowConfigPath
 } from "./configStore";
-import { cancelRun, shutdownActiveRun, startRun } from "./runProcess";
+import { cancelRun, shutdownActiveRun, startRun, submitSilenceReview } from "./runProcess";
 import { MediaAnalysisCoordinator } from "./mediaAnalyzer";
 import { assertTrustedSender, contentSecurityPolicy, installNavigationGuards, validateIpcArguments } from "./ipcSecurity";
 import { verifyHostedModels } from "./hostedModels";
@@ -30,6 +30,10 @@ import { ALIGNMENT_MODEL, deleteAlignmentModel, downloadAlignmentModel, getAlign
 import { CoalescedWriter } from "./coalescedWriter";
 import type { AppSettings, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { userDataOverride } from "./userDataOverride";
+import { probeCutSilenceEncoders } from "./cutSilenceManager";
+import { registerSilenceMediaScheme, SilencePreviewManager } from "./silencePreviewManager";
+
+registerSilenceMediaScheme();
 
 const isolatedUserData = userDataOverride();
 if (app.isPackaged) app.setName("SubUtl");
@@ -45,15 +49,17 @@ let mainWindow: BrowserWindow | null = null;
 let drainPersistence = async (): Promise<void> => {};
 let quittingAfterDrain = false;
 const mediaAnalysis = new MediaAnalysisCoordinator();
+let silencePreview: SilencePreviewManager | null = null;
 
 function createWindow(): void {
+  const frontend2 = process.env.SUBUTL_FRONTEND2 === "1";
   mainWindow = new BrowserWindow({
     width: 1280,
-    height: 1130,
-    minWidth: 1080,
-    minHeight: 720,
+    height: frontend2 ? 840 : 1130,
+    minWidth: frontend2 ? 1024 : 1080,
+    minHeight: frontend2 ? 700 : 720,
     autoHideMenuBar: true,
-    backgroundColor: "#f5f3ef",
+    backgroundColor: frontend2 ? "#151918" : "#f5f3ef",
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.js"),
       contextIsolation: true,
@@ -78,6 +84,8 @@ app.whenReady().then(() => {
   migrateLegacyManagedLlamaRoot(currentPaths.stateRoot, currentPaths.userToolsRoot);
   Menu.setApplicationMenu(null);
   registerIpc();
+  silencePreview = new SilencePreviewManager(path.join(app.getPath("temp"), "SubUtl-silence-preview"));
+  silencePreview.initialize();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -91,6 +99,7 @@ app.on("window-all-closed", () => {
 app.on("before-quit", (event) => {
   shutdownActiveRun();
   mediaAnalysis.cancel();
+  silencePreview?.cleanupAll();
   if (quittingAfterDrain) return;
   event.preventDefault();
   void drainPersistence().finally(() => {
@@ -209,6 +218,11 @@ function registerIpc(): void {
     return status;
   });
   handle("media:analyze", (_event, inputPath: string) => mediaAnalysis.analyze(inputPath));
+  handle("silence:probe-encoders", () => probeCutSilenceEncoders());
+  handle("silence:source", (_event, runId: string) => silencePreview?.source(runId));
+  handle("silence:proxy", (_event, runId: string, candidateId: string, variant: "original" | "seam") => silencePreview?.proxy(runId, candidateId, variant));
+  handle("silence:prefetch", (_event, runId: string, candidateIds: string[]) => silencePreview?.prefetch(runId, candidateIds));
+  handle("run:submit-silence-review", (_event, runId, reviewId, decisions) => submitSilenceReview(runId, reviewId, decisions));
   handle("run:start", async (_event, request) => {
     const appState = loadAppState();
     const python = await getPythonRuntimeStatus(appState.settings.pythonPath);
@@ -216,7 +230,16 @@ function registerIpc(): void {
     if (!python.requirementsInstalled) {
       throw new Error(python.error || "Python runtime is missing required packages. Install Python requirements in Settings.");
     }
-    return startRun(requireWindow(), paths(), python.resolvedPath, request);
+    const result = startRun(requireWindow(), paths(), python.resolvedPath, request, {
+      onControlEvent: (controlEvent) => {
+        if (controlEvent.type === "silence-candidates" || controlEvent.type === "silence-review-required") {
+          silencePreview?.setCandidates(controlEvent.runId, controlEvent.candidates);
+        }
+      },
+      onFinish: (runId) => silencePreview?.cleanupRun(runId),
+    });
+    silencePreview?.registerRun(result.runId, request);
+    return result;
   });
   handle("run:cancel", (_event, runId: string) => cancelRun(runId));
   handle("shell:open-path", (_event, target: string) => shell.openPath(target));

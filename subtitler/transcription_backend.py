@@ -52,6 +52,14 @@ class SpeechRegion:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RawVadSpeechInterval:
+    """An unpadded speech interval from the initial VAD inference."""
+
+    start: float
+    end: float
+
+
 @dataclass
 class BackendCapability:
     provides_vad: bool = False
@@ -86,6 +94,7 @@ class BackendTranscriptResult:
     duration_sec: float = 0.0
     segments: list[TranscriptSegment] = field(default_factory=list)
     speech_regions: list[SpeechRegion] = field(default_factory=list)
+    raw_vad_speech_intervals: list[RawVadSpeechInterval] = field(default_factory=list)
     diagnostics: list[BackendDiagnostic] = field(default_factory=list)
     capabilities: BackendCapability = field(default_factory=BackendCapability)
     metadata: dict[str, Any] = field(default_factory=dict)

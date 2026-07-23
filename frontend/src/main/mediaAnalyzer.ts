@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { AudioTrackInfo, MediaAnalysis } from "../renderer/lib/types";
+import type { AudioTrackInfo, MediaAnalysis, MediaFrameRateMode } from "../renderer/lib/types";
 import { resolveFfmpegCommand } from "./ffmpegManager";
 
 type ProbeData = {
   format?: { duration?: string; format_name?: string };
-  streams?: Array<{ index?: number; codec_type?: string; codec_name?: string; width?: number; height?: number; sample_rate?: string; channels?: number; channel_layout?: string; tags?: { language?: string; title?: string } }>;
+  streams?: Array<{ index?: number; codec_type?: string; codec_name?: string; width?: number; height?: number; avg_frame_rate?: string; r_frame_rate?: string; sample_rate?: string; channels?: number; channel_layout?: string; tags?: { language?: string; title?: string } }>;
 };
 
 export const MEDIA_ANALYSIS_TIMEOUT_MS = 30_000;
@@ -13,7 +13,7 @@ export const THUMBNAIL_OUTPUT_LIMIT = 8 * 1024 * 1024;
 
 export async function analyzeMedia(inputPath: string, signal?: AbortSignal): Promise<MediaAnalysis> {
   const data = JSON.parse(await runBounded(resolveFfmpegCommand("ffprobe"), [
-    "-v", "error", "-show_entries", "format=duration,format_name:stream=index,codec_type,codec_name,width,height,sample_rate,channels,channel_layout:stream_tags=language,title",
+    "-v", "error", "-show_entries", "format=duration,format_name:stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,sample_rate,channels,channel_layout:stream_tags=language,title",
     "-of", "json", inputPath,
   ], PROBE_OUTPUT_LIMIT, signal)) as ProbeData;
   const video = (data.streams ?? []).find((stream) => stream.codec_type === "video");
@@ -22,6 +22,8 @@ export async function analyzeMedia(inputPath: string, signal?: AbortSignal): Pro
     sampleRate: stream.sample_rate ? Number(stream.sample_rate) : null, channels: stream.channels ?? null,
     channelLayout: String(stream.channel_layout ?? ""), language: String(stream.tags?.language ?? ""), title: String(stream.tags?.title ?? ""),
   }));
+  const averageFrameRate = parseFrameRate(video?.avg_frame_rate);
+  const nominalFrameRate = parseFrameRate(video?.r_frame_rate);
   const thumbnail = video ? await runBounded(resolveFfmpegCommand("ffmpeg"), [
     "-v", "error", "-ss", "0", "-i", inputPath, "-map", "0:v:0", "-frames:v", "1",
     "-vf", "scale=1280:720:force_original_aspect_ratio=decrease", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
@@ -33,8 +35,25 @@ export async function analyzeMedia(inputPath: string, signal?: AbortSignal): Pro
     durationSeconds: data.format?.duration ? Number(data.format.duration) : null,
     formatName: String(data.format?.format_name ?? ""), videoCodec: String(video?.codec_name ?? ""),
     width: video?.width ?? null, height: video?.height ?? null,
+    averageFrameRate, nominalFrameRate,
+    frameRateMode: classifyFrameRate(averageFrameRate, nominalFrameRate),
     thumbnailDataUrl: thumbnail ? `data:image/jpeg;base64,${Buffer.from(thumbnail, "latin1").toString("base64")}` : "", audioTracks,
   };
+}
+
+export function parseFrameRate(value: string | undefined): number | null {
+  if (!value) return null;
+  const [numeratorText, denominatorText = "1"] = value.split("/");
+  const numerator = Number(numeratorText);
+  const denominator = Number(denominatorText);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || numerator <= 0 || denominator <= 0) return null;
+  return numerator / denominator;
+}
+
+export function classifyFrameRate(average: number | null, nominal: number | null): MediaFrameRateMode {
+  if (average === null || nominal === null) return "unknown";
+  const tolerance = Math.max(0.001, Math.abs(average) * 0.001);
+  return Math.abs(average - nominal) <= tolerance ? "reported-cfr" : "possible-vfr";
 }
 
 export function runBounded(command: string, args: string[], outputLimit: number, signal?: AbortSignal, binary = false): Promise<string> {
