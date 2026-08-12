@@ -19,7 +19,8 @@ from .run_artifacts import (
     write_final_subtitle_text,
 )
 from .run_context import RunContext
-from .subtitle_planner import build_grouped_subtitles
+from .splitter import build_subtitles
+from .subtitle_planner import build_grouped_subtitles, write_subtitle_timing_artifact
 from .text_refiner import LlamaServerTextRefiner, TextRefiner
 
 
@@ -53,6 +54,25 @@ def run_subtitle_stage(
     artifacts = context.artifacts
     cleanup_cfg = config["cleanup"]
     subtitle_cfg = config["subtitles"]
+    subtitle_mode = config.get("additional_settings", {}).get("editorial_subtitle_mode", "full")
+    if context.args.workflow == "hosted-long-stream" and subtitle_mode == "emphasis":
+        print(
+            "Partial subtitles: preserving deterministic transcript timing and deferring cleanup "
+            "to selected emphasized phrases.",
+            flush=True,
+        )
+        subtitles = build_subtitles(
+            aligned,
+            max_chars=int(subtitle_cfg["max_chars"]),
+            min_duration=float(subtitle_cfg["min_duration"]),
+            max_duration=float(subtitle_cfg["max_duration"]),
+            gap_threshold=float(subtitle_cfg["gap_threshold"]),
+        )
+        if artifacts.subtitle_timing_profile is not None:
+            write_subtitle_timing_artifact(artifacts.subtitle_timing_profile, subtitles)
+        if artifacts.final_text is not None:
+            write_final_subtitle_text(artifacts.final_text, subtitles)
+        return SubtitleStageOutcome(subtitles, [], [])
     refiner = (refiner_factory or build_refiner)(config, glossary, api_usage, artifacts.base)
     try:
         chapter_markers: list[ExoMarker] = []
@@ -162,6 +182,11 @@ def build_refiner(
             glossary=glossary,
             usage=api_usage,
             reasoning_effort=cleanup.get("reasoning_effort"),
+            structured_diagnostics_path=(
+                sidecar_base.with_suffix(".structured_responses.jsonl")
+                if sidecar_base is not None
+                else None
+            ),
         )
     if backend == "gemini":
         return GeminiTextRefiner(
@@ -169,6 +194,11 @@ def build_refiner(
             glossary=glossary,
             usage=api_usage,
             thinking_level=cleanup.get("thinking_level"),
+            structured_diagnostics_path=(
+                sidecar_base.with_suffix(".structured_responses.jsonl")
+                if sidecar_base is not None
+                else None
+            ),
         )
     raise SubtitlerError(f"Unknown cleanup backend: {backend}")
 

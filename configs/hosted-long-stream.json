@@ -1,18 +1,19 @@
 {
   "backend": {
     "name": "existing-pipeline",
-    "transcriber": "gemini",
-    "transcription_model": "gemini-3.5-flash",
-    "fallback_transcriber": "gemini",
-    "fallback_transcription_model": "gemini-3.1-pro-preview",
+    "transcriber": "openai",
+    "transcription_model": "gpt-transcribe",
+    "fallback_transcriber": "openai",
+    "fallback_transcription_model": "gpt-transcribe",
     "language": "ja",
-    "transcription_workers": 2
+    "transcription_workers": 4
   },
   "audio": {
     "track": 1
   },
   "workflow": {
     "mode": "long-stream",
+    "transcription_scope": "full",
     "long_stream_min_chunks": 1
   },
   "alignment": {
@@ -28,6 +29,14 @@
     "skip_final_review": false,
     "llm_split_planning": true
   },
+  "editorial": {
+    "analysis_model": "gpt-5.6-luna",
+    "reasoning_effort": "low",
+    "director_model": "gpt-5.6-terra",
+    "director_reasoning_effort": "low",
+    "subtitle_cleanup_model": "gpt-5.4-mini",
+    "subtitle_cleanup_reasoning_effort": "medium"
+  },
   "subtitles": {
     "chain_split_workers": 6
   },
@@ -38,6 +47,8 @@
   "additional_settings": {
     "youtube_chapters": false,
     "cut_silence_mode": "off",
-    "render_cut_video": false
+    "render_cut_video": false,
+    "editorial_map_mode": "off",
+    "editorial_subtitle_mode": "full"
   }
 }

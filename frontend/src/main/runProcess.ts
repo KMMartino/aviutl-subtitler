@@ -1,7 +1,7 @@
 import { BrowserWindow } from "electron";
 import { spawn, spawnSync, ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
-import type { RunEvent, RunRequest, SilenceCutDecision, SilenceCutCandidate } from "../renderer/lib/types";
+import type { BrollCandidate, BrollReviewDecision, RunEvent, RunRequest, SilenceCutDecision, SilenceCutCandidate } from "../renderer/lib/types";
 import { buildRunCommand } from "./python";
 import type { RuntimePaths } from "./paths";
 
@@ -13,6 +13,7 @@ type ActiveRun = {
   forceTimer?: NodeJS.Timeout;
   reviewId?: string;
   reviewCandidates?: Set<string>;
+  brollReviewAssets?: Map<string, string>;
 };
 
 let activeRun: ActiveRun | null = null;
@@ -94,10 +95,48 @@ export function submitSilenceReview(runId: string, reviewId: string, decisions: 
   activeRun.reviewCandidates = undefined;
 }
 
-export function cancelRun(runId: string): void {
+export async function submitBrollReview(
+  runId: string,
+  reviewId: string,
+  decisions: BrollReviewDecision[],
+  saveDescription?: (assetId: string, description: string) => Promise<unknown>,
+): Promise<void> {
+  if (!activeRun || activeRun.runId !== runId || activeRun.reviewId !== reviewId || !activeRun.reviewCandidates) {
+    throw new Error("No matching B-roll review is active");
+  }
+  const valid = new Set(["describe", "use_library", "reject"]);
+  const seen = new Set<string>();
+  for (const item of decisions) {
+    if (
+      !activeRun.reviewCandidates.has(item.candidateId)
+      || !valid.has(item.decision)
+      || seen.has(item.candidateId)
+      || (item.decision === "describe" && (typeof item.description !== "string" || !item.description.trim() || item.description.length > 4000))
+    ) {
+      throw new Error("Invalid B-roll review decisions");
+    }
+    seen.add(item.candidateId);
+  }
+  if (seen.size !== activeRun.reviewCandidates.size) throw new Error("Every B-roll candidate requires a decision");
+  if (saveDescription) {
+    for (const item of decisions) {
+      if (item.decision !== "describe" || !item.description) continue;
+      const assetId = activeRun.brollReviewAssets?.get(item.candidateId);
+      if (!assetId) throw new Error("B-roll review asset is unavailable");
+      await saveDescription(assetId, item.description.trim());
+    }
+  }
+  activeRun.process.stdin.write(`${JSON.stringify({ type: "broll-review-result", reviewId, decisions })}\n`);
+  activeRun.reviewId = undefined;
+  activeRun.reviewCandidates = undefined;
+  activeRun.brollReviewAssets = undefined;
+}
+
+export function cancelRun(runId: string, immediate = false): void {
   if (!activeRun || activeRun.runId !== runId) return;
   activeRun.cancelled = true;
-  activeRun.forceTimer = terminateProcessTree(activeRun.process, false);
+  if (activeRun.forceTimer) clearTimeout(activeRun.forceTimer);
+  activeRun.forceTimer = terminateProcessTree(activeRun.process, immediate);
 }
 
 /** Stop the whole workflow tree. On Windows this includes Python's FFmpeg and llama-server descendants. */
@@ -205,6 +244,14 @@ function handleStdoutLine(window: BrowserWindow, runId: string, line: string, on
         activeRun.reviewId = value.reviewId;
         activeRun.reviewCandidates = new Set(candidates.map((candidate) => candidate.id));
       }
+    } else if (value.type === "broll-review-required") {
+      if (typeof value.reviewId !== "string" || !value.reviewId) throw new Error();
+      const candidates = validateBrollCandidates(value.candidates);
+      event = { type: "broll-review-required", runId, reviewId: value.reviewId, candidates };
+      if (!activeRun || activeRun.runId !== runId) throw new Error();
+      activeRun.reviewId = value.reviewId;
+      activeRun.reviewCandidates = new Set(candidates.map((candidate) => candidate.id));
+      activeRun.brollReviewAssets = new Map(candidates.map((candidate) => [candidate.id, candidate.assetId]));
     } else if (value.type === "silence-cut-output") {
       if (typeof value.path !== "string" || !value.path) throw new Error();
       event = { type: "silence-cut-output", runId, path: value.path };
@@ -214,8 +261,30 @@ function handleStdoutLine(window: BrowserWindow, runId: string, line: string, on
     onControlEvent?.(event);
     emit(window, event);
   } catch {
-    emit(window, { type: "stderr", runId, text: "Invalid Cut silence control event was rejected.\n" });
+    emit(window, { type: "stderr", runId, text: "Invalid workflow control event was rejected.\n" });
   }
+}
+
+function validateBrollCandidates(value: unknown): BrollCandidate[] {
+  if (!Array.isArray(value) || value.length > 10_000) throw new Error();
+  const ids = new Set<string>();
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error();
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.id !== "string" || !candidate.id || ids.has(candidate.id)) throw new Error();
+    for (const key of ["assetId", "assetPath", "title", "reason"]) {
+      if (typeof candidate[key] !== "string" || String(candidate[key]).length > 32_768) throw new Error();
+    }
+    if (!["video", "image"].includes(String(candidate.mediaKind))) throw new Error();
+    for (const key of ["startLine", "endLine", "sourceStartSec", "confidence"]) {
+      if (typeof candidate[key] !== "number" || !Number.isFinite(candidate[key])) throw new Error();
+    }
+    if (candidate.sourceEndSec !== null && (typeof candidate.sourceEndSec !== "number" || !Number.isFinite(candidate.sourceEndSec))) throw new Error();
+    if (typeof candidate.transcriptText !== "string" || candidate.transcriptText.length > 4000 || typeof candidate.descriptionRequired !== "boolean") throw new Error();
+    if (Number(candidate.startLine) < 1 || Number(candidate.endLine) < Number(candidate.startLine) || Number(candidate.confidence) < 0 || Number(candidate.confidence) > 1) throw new Error();
+    ids.add(candidate.id);
+    return candidate as unknown as BrollCandidate;
+  });
 }
 
 function validateCandidates(value: unknown): SilenceCutCandidate[] {

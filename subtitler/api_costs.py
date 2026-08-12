@@ -8,7 +8,7 @@ from dataclasses import dataclass
 GEMINI_AUDIO_TOKENS_PER_SECOND = 32.0
 TRANSCRIPT_OUTPUT_TOKENS_PER_SPEECH_SECOND = 12.0
 CLEANUP_TOKEN_MULTIPLIER = 3.0
-OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE = 0.006
+OPENAI_GPT_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE = 0.0045
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class TokenPrices:
 
 
 GEMINI_PRICES: dict[str, TokenPrices] = {
+    "gemini-3.6-flash": TokenPrices(input_per_1m=1.50, output_per_1m=7.50, audio_input_per_1m=1.50),
     "gemini-3.5-flash": TokenPrices(input_per_1m=1.50, output_per_1m=9.00, audio_input_per_1m=1.50),
     "gemini-3-flash-preview": TokenPrices(input_per_1m=0.50, output_per_1m=3.00, audio_input_per_1m=1.00),
     "gemini-3.1-pro-preview": TokenPrices(input_per_1m=2.00, output_per_1m=12.00, audio_input_per_1m=2.00),
@@ -28,23 +29,8 @@ GEMINI_PRICES: dict[str, TokenPrices] = {
 }
 
 OPENAI_PRICES: dict[str, TokenPrices] = {
-    "gpt-4o-transcribe": TokenPrices(
-        input_per_1m=2.50,
-        output_per_1m=10.00,
-        audio_input_per_1m=6.00,
-        estimated_per_minute=OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE,
-    ),
-    "gpt-4o-mini-transcribe": TokenPrices(
-        input_per_1m=1.25,
-        output_per_1m=5.00,
-        audio_input_per_1m=3.00,
-        estimated_per_minute=0.003,
-    ),
-    "gpt-4o-mini-transcribe-2025-12-15": TokenPrices(
-        input_per_1m=1.25,
-        output_per_1m=5.00,
-        audio_input_per_1m=3.00,
-        estimated_per_minute=0.003,
+    "gpt-transcribe": TokenPrices(
+        estimated_per_minute=OPENAI_GPT_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE,
     ),
     "gpt-5.5": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
     "gpt-5.4-mini": TokenPrices(input_per_1m=0.75, output_per_1m=4.50),

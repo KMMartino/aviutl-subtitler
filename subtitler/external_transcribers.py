@@ -9,10 +9,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .api_costs import GEMINI_AUDIO_TOKENS_PER_SECOND, OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
+from .api_costs import GEMINI_AUDIO_TOKENS_PER_SECOND, estimate_transcription_cost
 from .api_usage import ApiUsageLedger
 from .audio import write_wav_segment
-from .config import openai_model_available, openai_transcription_aliases
+from .config import openai_model_available
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .hosted_http import request_json, request_json_bytes
@@ -41,7 +41,7 @@ def _hosted_transcription_timeout(chunk: AudioChunk, model: str = "", timeout_sc
 
 def _is_heavy_transcription_model(model: str) -> bool:
     normalized = model.lower()
-    return "pro" in normalized or normalized == "gpt-4o-transcribe"
+    return "pro" in normalized or normalized == "gpt-transcribe"
 
 
 class MalformedTranscriptionResponse(TranscriptionError):
@@ -76,6 +76,7 @@ class GeminiTranscriber:
         glossary: list[GlossaryEntry] | None = None,
         api_key: str | None = None,
         timeout_scale: float = 1.0,
+        allow_sparse_transcript: bool = False,
     ) -> None:
         self.model = model
         self.temp_dir = temp_dir
@@ -84,6 +85,7 @@ class GeminiTranscriber:
         self.prompt = build_transcription_prompt(glossary)
         self.glossary = glossary
         self.timeout_scale = max(1.0, timeout_scale)
+        self.allow_sparse_transcript = allow_sparse_transcript
         verify_gemini_model_available(self.model, self.api_key)
 
     def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
@@ -126,7 +128,7 @@ class GeminiTranscriber:
             return ""
         if not text:
             raise MalformedTranscriptionResponse(f"Gemini returned an empty transcript for chunk {chunk.index}")
-        if _is_external_suspect(text, chunk):
+        if _is_external_suspect(text, chunk, allow_sparse=self.allow_sparse_transcript):
             raise MalformedTranscriptionResponse(f"Gemini returned a suspect transcript for chunk {chunk.index}")
         if previous_transcript and _repeats_context(text, previous_transcript):
             raise MalformedTranscriptionResponse(f"Gemini repeated preceding context for chunk {chunk.index}")
@@ -166,6 +168,7 @@ class OpenAITranscriber:
         api_key: str | None = None,
         language: str = "ja",
         timeout_scale: float = 1.0,
+        allow_sparse_transcript: bool = False,
     ) -> None:
         self.model = model
         self.temp_dir = temp_dir
@@ -175,7 +178,8 @@ class OpenAITranscriber:
         self.glossary = glossary
         self.language = language
         self.timeout_scale = max(1.0, timeout_scale)
-        self._available_model = verify_openai_model_available(self.model, self.api_key)
+        self.allow_sparse_transcript = allow_sparse_transcript
+        verify_openai_model_available(self.model, self.api_key)
 
     def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
         text = self._transcribe_once(chunk, previous_transcript)
@@ -185,38 +189,36 @@ class OpenAITranscriber:
         wav_path = chunk.wav_path or self.temp_dir / f"openai_transcribe_{chunk.index:05d}.wav"
         if chunk.wav_path is None:
             write_wav_segment(chunk.samples, 16000, wav_path)
-        fields = {
+        fields = self._transcription_fields(previous_transcript)
+        data = self._request_transcription(chunk, wav_path, fields)
+        text = clean_transcript(str(data.get("text", "")))
+        self._record_usage(data, chunk)
+        if _is_untranscribable_audio_response(text):
+            print(f"Warning: OpenAI reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
+            return ""
+        if not text:
+            raise MalformedTranscriptionResponse(f"OpenAI returned an empty transcript for chunk {chunk.index}")
+        if _is_external_suspect(text, chunk, allow_sparse=self.allow_sparse_transcript):
+            raise MalformedTranscriptionResponse(f"OpenAI returned a suspect transcript for chunk {chunk.index}")
+        if previous_transcript and _repeats_context(text, previous_transcript):
+            raise MalformedTranscriptionResponse(f"OpenAI repeated preceding context for chunk {chunk.index}")
+        return text
+
+    def _transcription_fields(self, previous_transcript: str | None) -> dict[str, str | list[str]]:
+        return {
             "model": self.model,
             "language": self.language,
             "prompt": build_transcription_prompt(self.glossary, previous_transcript),
             "response_format": "json",
             "temperature": "0",
         }
-        try:
-            data = self._request_transcription(chunk, wav_path, fields)
-            usage_model = self.model
-        except TranscriptionError as exc:
-            alias = self._retry_alias_after_model_error(exc)
-            if alias is None:
-                raise
-            retry_fields = dict(fields)
-            retry_fields["model"] = alias
-            data = self._request_transcription(chunk, wav_path, retry_fields)
-            usage_model = alias
-        text = clean_transcript(str(data.get("text", "")))
-        self._record_usage(data, chunk, usage_model)
-        if _is_untranscribable_audio_response(text):
-            print(f"Warning: OpenAI reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
-            return ""
-        if not text:
-            raise MalformedTranscriptionResponse(f"OpenAI returned an empty transcript for chunk {chunk.index}")
-        if _is_external_suspect(text, chunk):
-            raise MalformedTranscriptionResponse(f"OpenAI returned a suspect transcript for chunk {chunk.index}")
-        if previous_transcript and _repeats_context(text, previous_transcript):
-            raise MalformedTranscriptionResponse(f"OpenAI repeated preceding context for chunk {chunk.index}")
-        return text
 
-    def _request_transcription(self, chunk: AudioChunk, wav_path: Path, fields: dict[str, str]) -> dict[str, Any]:
+    def _request_transcription(
+        self,
+        chunk: AudioChunk,
+        wav_path: Path,
+        fields: dict[str, str | list[str]],
+    ) -> dict[str, Any]:
         return _request_multipart(
             "https://api.openai.com/v1/audio/transcriptions",
             self.api_key,
@@ -230,16 +232,6 @@ class OpenAITranscriber:
             dead_request_error_type=DeadTranscriptionRequest,
         )
 
-    def _retry_alias_after_model_error(self, exc: Exception) -> str | None:
-        message = str(exc).lower()
-        if not any(marker in message for marker in ("model", "not found", "does not exist", "invalid_model")):
-            return None
-        if self._available_model == self.model:
-            return None
-        if self._available_model not in openai_transcription_aliases(self.model):
-            return None
-        return self._available_model
-
     def _record_usage(self, data: dict[str, Any], chunk: AudioChunk, model: str | None = None) -> None:
         usage = data.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -249,7 +241,11 @@ class OpenAITranscriber:
         audio_tokens = int(details.get("audio_tokens") or 0) if isinstance(details, dict) else 0
         fallback_cost = None
         if not (input_tokens or output_tokens or audio_tokens):
-            fallback_cost = max(0.0, chunk.end - chunk.start) / 60.0 * OPENAI_GPT4O_TRANSCRIBE_ESTIMATED_USD_PER_MINUTE
+            fallback_cost = estimate_transcription_cost(
+                self.provider,
+                model or self.model,
+                max(0.0, chunk.end - chunk.start),
+            )
         self.usage.add(
             provider=self.provider,
             model=model or self.model,
@@ -261,6 +257,33 @@ class OpenAITranscriber:
             total_tokens=total_tokens,
             cost_usd=fallback_cost,
         )
+
+
+class GPTTranscribeAdapter(OpenAITranscriber):
+    """Adapt the shared OpenAI file-transcription client to GPT Transcribe fields."""
+
+    def _transcription_fields(self, previous_transcript: str | None) -> dict[str, str | list[str]]:
+        fields: dict[str, str | list[str]] = {
+            "model": self.model,
+            "response_format": "json",
+        }
+        if self.language:
+            fields["languages"] = [self.language]
+        keywords = [
+            entry.term.strip()
+            for entry in self.glossary or []
+            if _valid_gpt_transcribe_keyword(entry.term)
+        ]
+        if keywords:
+            fields["keywords"] = keywords
+        if previous_transcript:
+            fields["prompt"] = previous_transcript
+        return fields
+
+
+def _valid_gpt_transcribe_keyword(value: str) -> bool:
+    keyword = value.strip()
+    return bool(keyword) and not any(character in keyword for character in ("<", ">", "\r", "\n"))
 
 
 def verify_gemini_model_available(model: str, api_key: str) -> None:
@@ -310,8 +333,8 @@ def _gemini_audio_tokens(usage: dict[str, Any]) -> int:
     return total
 
 
-def _is_external_suspect(text: str, chunk: AudioChunk) -> bool:
-    if _is_suspect_transcript(text, chunk):
+def _is_external_suspect(text: str, chunk: AudioChunk, *, allow_sparse: bool = False) -> bool:
+    if _is_suspect_transcript(text, chunk, enforce_minimum_density=not allow_sparse):
         return True
     normalized = "".join(text.split())
     duration = max(0.0, chunk.end - chunk.start)
@@ -354,7 +377,7 @@ def _request_json(
 def _request_multipart(
     url: str,
     api_key: str,
-    fields: dict[str, str],
+    fields: dict[str, str | list[str]],
     file_field: str,
     file_path: Path,
     error_type: type[Exception],
@@ -381,13 +404,21 @@ def _request_multipart(
     )
 
 
-def _multipart_body(boundary: str, fields: dict[str, str], file_field: str, file_path: Path) -> bytes:
+def _multipart_body(
+    boundary: str,
+    fields: dict[str, str | list[str]],
+    file_field: str,
+    file_path: Path,
+) -> bytes:
     chunks: list[bytes] = []
     for name, value in fields.items():
-        chunks.append(f"--{boundary}\r\n".encode("ascii"))
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
-        chunks.append(str(value).encode("utf-8"))
-        chunks.append(b"\r\n")
+        values = value if isinstance(value, list) else [value]
+        field_name = f"{name}[]" if isinstance(value, list) else name
+        for item in values:
+            chunks.append(f"--{boundary}\r\n".encode("ascii"))
+            chunks.append(f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'.encode("utf-8"))
+            chunks.append(str(item).encode("utf-8"))
+            chunks.append(b"\r\n")
     chunks.append(f"--{boundary}\r\n".encode("ascii"))
     chunks.append(
         f'Content-Disposition: form-data; name="{file_field}"; filename="{file_path.name}"\r\n'

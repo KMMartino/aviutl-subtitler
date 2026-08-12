@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
-import type { RunRequest, SilenceCutCandidate } from "../renderer/lib/types";
+import type { BrollCandidate, RunRequest, SilenceCutCandidate } from "../renderer/lib/types";
 import { resolveFfmpegCommand } from "./ffmpegManager";
 import { mediaContentType, resolveByteRange } from "./mediaRange";
 
@@ -12,9 +12,11 @@ type PreviewVariant = "original" | "seam";
 type RunPreview = {
   request: RunRequest;
   candidates: Map<string, SilenceCutCandidate>;
+  brollCandidates: Map<string, BrollCandidate>;
   sourceUrl: string;
   tokens: Set<string>;
   proxies: Map<string, string>;
+  brollPreviews: Map<string, string>;
   children: Set<ChildProcessWithoutNullStreams>;
 };
 
@@ -29,6 +31,7 @@ export function registerSilenceMediaScheme(): void {
 
 export class SilencePreviewManager {
   private readonly files = new Map<string, string>();
+  private readonly libraryUrls = new Map<string, string>();
   private readonly runs = new Map<string, RunPreview>();
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -49,12 +52,26 @@ export class SilencePreviewManager {
     this.cleanupRun(runId);
     const tokens = new Set<string>();
     const sourceUrl = this.registerFile(request.inputPath, tokens);
-    this.runs.set(runId, { request, candidates: new Map(), sourceUrl, tokens, proxies: new Map(), children: new Set() });
+    this.runs.set(runId, {
+      request,
+      candidates: new Map(),
+      brollCandidates: new Map(),
+      sourceUrl,
+      tokens,
+      proxies: new Map(),
+      brollPreviews: new Map(),
+      children: new Set(),
+    });
   }
 
   setCandidates(runId: string, candidates: SilenceCutCandidate[]): void {
     const run = this.requireRun(runId);
     run.candidates = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  }
+
+  setBrollCandidates(runId: string, candidates: BrollCandidate[]): void {
+    const run = this.requireRun(runId);
+    run.brollCandidates = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   }
 
   source(runId: string): { url: string } {
@@ -96,6 +113,48 @@ export class SilencePreviewManager {
     }
   }
 
+  brollPreview(runId: string, candidateId: string): Promise<{ url: string; mediaKind: "video" | "image" }> {
+    const run = this.requireRun(runId);
+    const candidate = run.brollCandidates.get(candidateId);
+    if (!candidate) return Promise.reject(new Error("Unknown B-roll candidate"));
+    const existing = run.brollPreviews.get(candidateId);
+    if (existing) return Promise.resolve({ url: existing, mediaKind: candidate.mediaKind });
+    if (candidate.mediaKind === "image") {
+      const url = this.registerFile(candidate.assetPath, run.tokens);
+      run.brollPreviews.set(candidateId, url);
+      return Promise.resolve({ url, mediaKind: "image" });
+    }
+    const task = this.queue.then(async () => {
+      const current = this.requireRun(runId);
+      const cached = current.brollPreviews.get(candidateId);
+      if (cached) return { url: cached, mediaKind: "video" as const };
+      const directory = path.join(this.cacheRoot, runId);
+      fs.mkdirSync(directory, { recursive: true });
+      const output = path.join(directory, `broll-${candidateId}.mp4`);
+      await generateBrollProxy(current.request, candidate, output, current.children);
+      if (!this.runs.has(runId)) {
+        fs.rmSync(output, { force: true });
+        throw new Error("B-roll preview run ended");
+      }
+      const url = this.registerFile(output, current.tokens);
+      current.brollPreviews.set(candidateId, url);
+      return { url, mediaKind: "video" as const };
+    });
+    this.queue = task.catch(() => undefined);
+    return task;
+  }
+
+  libraryMedia(file: string): { url: string } {
+    const resolved = path.resolve(file);
+    const existing = this.libraryUrls.get(resolved);
+    if (existing) return { url: existing };
+    const token = crypto.randomBytes(24).toString("hex");
+    const url = `${SILENCE_MEDIA_SCHEME}://media/${token}`;
+    this.files.set(token, resolved);
+    this.libraryUrls.set(resolved, url);
+    return { url };
+  }
+
   cleanupRun(runId: string): void {
     const run = this.runs.get(runId);
     if (run) {
@@ -108,6 +167,8 @@ export class SilencePreviewManager {
 
   cleanupAll(): void {
     for (const runId of [...this.runs.keys()]) this.cleanupRun(runId);
+    this.files.clear();
+    this.libraryUrls.clear();
     fs.rmSync(this.cacheRoot, { recursive: true, force: true });
   }
 
@@ -178,6 +239,27 @@ async function generateProxy(request: RunRequest, candidate: SilenceCutCandidate
   }
   args.push("-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output);
   await runFfmpeg(ffmpeg, args, children);
+}
+
+async function generateBrollProxy(
+  request: RunRequest,
+  candidate: BrollCandidate,
+  output: string,
+  children: Set<ChildProcessWithoutNullStreams>,
+): Promise<void> {
+  const ffmpeg = resolveFfmpegCommand("ffmpeg");
+  const duration = Math.min(15, Math.max(1, (candidate.sourceEndSec ?? candidate.sourceStartSec + 5) - candidate.sourceStartSec));
+  const filter = `fps=${request.silencePreviewFps},scale=-2:${request.silencePreviewHeight}:force_original_aspect_ratio=decrease`;
+  await runFfmpeg(
+    ffmpeg,
+    [
+      "-y", "-v", "error", "-ss", String(Math.max(0, candidate.sourceStartSec)),
+      "-t", String(duration), "-i", candidate.assetPath, "-map", "0:v:0", "-an",
+      "-vf", filter, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart", output,
+    ],
+    children,
+  );
 }
 
 function runFfmpeg(command: string, args: string[], children: Set<ChildProcessWithoutNullStreams>): Promise<void> {

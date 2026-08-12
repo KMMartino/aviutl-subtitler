@@ -7,6 +7,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
@@ -17,13 +18,14 @@ from .profiling import (
     RegroupProfile,
     SubtitleTimingProfile,
     write_llm_split_profile,
+    write_llm_split_request_diagnostics,
     write_llm_split_rejections,
-    write_regroup_profile,
     write_boundary_timing_profile,
+    write_regroup_profile,
     write_subtitle_timing_profile,
 )
 from .splitter import SENTENCE_TERMINAL_SOURCE, split_aligned_chunk, split_token_chain
-from .text_refiner import TextRefiner, _is_filler_only
+from .text_refiner import TextRefiner, _cleanup_content_fingerprint, _is_filler_only
 
 BOUNDARY_REVIEW_TERMS = (
     "について",
@@ -38,6 +40,46 @@ BOUNDARY_REVIEW_TERMS = (
     "が",
 )
 BOUNDARY_REVIEW_PUNCTUATION = set("、,;:")
+_SAFE_LLM_REQUEST_DIAGNOSTIC_FIELDS = (
+    "provider",
+    "model",
+    "operation",
+    "source_chars",
+    "annotated_chars",
+    "prompt_chars",
+    "candidate_count",
+    "zone_count",
+    "max_chars",
+    "max_tokens",
+    "request_attempt",
+    "request_attempts_allowed",
+    "started_at",
+    "elapsed_sec",
+    "timeout_sec",
+    "outcome",
+    "http_status",
+    "error_category",
+    "error_detail",
+    "request_id",
+    "retry_delay_sec",
+)
+
+
+def _llm_split_request_diagnostics_path(profile_path: Path) -> Path:
+    filename = profile_path.name
+    if filename.endswith(".llm_split.csv"):
+        filename = f"{filename[:-len('.llm_split.csv')]}.llm_split_requests.jsonl"
+    else:
+        filename = f"{profile_path.stem}.requests.jsonl"
+    return profile_path.with_name(filename)
+
+
+def _safe_llm_request_diagnostic(event: dict[str, object]) -> dict[str, object]:
+    return {
+        field_name: event[field_name]
+        for field_name in _SAFE_LLM_REQUEST_DIAGNOSTIC_FIELDS
+        if field_name in event
+    }
 
 
 @dataclass
@@ -273,13 +315,15 @@ def build_grouped_subtitles(
     subtitles: list[Subtitle] = []
     regroup_rows: list[RegroupProfile] = []
     llm_split_rows: list[LlmSplitProfile] = []
-    llm_split_rejections: list[tuple[LlmSplitProfile, str, str, list[str]]] = []
+    llm_split_request_rows: list[dict[str, object]] = []
+    llm_split_rejections: list[tuple[LlmSplitProfile, str, str, list[str], list[str]]] = []
     boundary_rows: list[BoundaryTimingProfile] = []
     fallback_chunks = 0
     tokenless_chunks = 0
     def split_chain(chain_index: int, chain: Chain):
         local_llm_rows: list[LlmSplitProfile] = []
-        local_llm_rejections: list[tuple[LlmSplitProfile, str, str, list[str], list[str], list[str]]] = []
+        local_llm_request_rows: list[dict[str, object]] = []
+        local_llm_rejections: list[tuple[LlmSplitProfile, str, str, list[str], list[str]]] = []
         local_fallback = 0
         local_tokenless = 0
         group = _merge_window(chain.chunks) if len(chain.chunks) > 1 and not chain.fallback else chain.chunks[0]
@@ -299,7 +343,7 @@ def build_grouped_subtitles(
             ) -> None:
                 if llm_split_profile_path is None and not llm_split_console:
                     return
-                output_line_count = len(result.lines or [])
+                selected_id_count = len(result.selected_ids or [])
                 row = LlmSplitProfile(
                     chain_index=chain_index,
                     attempt_index=attempt_index,
@@ -307,35 +351,41 @@ def build_grouped_subtitles(
                     input_tokens=input_tokens,
                     max_chars=max_chars,
                     raw_line_count=result.raw_line_count,
-                    clean_line_count=result.clean_line_count,
+                    valid_id_count=result.valid_id_count,
                     accepted=result.accepted,
                     reject_reason=result.reject_reason,
-                    output_line_count=output_line_count,
+                    selected_id_count=selected_id_count,
                     pass_name=pass_name,
-                    partial_accept_count=result.partial_accept_count,
-                    partial_reject_count=result.partial_reject_count,
-                    accepted_prefix_chars=result.accepted_prefix_chars,
-                    remaining_chars_after_partial=len(result.remaining_text_after_partial),
                     input_preview=result.input_text[:120].replace("\r", " ").replace("\n", " "),
                     sentence_break_count=result.sentence_break_count,
                     connective_break_count=result.connective_break_count,
                 )
                 if llm_split_profile_path is not None:
                     local_llm_rows.append(row)
-                    if not row.accepted or row.reject_reason == "partial_accept":
+                    for request_attempt in result.request_attempts:
+                        local_llm_request_rows.append(
+                            {
+                                **_safe_llm_request_diagnostic(request_attempt),
+                                "chain_index": chain_index,
+                                "split_attempt_index": attempt_index,
+                                "pass_name": pass_name,
+                                "split_accepted": result.accepted,
+                                "split_reject_reason": result.reject_reason,
+                            }
+                        )
+                    if not row.accepted:
                         local_llm_rejections.append(
                             (
                                 row,
                                 result.input_text,
                                 result.raw_response,
-                                result.cleaned_lines,
-                                result.partial_lines,
-                                result.partial_rejected_lines,
+                                result.candidate_ids,
+                                result.parsed_ids,
                             )
                         )
                 if llm_split_console:
                     status = "accepted" if row.accepted else "rejected"
-                    detail = f"lines={row.output_line_count}" if row.accepted else row.reject_reason
+                    detail = f"boundaries={row.selected_id_count}" if row.accepted else row.reject_reason
                     print(
                         f"LLM split planning chain {chain_index} attempt {attempt_index}: {status}, {detail}",
                         flush=True,
@@ -374,7 +424,16 @@ def build_grouped_subtitles(
             avg_internal_chunk_gap=sum(gaps) / len(gaps) if gaps else 0.0,
             gap_sec_used=chain.gap_sec,
         )
-        return chain_index, split_parts, regroup_row, local_llm_rows, local_llm_rejections, local_fallback, local_tokenless
+        return (
+            chain_index,
+            split_parts,
+            regroup_row,
+            local_llm_rows,
+            local_llm_request_rows,
+            local_llm_rejections,
+            local_fallback,
+            local_tokenless,
+        )
 
     if progress_callback is not None and chains:
         progress_callback("Planning subtitle breaks", 0, len(chains))
@@ -395,7 +454,16 @@ def build_grouped_subtitles(
 
     split_elapsed = time.perf_counter() - planning_started
 
-    for _, split_parts, regroup_row, local_rows, local_rejections, local_fallback, local_tokenless in sorted(
+    for (
+        _,
+        split_parts,
+        regroup_row,
+        local_rows,
+        local_request_rows,
+        local_rejections,
+        local_fallback,
+        local_tokenless,
+    ) in sorted(
         split_results,
         key=lambda item: item[0],
     ):
@@ -403,11 +471,13 @@ def build_grouped_subtitles(
         fallback_chunks += local_fallback
         tokenless_chunks += local_tokenless
         llm_split_rows.extend(local_rows)
+        llm_split_request_rows.extend(local_request_rows)
         llm_split_rejections.extend(local_rejections)
         if regroup_profile_path is not None or planning_profile_path is not None:
             regroup_rows.append(regroup_row)
     subtitles = [s for s in subtitles if s.text.strip()]
     subtitles.sort(key=lambda s: (s.start_time, s.end_time))
+    _move_leading_commas_to_previous_subtitle(subtitles)
     left_merge_count = _left_merge_adjacent_subtitles(subtitles, max_chars)
     stripped_period_count = _strip_standard_sentence_periods(subtitles)
     boundary_review_count = 0
@@ -425,6 +495,9 @@ def build_grouped_subtitles(
     if llm_split_profile_path is not None:
         write_llm_split_profile(llm_split_profile_path, llm_split_rows)
         print(f"Wrote LLM split diagnostics: {llm_split_profile_path}", flush=True)
+        request_diagnostics_path = _llm_split_request_diagnostics_path(llm_split_profile_path)
+        write_llm_split_request_diagnostics(request_diagnostics_path, llm_split_request_rows)
+        print(f"Wrote LLM split request diagnostics: {request_diagnostics_path}", flush=True)
         rejection_path = llm_split_profile_path.with_name(
             f"{llm_split_profile_path.stem}.rejected.txt"
         )
@@ -467,9 +540,10 @@ def build_grouped_subtitles(
         max(0.20, chain_lead_in_sec),
         boundary_rows,
     )
+    _cap_subtitle_durations(subtitles, max_duration)
 
     if subtitle_timing_profile_path is not None:
-        _write_subtitle_timing_profile(subtitle_timing_profile_path, subtitles)
+        write_subtitle_timing_artifact(subtitle_timing_profile_path, subtitles)
     if boundary_timing_profile_path is not None:
         write_boundary_timing_profile(boundary_timing_profile_path, boundary_rows)
 
@@ -481,6 +555,7 @@ def build_grouped_subtitles(
             subtitles,
             refiner,
             max(1, cleanup_workers),
+            max(1, cleanup_window_subtitles),
             cleanup_diff_path,
             progress_callback,
         )
@@ -523,6 +598,17 @@ def _append_adjustment(current: str, adjustment: str) -> str:
     return f"{current};{adjustment}"
 
 
+def _cap_subtitle_durations(subtitles: list[Subtitle], max_duration: float) -> None:
+    for subtitle in subtitles:
+        if subtitle.end_time - subtitle.start_time <= max_duration:
+            continue
+        subtitle.end_time = subtitle.start_time + max_duration
+        subtitle.timing_adjustment = _append_adjustment(
+            subtitle.timing_adjustment,
+            "max_duration",
+        )
+
+
 def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) -> int:
     merged: list[Subtitle] = []
     merge_count = 0
@@ -543,6 +629,48 @@ def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) ->
         subtitles[:] = merged
         _renumber_chain_parts(subtitles)
     return merge_count
+
+
+def _move_leading_commas_to_previous_subtitle(subtitles: list[Subtitle]) -> int:
+    """Give a leading Japanese comma to the subtitle it grammatically closes."""
+    moved = 0
+    kept: list[Subtitle] = []
+    for current in subtitles:
+        comma_count = len(current.text) - len(current.text.lstrip("、"))
+        if comma_count <= 0 or not kept:
+            kept.append(current)
+            continue
+        previous = kept[-1]
+        previous.text = f"{previous.text}{'、' * comma_count}"
+        current.text = current.text[comma_count:]
+        remaining = comma_count
+        while remaining > 0 and current.tokens:
+            token = current.tokens[0]
+            token_commas = len(token.text) - len(token.text.lstrip("、"))
+            if token_commas <= 0:
+                break
+            transfer = min(remaining, token_commas)
+            previous.tokens.append(
+                AlignedToken("、" * transfer, token.start, token.end, token.kind)
+            )
+            token.text = token.text[transfer:]
+            if not token.text:
+                current.tokens.pop(0)
+            remaining -= transfer
+        previous.end_time = max(previous.end_time, current.start_time)
+        previous.timing_adjustment = _append_adjustment(
+            previous.timing_adjustment, "leading_comma_left"
+        )
+        current.timing_adjustment = _append_adjustment(
+            current.timing_adjustment, "leading_comma_left"
+        )
+        moved += comma_count
+        if current.text.strip():
+            kept.append(current)
+    if len(kept) != len(subtitles):
+        subtitles[:] = kept
+        _renumber_chain_parts(subtitles)
+    return moved
 
 
 def _same_chain_for_left_merge(left: Subtitle, right: Subtitle) -> bool:
@@ -732,7 +860,7 @@ def _touch_same_chain_subtitles(
             )
 
 
-def _write_subtitle_timing_profile(path: Path, subtitles: list[Subtitle]) -> None:
+def write_subtitle_timing_artifact(path: Path, subtitles: list[Subtitle]) -> None:
     rows: list[SubtitleTimingProfile] = []
     previous: Subtitle | None = None
     for index, sub in enumerate(subtitles):
@@ -786,7 +914,10 @@ def _cleanup_group_key(subtitle: Subtitle) -> int | None:
     return subtitle.cleanup_group_index if subtitle.cleanup_group_index is not None else subtitle.chain_index
 
 
-def _cleanup_windows(subtitles: list[Subtitle]) -> list[tuple[int, int]]:
+def _cleanup_windows(
+    subtitles: list[Subtitle],
+    max_window_subtitles: int = 256,
+) -> list[tuple[int, int]]:
     windows: list[tuple[int, int]] = []
     i = 0
     while i < len(subtitles):
@@ -797,7 +928,11 @@ def _cleanup_windows(subtitles: list[Subtitle]) -> list[tuple[int, int]]:
             and _cleanup_group_key(subtitles[end]) == group_index
         ):
             end += 1
-        windows.append((i, end))
+        cursor = i
+        while cursor < end:
+            window_end = min(end, cursor + max(1, max_window_subtitles))
+            windows.append((cursor, window_end))
+            cursor = window_end
         i = end
     return windows
 
@@ -862,11 +997,12 @@ def _refine_subtitle_text(
     subtitles: list[Subtitle],
     refiner: TextRefiner,
     workers: int = 1,
+    window_subtitles: int = 1,
     cleanup_diff_path: Path | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> CleanupStats:
     total = len(subtitles)
-    windows = _cleanup_windows(subtitles)
+    windows = _cleanup_windows(subtitles, window_subtitles)
     if progress_callback is not None and windows:
         progress_callback("Cleaning subtitles", 0, len(windows))
     changes: list[tuple[int, str, str]] = []
@@ -880,7 +1016,10 @@ def _refine_subtitle_text(
                 start, end = futures[future]
                 _, refined = future.result()
                 window = subtitles[start:end]
-                if len(refined) == len(window):
+                if len(refined) == len(window) and _cleanup_window_preserves_content(
+                    [sub.text for sub in window],
+                    refined,
+                ):
                     for index, text in enumerate(refined, start=start):
                         refinements[index] = text.strip()
                 if progress_callback is not None:
@@ -893,7 +1032,10 @@ def _refine_subtitle_text(
     for completed, (start, end) in enumerate(windows, start=1):
         window = subtitles[start:end]
         refined = refiner.refine([sub.text for sub in window])
-        if len(refined) == len(window):
+        if len(refined) == len(window) and _cleanup_window_preserves_content(
+            [sub.text for sub in window],
+            refined,
+        ):
             for index, text in enumerate(refined, start=start):
                 refinements[index] = text.strip()
         if progress_callback is not None:
@@ -902,6 +1044,16 @@ def _refine_subtitle_text(
     if cleanup_diff_path is not None:
         _write_cleanup_diff(cleanup_diff_path, changes)
     return _cleanup_stats(total, windows, changes)
+
+
+def _cleanup_window_preserves_content(originals: list[str], refined: list[str]) -> bool:
+    before = _cleanup_content_fingerprint("".join(originals))
+    after = _cleanup_content_fingerprint("".join(refined))
+    if len(after) + 2 < len(before):
+        return False
+    if not before:
+        return not after
+    return SequenceMatcher(a=before, b=after, autojunk=False).ratio() >= 0.72
 
 
 def _cleanup_stats(input_count: int, windows: list[tuple[int, int]], changes: list[tuple[int, str, str]]) -> CleanupStats:

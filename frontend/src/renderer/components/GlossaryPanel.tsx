@@ -1,6 +1,7 @@
 import { ChevronDown, FileUp, Plus, Save, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { keyboardReorder } from "../lib/keyboardReorder";
+import { useI18n } from "../i18n";
 
 type Props = {
   value: string;
@@ -85,6 +86,7 @@ function isDisabledEntryComment(commentBody: string): boolean {
 }
 
 export default function GlossaryPanel({ value, onChange, onSave, onImport }: Props) {
+  const { t } = useI18n();
   const rowsRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(true);
   const [addingTag, setAddingTag] = useState(false);
@@ -218,16 +220,16 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
   return (
     <section className={`panel glossary-panel ${expanded ? "expanded" : "collapsed"}`}>
       <button type="button" className="glossary-summary" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
-        <span><Save size={18} /> Glossary</span>
+        <span><Save size={18} /> {t("glossary.title")}</span>
         <span className="glossary-count">
-          {editableRows.filter((row) => row.term.trim() || row.guidance.trim()).length} entries
+          {t("glossary.entries", { count: editableRows.filter((row) => row.term.trim() || row.guidance.trim()).length })}
           <ChevronDown size={16} className={expanded ? "chevron-open" : ""} />
         </span>
       </button>
       <div className="collapsible-panel-body">
         <div className="collapsible-panel-content">
           {editableRows.length > 0 && (
-            <div className="glossary-tag-toggles" aria-label="Glossary tag toggles">
+            <div className="glossary-tag-toggles" aria-label={t("glossary.tagToggles")}>
               <div className="glossary-tag-chip glossary-tag-all">
                 <label className="check">
                   <input
@@ -235,7 +237,7 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                     checked={editableRows.length > 0 && editableRows.every((row) => row.enabled)}
                     onChange={(event) => toggleAllRows(event.target.checked)}
                   />
-                  ALL
+                  {t("glossary.all")}
                 </label>
               </div>
               {tags.map((tag, tagIndex) => {
@@ -260,7 +262,7 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                     <button
                       type="button"
                       className="glossary-drag-handle"
-                      aria-label={`Reorder ${tag} tag`}
+                      aria-label={t("glossary.reorderTag", { tag })}
                       aria-describedby="glossary-reorder-instructions"
                       draggable
                       onKeyDown={(event) => {
@@ -288,34 +290,34 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
               })}
             </div>
           )}
-          <span id="glossary-reorder-instructions" className="sr-only">Use arrow keys to move a tag, or Home and End to move it to an edge.</span>
+          <span id="glossary-reorder-instructions" className="sr-only">{t("glossary.reorderHelp")}</span>
           {mergingTags && (
             <div className="glossary-merge">
-              <select aria-label="First tag to merge" value={mergeTagA} onChange={(event) => {
+              <select aria-label={t("glossary.firstMerge")} value={mergeTagA} onChange={(event) => {
                 setMergeTagA(event.target.value);
                 if (!mergeTagName) setMergeTagName(event.target.value);
               }}>
                 {tags.map((tag) => <option value={tag} key={tag}>{tag}</option>)}
               </select>
-              <select aria-label="Second tag to merge" value={mergeTagB} onChange={(event) => setMergeTagB(event.target.value)}>
+              <select aria-label={t("glossary.secondMerge")} value={mergeTagB} onChange={(event) => setMergeTagB(event.target.value)}>
                 {tags.map((tag) => <option value={tag} key={tag}>{tag}</option>)}
               </select>
               <input
-                aria-label="Merged tag name"
+                aria-label={t("glossary.mergedName")}
                 value={mergeTagName}
                 onChange={(event) => setMergeTagName(event.target.value)}
-                placeholder="Merged tag"
+                placeholder={t("glossary.mergedPlaceholder")}
               />
-              <button onClick={mergeTags} disabled={!mergeTagA || !mergeTagB || mergeTagA === mergeTagB || !mergeTagName.trim()}>Apply</button>
-              <button onClick={() => setMergingTags(false)}>Cancel</button>
+              <button onClick={mergeTags} disabled={!mergeTagA || !mergeTagB || mergeTagA === mergeTagB || !mergeTagName.trim()}>{t("common.apply")}</button>
+              <button onClick={() => setMergingTags(false)}>{t("common.cancel")}</button>
             </div>
           )}
-          <div className="glossary-editor" role="table" aria-label="Glossary entries">
+          <div className="glossary-editor" role="table" aria-label={t("glossary.entriesAria")}>
             <div className="glossary-header" role="row">
-              <span role="columnheader">Use</span>
-              <span role="columnheader">Suggested text</span>
-              <span role="columnheader">Explanation</span>
-              <span role="columnheader">Tag</span>
+              <span role="columnheader">{t("glossary.use")}</span>
+              <span role="columnheader">{t("glossary.suggested")}</span>
+              <span role="columnheader">{t("glossary.explanation")}</span>
+              <span role="columnheader">{t("glossary.tag")}</span>
               <span aria-hidden="true" />
             </div>
             <div className="glossary-rows" ref={rowsRef}>
@@ -324,34 +326,34 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                   <label className="glossary-use">
                     <input
                       type="checkbox"
-                      aria-label={`Use glossary row ${index + 1}`}
+                      aria-label={t("glossary.useRow", { number: index + 1 })}
                       checked={row.enabled}
                       onChange={(event) => updateRow(index, { enabled: event.target.checked })}
                     />
                   </label>
                   <input
-                    aria-label={`Suggested text ${index + 1}`}
+                    aria-label={t("glossary.suggestedRow", { number: index + 1 })}
                     value={row.term}
                     onChange={(event) => updateRow(index, { term: event.target.value })}
                     spellCheck={false}
                   />
                   <input
-                    aria-label={`Explanation ${index + 1}`}
+                    aria-label={t("glossary.explanationRow", { number: index + 1 })}
                     value={row.guidance}
                     onChange={(event) => updateRow(index, { guidance: event.target.value })}
                     spellCheck={false}
                   />
                   <select
-                    aria-label={`Tag ${index + 1}`}
+                    aria-label={t("glossary.tagRow", { number: index + 1 })}
                     value={row.tag}
                     onChange={(event) => updateRow(index, { tag: event.target.value })}
                   >
-                    <option value="">No tag</option>
+                    <option value="">{t("glossary.noTag")}</option>
                     {tags.map((tag) => <option value={tag} key={tag}>{tag}</option>)}
                   </select>
                   <button
                     className="icon-button"
-                    aria-label={`Remove glossary row ${index + 1}`}
+                    aria-label={t("glossary.removeRow", { number: index + 1 })}
                     onClick={() => removeRow(index)}
                     disabled={editableRows.length === 1 && !row.term && !row.guidance && !row.tag}
                   >
@@ -363,11 +365,11 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
           </div>
           <div className="glossary-actions">
             <span>
-              <button onClick={addRow}><Plus size={16} /> Entry</button>
+              <button onClick={addRow}><Plus size={16} /> {t("glossary.entry")}</button>
               {addingTag ? (
                 <span className="glossary-new-tag">
                   <input
-                    aria-label="New glossary tag"
+                    aria-label={t("glossary.newTag")}
                     value={newTag}
                     onChange={(event) => setNewTag(event.target.value)}
                     onKeyDown={(event) => {
@@ -379,17 +381,17 @@ export default function GlossaryPanel({ value, onChange, onSave, onImport }: Pro
                     }}
                     autoFocus
                   />
-                  <button onClick={addTag}>Add</button>
+                  <button onClick={addTag}>{t("common.add")}</button>
                 </span>
               ) : (
-                <button onClick={() => setAddingTag(true)}><Plus size={16} /> Tag</button>
+                <button onClick={() => setAddingTag(true)}><Plus size={16} /> {t("glossary.tag")}</button>
               )}
-              <button onClick={sortRowsByTags} disabled={editableRows.length < 2 || tags.length === 0}>Sort</button>
-              <button onClick={startTagMerge} disabled={tags.length < 2}>Merge</button>
+              <button onClick={sortRowsByTags} disabled={editableRows.length < 2 || tags.length === 0}>{t("glossary.sort")}</button>
+              <button onClick={startTagMerge} disabled={tags.length < 2}>{t("glossary.merge")}</button>
             </span>
             <span>
-              <button onClick={onImport}><FileUp size={16} /> Import</button>
-              <button className="primary-inline" onClick={onSave}><Save size={16} /> Save</button>
+              <button onClick={onImport}><FileUp size={16} /> {t("glossary.import")}</button>
+              <button className="primary-inline" onClick={onSave}><Save size={16} /> {t("common.save")}</button>
             </span>
           </div>
         </div>

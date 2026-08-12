@@ -16,9 +16,12 @@ class WorkflowConfigTests(unittest.TestCase):
         self.assertEqual(load_workflow_config("local-long-stream")["workflow"]["mode"], "long-stream")
         self.assertEqual(load_workflow_config("hosted-long-stream")["workflow"]["mode"], "long-stream")
 
-    def test_hosted_workflows_use_hosted_transcription(self):
-        self.assertEqual(load_workflow_config("hosted")["backend"]["transcriber"], "gemini")
-        self.assertEqual(load_workflow_config("hosted-long-stream")["cleanup"]["backend"], "openai")
+    def test_hosted_workflows_default_to_gpt_transcribe(self):
+        for workflow in ("hosted", "hosted-long-stream"):
+            with self.subTest(workflow=workflow):
+                backend = load_workflow_config(workflow)["backend"]
+                self.assertEqual(backend["transcriber"], "openai")
+                self.assertEqual(backend["transcription_model"], "gpt-transcribe")
 
 if __name__ == "__main__":
     unittest.main()

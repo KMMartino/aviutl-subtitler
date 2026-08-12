@@ -68,6 +68,11 @@ function makePaths(): RuntimePaths {
     userModelsRoot: path.join(root, "models"),
     managedPythonRoot: path.join(root, "python"),
     managedFfmpegRoot: path.join(root, "tools", "ffmpeg"),
+    mediaLibraryRoot: path.join(root, "media-library"),
+    mediaLibraryDatabase: path.join(root, "media-library", "library.sqlite3"),
+    managedMediaRoot: path.join(root, "SubUtl Media"),
+    managedWebMediaRoot: path.join(root, "SubUtl Web Media"),
+    managedYtDlpRoot: path.join(root, "tools", "yt-dlp"),
     envFile: path.join(root, ".env"),
     glossaryFile: path.join(root, "glossary.txt"),
   };

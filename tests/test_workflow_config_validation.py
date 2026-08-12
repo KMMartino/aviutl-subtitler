@@ -54,11 +54,19 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_hosted_openai_transcription_and_gemini_cleanup_are_allowed(self):
         config = load_workflow_config("hosted")
         config["backend"]["transcriber"] = "openai"
-        config["backend"]["transcription_model"] = "gpt-4o-transcribe"
+        config["backend"]["transcription_model"] = "gpt-transcribe"
         config["cleanup"]["backend"] = "gemini"
-        config["cleanup"]["api_model"] = "gemini-3.5-flash"
+        config["cleanup"]["api_model"] = "gemini-3.6-flash"
 
         validate_workflow_config(config, workflow="hosted", check_paths=False)
+
+    def test_unsupported_openai_transcription_model_is_rejected(self):
+        config = load_workflow_config("hosted")
+        config["backend"]["transcriber"] = "openai"
+        config["backend"]["transcription_model"] = "retired-openai-transcription"
+
+        with self.assertRaises(SubtitlerError):
+            validate_workflow_config(config, workflow="hosted", check_paths=False)
 
     def test_unapproved_hosted_model_is_rejected(self):
         config = load_workflow_config("hosted")
@@ -73,6 +81,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("openai", "gpt-5.6-sol"),
             ("openai", "gpt-5.6-terra"),
             ("openai", "gpt-5.6-luna"),
+            ("gemini", "gemini-3.6-flash"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -84,8 +93,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
     def test_new_approved_transcription_models_are_allowed(self):
         for backend, model in (
-            ("openai", "gpt-4o-mini-transcribe"),
-            ("openai", "gpt-4o-mini-transcribe-2025-12-15"),
+            ("openai", "gpt-transcribe"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -138,6 +146,13 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         with self.assertRaises(SubtitlerError):
             validate_workflow_config(config, workflow="local-long-stream", check_paths=False)
 
+    def test_invalid_long_stream_transcription_scope_is_rejected(self):
+        config = load_workflow_config("hosted-long-stream")
+        config["workflow"]["transcription_scope"] = "sometimes"
+
+        with self.assertRaises(SubtitlerError):
+            validate_workflow_config(config, workflow="hosted-long-stream", check_paths=False)
+
     def test_hosted_short_youtube_chapters_are_allowed(self):
         config = load_workflow_config("hosted")
         config["additional_settings"]["youtube_chapters"] = True
@@ -169,6 +184,9 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
     def test_invalid_cut_silence_mode_is_rejected(self):
         self.assert_invalid_field("additional_settings", "cut_silence_mode", "sometimes")
+
+    def test_invalid_editorial_map_mode_is_rejected(self):
+        self.assert_invalid_field("additional_settings", "editorial_map_mode", "automatic")
 
     def test_render_cut_video_is_allowed_only_for_short_workflows(self):
         for workflow in ("local", "hosted"):

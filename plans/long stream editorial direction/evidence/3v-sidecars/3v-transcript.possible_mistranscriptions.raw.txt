@@ -1,0 +1,38 @@
+=== lines 1-16 ===
+1	high	第3章、初のマザークリスタル破壊編です。第3章、初のマザークリスタル破壊編です	duplicated sentence
+16	medium	第二形態は赤々します	likely ASR artifact / topic-incoherent wording
+
+=== lines 17-32 ===
+26	medium	、装備しているアビリティによっては難しいかもしれません	subtitle boundary join / cut-in fragment
+
+=== lines 33-48 ===
+45	medium	し、	possible cut fragment
+
+=== lines 49-64 ===
+62	medium	し、	subtitle-boundary join / likely cut fragment
+
+=== lines 65-80 ===
+73	medium	ティフォン戦には勇者の紋章がありますので、忘れずに直前セーブをしておきましょう	exact duplicate of previous subtitle line
+75	high	直解	likely ASR error / wrong word choice
+
+=== lines 81-96 ===
+
+
+=== lines 97-112 ===
+NONE
+
+=== lines 113-128 ===
+124	high	もちろんこれで増強できる攻撃にもちろんこれで	repeated phrase / loop fragment
+127	high	反復横飛び失敗、とても悲しい。カット	stray cleanup/edit note in subtitle text
+
+=== lines 129-144 ===
+
+
+=== lines 145-160 ===
+
+
+=== lines 161-176 ===
+NONE
+
+=== lines 177-185 ===
+179	high	クップか	likely ASR artifact; incoherent word in context

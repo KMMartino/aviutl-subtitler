@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { ArrowLeft, Settings as SettingsIcon } from "lucide-react";
+import { ArrowLeft, Library, Settings as SettingsIcon } from "lucide-react";
 import ModeSelector from "./components/ModeSelector";
 import ThemeSelector from "./components/ThemeSelector";
 import InputPanel from "./components/InputPanel";
+import EditorialProjectPanel from "./components/EditorialProjectPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import GlossaryPanel from "./components/GlossaryPanel";
 import RunPanel from "./components/RunPanel";
@@ -10,9 +11,11 @@ import LogViewer from "./components/LogViewer";
 import OutputPanel from "./components/OutputPanel";
 import AdditionalSettingsPanel from "./components/AdditionalSettingsPanel";
 import SilenceReviewScreen from "./components/SilenceReviewScreen";
+import MediaLibraryScreen from "./components/MediaLibraryScreen";
+import BrollReviewScreen from "./components/BrollReviewScreen";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
-import { defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, CoreWorkflowSettings, CutSilenceEncoderPreset, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
+import { defaultEditorialCheckpointPath, defaultOutputPath, defaultSidecarDir } from "./lib/paths";
+import type { AppSettings, BrollCandidate, BrollReviewDecision, CoreWorkflowSettings, CutSilenceEncoderPreset, EditorialProjectRequest, EditorialRestartMode, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
 import { useBatchedLog } from "./hooks/useBatchedLog";
 import { useMediaAnalysis } from "./hooks/useMediaAnalysis";
@@ -22,8 +25,10 @@ import { useManagedLlama as useManagedLlamaController } from "./hooks/useManaged
 import { useRuntimeSetup } from "./hooks/useRuntimeSetup";
 import { clampResize, resizeFromKey } from "./lib/resizeInteraction";
 import { defaultSettingsExpansion, updateSettingsExpansion, workflowFamily, type SettingsExpansionByFamily } from "./lib/settingsExpansion";
+import { useI18n } from "./i18n";
 
 export default function App() {
+  const { setLocale, t } = useI18n();
   const [startupError, setStartupError] = useState("");
   const pathRequest = useRef(0);
   const [projectRoot, setProjectRoot] = useState("");
@@ -36,6 +41,20 @@ export default function App() {
   const [mediaAnalysisRevision, setMediaAnalysisRevision] = useState(0);
   const [outputPath, setOutputPath] = useState("");
   const [sidecarDir, setSidecarDir] = useState("");
+  const [editorialProject, setEditorialProject] = useState<EditorialProjectRequest>({
+    sources: [],
+    titleOrGame: "",
+    objective: "",
+    targetDurationMinSeconds: 60,
+    targetDurationMaxSeconds: 60,
+    mustKeepNotes: [],
+    deEmphasizeNotes: [],
+    outputLocale: "en"
+  });
+  const [editorialResumeCheckpoint, setEditorialResumeCheckpoint] = useState("");
+  const [editorialRestartFrom, setEditorialRestartFrom] = useState<EditorialRestartMode>("compatible");
+  const [editorialExtensionCheckpoint, setEditorialExtensionCheckpoint] = useState("");
+  const [editorialExtensionBaseCount, setEditorialExtensionBaseCount] = useState(0);
   const [managedDeleteAction, setManagedDeleteAction] = useState("");
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
@@ -48,6 +67,7 @@ export default function App() {
   const [encoderProbes, setEncoderProbes] = useState<EncoderProbeResult[]>([]);
   const [probingEncoders, setProbingEncoders] = useState(false);
   const [silenceReview, setSilenceReview] = useState<{ runId: string; reviewId: string; candidates: SilenceCutCandidate[] } | null>(null);
+  const [brollReview, setBrollReview] = useState<{ runId: string; reviewId: string; candidates: BrollCandidate[] } | null>(null);
   const workflow = settings?.selectedWorkflow ?? "local";
   const { envStatus, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
   const {
@@ -92,11 +112,13 @@ export default function App() {
     installPythonRequirements,
     downloadFfmpeg,
     deleteManagedFfmpeg,
+    installOrUpdateYtDlp,
+    deleteManagedYtDlp,
     downloadAlignmentModel,
     deleteManagedAlignmentModel,
   } = useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs, setCoreSettings, refreshHfDownloaderStatus });
   const { analysis, analyzing, analysisError, clearAnalysis } = useMediaAnalysis(inputPath, mediaAnalysisRevision, setCoreSettings);
-  const [view, setView] = useState<"main" | "settings">("main");
+  const [view, setView] = useState<"main" | "settings" | "library">("main");
   const [inputWidth, setInputWidth] = useState(48);
   const [logsHeight, setLogsHeight] = useState(24);
 
@@ -116,7 +138,16 @@ export default function App() {
     analysis?.videoCodec
     && (!renderCutVideo || (settings?.cutSilenceEncoderPreset !== "unconfigured" && selectedEncoderProbe?.available && !probingEncoders))
   );
-  const canRun = Boolean(settings && configs && configPaths && inputPath && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady && cutSilenceReady);
+  const editorialMapEnabled = workflow === "hosted-long-stream" && coreSettings?.additionalSettings?.editorialMapMode === "suggestions";
+  const editorialReady = !editorialMapEnabled || Boolean(
+    editorialResumeCheckpoint || (editorialProject.sources.length
+    && editorialProject.sources.every((source) => source.roleConfirmed)
+    && editorialProject.titleOrGame.trim()
+    && editorialProject.objective.trim()
+    && editorialProject.targetDurationMinSeconds > 0
+    && editorialProject.targetDurationMaxSeconds >= editorialProject.targetDurationMinSeconds)
+  );
+  const canRun = Boolean(settings && configs && configPaths && (inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady && cutSilenceReady && editorialReady);
 
   useEffect(() => {
     void loadInitialState();
@@ -136,10 +167,16 @@ export default function App() {
   }, [settings?.theme]);
 
   useEffect(() => {
+    if (!settings) return;
+    setLocale(settings.appLocale);
+    document.documentElement.lang = settings.appLocale;
+  }, [settings?.appLocale, setLocale]);
+
+  useEffect(() => {
     if (!inputPath || !settings) return;
-    setOutputPath(defaultOutputPath(inputPath, settings.selectedWorkflow));
+    setOutputPath(editorialResumeCheckpoint || editorialExtensionCheckpoint || (editorialMapEnabled ? defaultEditorialCheckpointPath(inputPath) : defaultOutputPath(inputPath, settings.selectedWorkflow)));
     setSidecarDir(defaultSidecarDir(inputPath));
-  }, [inputPath, settings?.selectedWorkflow]);
+  }, [inputPath, settings?.selectedWorkflow, editorialMapEnabled, editorialResumeCheckpoint, editorialExtensionCheckpoint]);
 
   useEffect(() => {
     if (!settings) return;
@@ -201,7 +238,7 @@ export default function App() {
   useEffect(() => {
     if (!settings || !configs || !coreSettings) return;
     const timer = window.setTimeout(() => {
-      void persistWorkflowSettings(false).catch((error) => setNotice(`Settings were not saved: ${error instanceof Error ? error.message : String(error)}`));
+      void persistWorkflowSettings(false).catch((error) => setNotice(t("notice.settingsSaveFailed", { error: error instanceof Error ? error.message : String(error) })));
     }, 500);
     return () => window.clearTimeout(timer);
   }, [coreSettings, workflow]);
@@ -229,9 +266,9 @@ export default function App() {
     if (!next) return;
     try {
       await window.subtitler.saveAppSettings({ ...next, lastSidecarDir: sidecarDir });
-      if (showNotice) setNotice("Settings saved");
+      if (showNotice) setNotice(t("notice.settingsSaved"));
     } catch (error) {
-      setNotice(`Settings were not saved: ${error instanceof Error ? error.message : String(error)}`);
+      setNotice(t("notice.settingsSaveFailed", { error: error instanceof Error ? error.message : String(error) }));
     }
   }
 
@@ -244,19 +281,19 @@ export default function App() {
     await window.subtitler.saveWorkflowConfig(workflow, workflowConfig);
     setConfigs({ ...configs, [workflow]: workflowConfig });
     await saveSettings(settings, showNotice);
-    if (showNotice) setNotice("Settings saved");
+    if (showNotice) setNotice(t("notice.settingsSaved"));
   }
 
   async function saveGlossary() {
     await window.subtitler.saveGlossary(glossary);
-    setNotice("Glossary saved");
+    setNotice(t("notice.glossarySaved"));
   }
 
   async function importGlossary() {
     const imported = await window.subtitler.importGlossary();
     if (imported === null) return;
     setGlossary(imported);
-    setNotice("Glossary imported");
+    setNotice(t("notice.glossaryImported"));
   }
 
   async function refreshPathStatus(core: CoreWorkflowSettings) {
@@ -312,7 +349,7 @@ export default function App() {
       setElapsedMs(0);
       const result = await window.subtitler.startRun({
         workflow,
-        inputPath,
+        inputPath: editorialResumeCheckpoint || editorialExtensionCheckpoint || inputPath,
         outputPath,
         configPath: configPaths[workflow],
         envFile: settings.envFile,
@@ -322,7 +359,16 @@ export default function App() {
         profile: coreSettings.diagnostics.profile,
         cutSilenceEncoderPreset: settings.cutSilenceEncoderPreset,
         silencePreviewHeight: settings.silencePreviewHeight,
-        silencePreviewFps: settings.silencePreviewFps
+        silencePreviewFps: settings.silencePreviewFps,
+        editorialProject: editorialMapEnabled && (!editorialResumeCheckpoint || Boolean(editorialExtensionCheckpoint)) ? {
+          ...editorialProject,
+          subtitleMode: coreSettings.additionalSettings?.editorialSubtitleMode ?? "full",
+          outputLocale: editorialExtensionCheckpoint ? editorialProject.outputLocale ?? "en" : settings.appLocale
+        } : undefined,
+        editorialCheckpoint: editorialMapEnabled ? (editorialResumeCheckpoint || editorialExtensionCheckpoint || undefined) : undefined,
+        editorialCheckpointSources: editorialMapEnabled && (editorialResumeCheckpoint || editorialExtensionCheckpoint) && editorialProject.sources.length ? editorialProject.sources : undefined,
+        editorialRestartFrom: editorialMapEnabled && (editorialResumeCheckpoint || editorialExtensionCheckpoint) ? editorialRestartFrom : undefined,
+        editorialExtend: editorialMapEnabled && Boolean(editorialExtensionCheckpoint) ? true : undefined
       });
       setActiveRunId(result.runId);
     } catch (error) {
@@ -330,13 +376,13 @@ export default function App() {
       setRunState("failed");
       setActiveRunId("");
       replaceLogs(message ? `${message}\n` : "");
-      setNotice(message || "Run failed to start");
+      setNotice(message || t("notice.runStartFailed"));
     }
   }
 
-  async function cancelRun() {
-    if (!activeRunId) return;
-    await window.subtitler.cancelRun(activeRunId);
+  async function cancelRun(immediate = false, requestedRunId = activeRunId) {
+    if (!requestedRunId) return;
+    await window.subtitler.cancelRun(requestedRunId, immediate);
   }
 
   function handleRunEvent(event: RunEvent) {
@@ -349,17 +395,22 @@ export default function App() {
     } else if (event.type === "exit") {
       setElapsedMs(event.elapsedMs);
       setRunState(event.cancelled ? "cancelled" : event.code === 0 ? "succeeded" : "failed");
+      if (!event.cancelled && event.code === 0) appendLog("\nRun complete.\n");
       setActiveRunId("");
       setSilenceReview(null);
+      setBrollReview(null);
     } else if (event.type === "error") {
       setRunState("failed");
       appendLog(`\n${event.message}\n`);
     } else if (event.type === "silence-review-required") {
       setRunState("reviewing");
       setSilenceReview({ runId: event.runId, reviewId: event.reviewId, candidates: event.candidates });
+    } else if (event.type === "broll-review-required") {
+      setRunState("reviewing");
+      setBrollReview({ runId: event.runId, reviewId: event.reviewId, candidates: event.candidates });
     } else if (event.type === "silence-cut-output") {
       appendLog(`\nCut video: ${event.path}\n`);
-      setNotice("Cut video created");
+      setNotice(t("notice.cutVideoCreated"));
     } else if (event.type === "silence-candidates" && event.workflow === "hosted" && event.candidates.length) {
       void preflightHostedSilencePreview(event.runId, event.candidates);
     }
@@ -385,7 +436,7 @@ export default function App() {
   async function probeEncoders() {
     setProbingEncoders(true);
     try { setEncoderProbes(await window.subtitler.probeCutSilenceEncoders()); }
-    catch (error) { setNotice(`Encoder check failed: ${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) { setNotice(t("notice.encoderCheckFailed", { error: error instanceof Error ? error.message : String(error) })); }
     finally { setProbingEncoders(false); }
   }
 
@@ -400,6 +451,13 @@ export default function App() {
     if (!silenceReview) return;
     await window.subtitler.submitSilenceReview(silenceReview.runId, silenceReview.reviewId, decisions);
     setSilenceReview(null);
+    setRunState("running");
+  }
+
+  async function submitBrollReview(decisions: BrollReviewDecision[]) {
+    if (!brollReview) return;
+    await window.subtitler.submitBrollReview(brollReview.runId, brollReview.reviewId, decisions);
+    setBrollReview(null);
     setRunState("running");
   }
 
@@ -456,18 +514,20 @@ export default function App() {
 
   const elapsed = useMemo(() => formatElapsed(elapsedMs), [elapsedMs]);
   if (startupError) {
-    return <div className="loading" role="alert"><p>SubUtl could not load its saved state.</p><p>{startupError}</p><button onClick={() => void loadInitialState()}>Try again</button><button onClick={async () => { await window.subtitler.resetAppState(); await loadInitialState(); }}>Reset saved settings</button></div>;
+    return <div className="loading" role="alert"><p>{t("shell.startupError")}</p><p>{startupError}</p><button onClick={() => void loadInitialState()}>{t("shell.tryAgain")}</button><button onClick={async () => { await window.subtitler.resetAppState(); await loadInitialState(); }}>{t("shell.resetSettings")}</button></div>;
   }
   if (!settings || !configs || !configPaths || !coreSettings) {
-    return <div className="loading">Loading frontend state...</div>;
+    return <div className="loading">{t("shell.loading")}</div>;
   }
 
-  if (silenceReview) return <SilenceReviewScreen runId={silenceReview.runId} reviewId={silenceReview.reviewId} candidates={silenceReview.candidates} onSubmit={submitSilenceReview} onCancel={() => void cancelRun()} />;
+  if (silenceReview) return <SilenceReviewScreen runId={silenceReview.runId} reviewId={silenceReview.reviewId} candidates={silenceReview.candidates} onSubmit={submitSilenceReview} onCancel={() => cancelRun(true, silenceReview.runId)} />;
+  if (brollReview) return <BrollReviewScreen runId={brollReview.runId} reviewId={brollReview.reviewId} candidates={brollReview.candidates} onSubmit={submitBrollReview} onCancel={() => cancelRun(true, brollReview.runId)} />;
 
   const currentWorkflowFamily = workflowFamily(workflow);
   const currentSettingsExpansion = settingsExpansion[currentWorkflowFamily] ?? defaultSettingsExpansion({
     pythonReady,
     ffmpegReady: Boolean(runtimeStatus?.ffmpeg.ready),
+    ytDlpReady: Boolean(runtimeStatus?.ytDlp.ready),
     alignmentInstalled: Boolean(runtimeStatus?.alignment.installed),
     envExists: envStatus.exists,
     serverExists: Boolean(pathStatus.llamaServer?.exists),
@@ -487,16 +547,23 @@ export default function App() {
             setSettings(next);
             void saveSettings(next);
           }} />
-          <button className="topbar-button" onClick={() => setView(view === "settings" ? "main" : "settings")}>
-            {view === "settings" ? <ArrowLeft size={16} /> : <SettingsIcon size={16} />}
-            {view === "settings" ? "Back" : "Settings"}
-          </button>
+          {view === "main" ? (
+            <>
+              <button className="topbar-button" onClick={() => setView("library")}><Library size={16} /> {t("shell.library")}</button>
+              <button className="topbar-button" onClick={() => setView("settings")}><SettingsIcon size={16} /> {t("shell.settings")}</button>
+            </>
+          ) : (
+            <button className="topbar-button" onClick={() => setView("main")}><ArrowLeft size={16} /> {t("common.back")}</button>
+          )}
         </div>
       </header>
-      {view === "settings" ? (
+      {view === "library" ? (
+        <MediaLibraryScreen />
+      ) : view === "settings" ? (
         <div className="settings-view">
           <SettingsPanel
             workflow={workflow}
+            appLocale={settings.appLocale}
             settings={coreSettings}
             envFile={settings.envFile}
             envStatus={envStatus}
@@ -524,6 +591,9 @@ export default function App() {
             runtimeStatus={runtimeStatus}
             runtimeAction={runtimeAction}
             runtimeFeedback={runtimeFeedback}
+            ytDlpDenoPath={settings.ytDlpDenoPath ?? ""}
+            ytDlpCookiesBrowser={settings.ytDlpCookiesBrowser ?? ""}
+            ytDlpCookiesProfile={settings.ytDlpCookiesProfile ?? ""}
             sidecarsEnabled={settings.sidecarsEnabled}
             sidecarDir={sidecarDir}
             outputPath={outputPath}
@@ -533,6 +603,11 @@ export default function App() {
               ...current,
               [currentWorkflowFamily]: updateSettingsExpansion(current[currentWorkflowFamily] ?? currentSettingsExpansion, section),
             }))}
+            onAppLocale={(appLocale) => {
+              const next = { ...settings, appLocale };
+              setSettings(next);
+              void saveSettings(next, false);
+            }}
             onChange={setCoreSettings}
             onPythonPath={(pythonPath) => {
               const next = { ...settings, pythonPath };
@@ -583,6 +658,23 @@ export default function App() {
             onDeleteManagedPython={deleteManagedPythonEnv}
             onDownloadFfmpeg={downloadFfmpeg}
             onDeleteFfmpeg={deleteManagedFfmpeg}
+            onInstallOrUpdateYtDlp={installOrUpdateYtDlp}
+            onDeleteYtDlp={deleteManagedYtDlp}
+            onYtDlpDenoPath={(ytDlpDenoPath) => {
+              const next = { ...settings, ytDlpDenoPath };
+              setSettings(next);
+              void saveSettings(next);
+            }}
+            onYtDlpCookiesBrowser={(ytDlpCookiesBrowser) => {
+              const next = { ...settings, ytDlpCookiesBrowser };
+              setSettings(next);
+              void saveSettings(next);
+            }}
+            onYtDlpCookiesProfile={(ytDlpCookiesProfile) => {
+              const next = { ...settings, ytDlpCookiesProfile };
+              setSettings(next);
+              void saveSettings(next);
+            }}
             onDownloadAlignment={downloadAlignmentModel}
             onDeleteAlignment={deleteManagedAlignmentModel}
             cutSilenceEncoderPreset={settings.cutSilenceEncoderPreset}
@@ -600,7 +692,54 @@ export default function App() {
       <div className="main-workspace" style={{ "--logs-height": `${logsHeight}%` } as React.CSSProperties}>
         <div className="primary-flow" style={{ "--input-width": `${inputWidth}%` } as React.CSSProperties}>
           <div className="input-stack">
-            <InputPanel
+            {editorialMapEnabled ? <EditorialProjectPanel
+              value={editorialProject}
+              resumeCheckpoint={editorialResumeCheckpoint}
+              resumeRestartFrom={editorialRestartFrom}
+              extensionCheckpoint={editorialExtensionCheckpoint}
+              extensionBaseCount={editorialExtensionBaseCount}
+              disabled={runState === "running"}
+              onChange={setEditorialProject}
+              onRecoverProject={(project) => {
+                setEditorialProject(project);
+                if (project.subtitleMode) {
+                  setCoreSettings((current) => current ? {
+                    ...current,
+                    additionalSettings: {
+                      ...(current.additionalSettings ?? { youtubeChapters: false }),
+                      editorialSubtitleMode: project.subtitleMode
+                    }
+                  } : current);
+                }
+                if (project.sources[0]) handleInput(project.sources[0].visualPath);
+              }}
+              onPrimarySource={handleInput}
+              onResumeCheckpoint={(path, restartFrom) => {
+                setEditorialResumeCheckpoint(path);
+                setEditorialExtensionCheckpoint("");
+                setEditorialExtensionBaseCount(0);
+                setEditorialRestartFrom(restartFrom);
+                if (path) setOutputPath(path);
+                else if (inputPath) setOutputPath(defaultEditorialCheckpointPath(inputPath));
+              }}
+              onBeginExtension={(checkpoint, analyzedSourceCount) => {
+                setEditorialExtensionCheckpoint(checkpoint);
+                setEditorialExtensionBaseCount(analyzedSourceCount);
+                setEditorialResumeCheckpoint("");
+                setEditorialRestartFrom("compatible");
+              }}
+              onCancelExtension={(checkpoint) => {
+                setEditorialExtensionCheckpoint("");
+                setEditorialExtensionBaseCount(0);
+                setEditorialResumeCheckpoint(checkpoint);
+                setOutputPath(checkpoint);
+              }}
+              onDeclineReuse={(checkpoint) => {
+                if (outputPath.toLocaleLowerCase() === checkpoint.toLocaleLowerCase()) {
+                  setOutputPath(newEditorialCheckpointPath(checkpoint));
+                }
+              }}
+            /> : <InputPanel
               inputPath={inputPath}
               audioTrack={coreSettings.audioTrack}
               analysis={analysis}
@@ -609,21 +748,22 @@ export default function App() {
               disabled={runState === "running"}
               onInput={handleInput}
               onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
-            />
+            />}
             <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
           </div>
-          <div className="resize-divider column-divider" role="separator" aria-label="Resize input and settings panels" aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={`${Math.round(inputWidth)}% input width`} tabIndex={0} title="Drag or use arrow keys to resize input and right panels" onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
+          <div className="resize-divider column-divider" role="separator" aria-label={t("shell.resizeColumns")} aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={t("shell.inputWidth", { percent: Math.round(inputWidth) })} tabIndex={0} title={t("shell.resizeColumnsHelp")} onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
           <div className="flow-side">
           <OutputPanel
             outputPath={outputPath}
-            disabled={runState === "running"}
+            editorial={editorialMapEnabled}
+            disabled={runState === "running" || Boolean(editorialResumeCheckpoint || editorialExtensionCheckpoint)}
             onOutput={setOutputPath}
           />
            <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />
           <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
           </div>
         </div>
-        <div className="resize-divider log-divider" role="separator" aria-label="Resize log panel" aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={`${Math.round(logsHeight)}% log height`} tabIndex={0} title="Drag or use arrow keys to resize logs" onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />
+        <div className="resize-divider log-divider" role="separator" aria-label={t("shell.resizeLogs")} aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={t("shell.logHeight", { percent: Math.round(logsHeight) })} tabIndex={0} title={t("shell.resizeLogsHelp")} onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />
         <div className="logs-row">
           <LogViewer logs={logs} onClear={clearLogs} />
         </div>
@@ -632,6 +772,11 @@ export default function App() {
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
   );
+}
+
+function newEditorialCheckpointPath(checkpoint: string): string {
+  const dot = checkpoint.toLocaleLowerCase().endsWith(".json") ? checkpoint.length - 5 : checkpoint.length;
+  return `${checkpoint.slice(0, dot)}-new-${Date.now()}${checkpoint.slice(dot)}`;
 }
 
 function formatElapsed(ms: number): string {

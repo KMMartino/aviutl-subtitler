@@ -84,6 +84,29 @@ def _aligned() -> list[AlignedChunk]:
 
 
 class SubtitleStageContractTests(unittest.TestCase):
+    def test_partial_editorial_subtitles_skip_full_cleanup_but_persist_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            context = _context(
+                Path(temp_name),
+                workflow="hosted-long-stream",
+                backend="openai",
+                skip_review=False,
+                chapters=False,
+            )
+            context.config["additional_settings"]["editorial_subtitle_mode"] = "emphasis"
+            factory = mock.Mock()
+            result = run_subtitle_stage(
+                context,
+                _aligned(),
+                [],
+                ApiUsageLedger(),
+                refiner_factory=factory,
+            )
+            self.assertTrue(context.artifacts.subtitle_timing_profile.is_file())
+            self.assertTrue(context.artifacts.final_text.is_file())
+        factory.assert_not_called()
+        self.assertEqual(len(result.subtitles), 1)
+
     def test_local_stage_passes_planning_contract_writes_text_skips_review_and_closes(self) -> None:
         subtitles = [Subtitle(0.0, 1.0, "字幕")]
         refiner = mock.Mock(spec=TextRefiner)
@@ -249,6 +272,9 @@ class SubtitleRefinerFactoryTests(unittest.TestCase):
             glossary=glossary,
             usage=usage,
             reasoning_effort=None,
+            structured_diagnostics_path=context.artifacts.base.with_suffix(
+                ".structured_responses.jsonl"
+            ),
         )
 
 

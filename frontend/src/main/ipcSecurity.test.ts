@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { assertTrustedSender, contentSecurityPolicy, installNavigationGuards, validateIpcArguments } from "./ipcSecurity";
 
+const singleEditorialSource = (path: string, durationSeconds: number) => ({ path, durationSeconds, mode: "single", audioPath: path, visualPath: path, audioDurationSeconds: durationSeconds, visualDurationSeconds: durationSeconds, width: 1920, height: 1080, audioWidth: 1920, audioHeight: 1080, frameRate: 60, audioFrameRate: 60, pairingBasis: "single", roleConfirmed: true });
+
 describe("IPC security boundary", () => {
   it("accepts only the configured renderer origin", () => {
     expect(() => assertTrustedSender({ senderFrame: { url: "http://127.0.0.1:5173/settings" } } as never, false)).not.toThrow();
@@ -23,11 +25,56 @@ describe("IPC security boundary", () => {
       cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
     }])).not.toThrow();
     expect(() => validateIpcArguments("run:start", [{ workflow: "local", inputPath: "C:\\in.mp4" }])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("editorial:inspect-checkpoint", ["C:\\media\\run-editorial.json", [singleEditorialSource("C:\\media\\one.mp4", 3600)]])).not.toThrow();
+    expect(() => validateIpcArguments("editorial:inspect-checkpoint", ["relative.json"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("editorial:list-checkpoints", [])).not.toThrow();
+    expect(() => validateIpcArguments("editorial:list-games", [])).not.toThrow();
+    expect(() => validateIpcArguments("editorial:remember-game", ["Example Game"])).not.toThrow();
+    expect(() => validateIpcArguments("editorial:remove-checkpoint", ["C:\\media\\run-editorial.json"])).not.toThrow();
+    expect(() => validateIpcArguments("run:start", [{
+      workflow: "hosted-long-stream", inputPath: "C:\\media\\one.mp4", outputPath: "C:\\media\\run.editorial.json",
+      configPath: "C:\\config\\hosted-long-stream.json", envFile: "C:\\config\\.env", profile: true, sidecarsEnabled: true,
+      cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
+      editorialProject: {
+        sources: [singleEditorialSource("C:\\media\\one.mp4", 3600)], titleOrGame: "Game", objective: "Finish",
+        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000, mustKeepNotes: [], deEmphasizeNotes: [], outputLocale: "ja"
+      }
+    }])).not.toThrow();
+    expect(() => validateIpcArguments("run:start", [{
+      workflow: "local-long-stream", inputPath: "C:\\media\\one.mp4", outputPath: "C:\\media\\run.editorial.json",
+      configPath: "C:\\config\\local-long-stream.json", envFile: "C:\\config\\.env", profile: true, sidecarsEnabled: true,
+      cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
+      editorialProject: {
+        sources: [singleEditorialSource("C:\\media\\one.mp4", 3600)], titleOrGame: "Game", objective: "Finish",
+        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000, mustKeepNotes: [], deEmphasizeNotes: []
+      }
+    }])).toThrow(/Invalid IPC/);
     expect(() => validateIpcArguments("silence:source", ["run-1"])).not.toThrow();
     expect(() => validateIpcArguments("silence:proxy", ["run-1", "silence-0001", "seam"])).not.toThrow();
     expect(() => validateIpcArguments("silence:proxy", ["run-1", "silence-0001", "file"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("broll:preview", ["run-1", "broll-0001"])).not.toThrow();
     expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "accept_cut" }]])).not.toThrow();
     expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "maybe" }]])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:add-root", ["C:\\media\\broll"])).not.toThrow();
+    expect(() => validateIpcArguments("library:add-root", ["..\\broll"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:list-assets", [{ query: "boss fight", limit: 50 }])).not.toThrow();
+    expect(() => validateIpcArguments("library:list-assets", [{ query: "boss fight", limit: 500 }])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:list-assets", [{ sql: "DROP TABLE assets" }])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:update-description", ["asset-1", "Gameplay in a ruined arena"])).not.toThrow();
+    expect(() => validateIpcArguments("library:remove-root", ["root-1"])).not.toThrow();
+    expect(() => validateIpcArguments("library:thumbnails", [["asset-1", "asset-2"]])).not.toThrow();
+    expect(() => validateIpcArguments("library:analysis-estimates", ["asset-1"])).not.toThrow();
+    expect(() => validateIpcArguments("library:analysis-estimates", ["asset-1", { startMs: 25_000, endMs: 100_000 }])).not.toThrow();
+    expect(() => validateIpcArguments("library:set-directory-hidden", ["root-1", "frames", true])).not.toThrow();
+    expect(() => validateIpcArguments("library:analyze", ["asset-1", "detailed"])).not.toThrow();
+    expect(() => validateIpcArguments("library:analyze", ["asset-1", "precise"])).not.toThrow();
+    expect(() => validateIpcArguments("library:analyze", ["asset-1", "probe"])).not.toThrow();
+    expect(() => validateIpcArguments("library:analyze", ["asset-1", "detailed", { startMs: 25_000, endMs: 100_000 }])).not.toThrow();
+    expect(() => validateIpcArguments("library:add-segment", ["asset-1", { startMs: 25_000, endMs: 100_000 }, "Combat trailer"])).not.toThrow();
+    expect(() => validateIpcArguments("library:add-segment", ["asset-1", { startMs: 100_000, endMs: 25_000 }, "Bad range"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("run:submit-broll-review", ["run-1", "review-1", [{ candidateId: "candidate-1", decision: "use_library" }]])).not.toThrow();
+    expect(() => validateIpcArguments("library:analyze", ["asset-1", "extreme"])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:bulk-analysis-plan", ["video"])).not.toThrow();
   });
 
   it("denies new windows and all top-level navigation", () => {

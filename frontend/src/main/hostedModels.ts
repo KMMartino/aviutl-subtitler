@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import type { HostedModelVerification } from "../renderer/lib/types";
-import { APPROVED_MODELS, OPENAI_TRANSCRIPTION_MODEL_ALIASES } from "../shared/hostedModelCatalog";
+import { APPROVED_MODELS } from "../shared/hostedModelCatalog";
 
 export { APPROVED_MODELS };
 
@@ -14,7 +14,7 @@ export async function verifyHostedModels(envFile: string): Promise<HostedModelVe
 }
 
 async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["openai"]> {
-  if (!apiKey) return { keyPresent: false, error: "", transcription: false, transcriptionMini: false, cleanup: false, cleanup56Luna: false };
+  if (!apiKey) return { keyPresent: false, error: "", transcriptionGpt: false, cleanup: false, cleanup56Luna: false };
   try {
     const response = await fetch("https://api.openai.com/v1/models", {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -23,17 +23,15 @@ async function verifyOpenAI(apiKey = ""): Promise<HostedModelVerification["opena
     if (!response.ok) throw new Error(await responseMessage(response));
     const body = await response.json() as { data?: Array<{ id?: string }> };
     const names = new Set((body.data ?? []).map((model) => String(model.id ?? "")));
-    const hasAlias = (model: string) => (OPENAI_TRANSCRIPTION_MODEL_ALIASES[model] ?? [model]).some((alias) => names.has(alias));
     return {
       keyPresent: true,
       error: "",
-      transcription: hasAlias(APPROVED_MODELS.openaiTranscription),
-      transcriptionMini: hasAlias(APPROVED_MODELS.openaiTranscriptionMini),
+      transcriptionGpt: names.has(APPROVED_MODELS.openaiTranscriptionGpt),
       cleanup: names.has(APPROVED_MODELS.openaiCleanup),
       cleanup56Luna: names.has(APPROVED_MODELS.openaiCleanup56Luna)
     };
   } catch (error) {
-    return { keyPresent: true, error: errorMessage(error), transcription: false, transcriptionMini: false, cleanup: false, cleanup56Luna: false };
+    return { keyPresent: true, error: errorMessage(error), transcriptionGpt: false, cleanup: false, cleanup56Luna: false };
   }
 }
 
@@ -48,14 +46,13 @@ async function verifyGemini(apiKey = ""): Promise<HostedModelVerification["gemin
     const supports = (name: string) => Boolean((body.models ?? []).find(
       (item) => String(item.name ?? "").replace(/^models\//, "") === name
     )?.supportedGenerationMethods?.includes("generateContent"));
-    const gemini35 = supports(APPROVED_MODELS.gemini);
     return {
       keyPresent: true,
       error: "",
-      transcription: gemini35,
+      transcription: supports(APPROVED_MODELS.gemini),
       transcription31Pro: supports(APPROVED_MODELS.gemini31Pro),
       transcription31FlashLite: supports(APPROVED_MODELS.gemini31FlashLite),
-      cleanup: gemini35
+      cleanup: supports(APPROVED_MODELS.gemini36Flash)
     };
   } catch (error) {
     return { keyPresent: true, error: errorMessage(error), transcription: false, transcription31Pro: false, transcription31FlashLite: false, cleanup: false };

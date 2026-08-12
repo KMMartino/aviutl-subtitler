@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "../i18n";
 import type { CoreWorkflowSettings } from "../lib/types";
 import AdditionalSettingsPanel from "./AdditionalSettingsPanel";
 
@@ -11,9 +12,13 @@ const base = {
   additionalSettings: { youtubeChapters: false, cutSilenceMode: "automatic", renderCutVideo: false }
 } as CoreWorkflowSettings;
 
+function renderPanel(panel: React.ReactElement): string {
+  return renderToStaticMarkup(<I18nProvider>{panel}</I18nProvider>);
+}
+
 describe("Cut silence additional settings", () => {
   it("defaults to EXO media cutting and warns without blocking for possible VFR", () => {
-    const markup = renderToStaticMarkup(<AdditionalSettingsPanel
+    const markup = renderPanel(<AdditionalSettingsPanel
       workflow="local" settings={base} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="possible-vfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
@@ -29,7 +34,7 @@ describe("Cut silence additional settings", () => {
 
   it("shows review and re-encode as disabled checkboxes when Cut silence is off", () => {
     const settings = { ...base, additionalSettings: { ...base.additionalSettings!, cutSilenceMode: "off" as const } };
-    const markup = renderToStaticMarkup(<AdditionalSettingsPanel
+    const markup = renderPanel(<AdditionalSettingsPanel
       workflow="local" settings={settings} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
@@ -40,11 +45,29 @@ describe("Cut silence additional settings", () => {
 
   it("requires encoder configuration only when rendering is selected", () => {
     const settings = { ...base, additionalSettings: { ...base.additionalSettings!, renderCutVideo: true } };
-    const markup = renderToStaticMarkup(<AdditionalSettingsPanel
+    const markup = renderPanel(<AdditionalSettingsPanel
       workflow="hosted" settings={settings} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="possible-vfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
     expect(markup).toContain("Choose a Cut silence encoder");
     expect(markup).not.toContain("Possible variable frame rate detected");
+  });
+
+  it("keeps full transcription available locally and exposes editorial mapping only when hosted", () => {
+    const localMarkup = renderPanel(<AdditionalSettingsPanel
+      workflow="local-long-stream" settings={base} encoder="unconfigured" encoderReady={false} encoderChecking={false}
+      hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
+    />);
+    const hostedMarkup = renderPanel(<AdditionalSettingsPanel
+      workflow="hosted-long-stream" settings={base} encoder="unconfigured" encoderReady={false} encoderChecking={false}
+      hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
+    />);
+    expect(localMarkup).toContain("Only transcribe high-activity speech");
+    expect(localMarkup).not.toContain("Create editorial map");
+    expect(hostedMarkup).toContain("Create editorial map");
+    expect(hostedMarkup).toContain("Include full subtitles");
+    expect(hostedMarkup).toContain("selected noteworthy phrases");
+    expect(hostedMarkup).toContain("EXO with linked recordings, subtitles, chapters, and editorial markers");
+    expect(hostedMarkup).not.toContain("Hosted only");
   });
 });

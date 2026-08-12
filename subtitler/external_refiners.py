@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
+import threading
 import urllib.parse
-from typing import Any
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
 
 from .api_usage import ApiUsageLedger
-from .errors import ModelLoadError
+from .errors import ModelLoadError, StructuredOutputIncompleteError
 from .external_transcribers import require_api_key, verify_gemini_model_available, verify_openai_model_available
 from .glossary import GlossaryEntry, format_glossary
 from .hosted_http import request_json
@@ -17,22 +21,30 @@ from .text_refiner import (
     _clean_response_line,
     _dedupe_mistranscription_flags,
     _deterministic_mistranscription_flags,
+    _parse_boundary_selection,
     _parse_mistranscription_flags,
-    _split_marker_response,
     _valid_cleaned_line,
+    boundary_selection_prompt,
     cleanup_base_rules,
     mistranscription_review_prompt,
-    split_planning_prompt,
 )
 
 
 class HostedTextRefiner(TextRefiner):
     provider = ""
 
-    def __init__(self, model: str, glossary: list[GlossaryEntry], usage: ApiUsageLedger) -> None:
+    def __init__(
+        self,
+        model: str,
+        glossary: list[GlossaryEntry],
+        usage: ApiUsageLedger,
+        structured_diagnostics_path: Path | None = None,
+    ) -> None:
         self.model = model
         self.glossary = glossary
         self.usage = usage
+        self.structured_diagnostics_path = structured_diagnostics_path
+        self._structured_diagnostics_lock = threading.Lock()
         self.mode = "full"
         self.last_mistranscription_raw = ""
         self.last_youtube_chapters_raw = ""
@@ -49,65 +61,72 @@ class HostedTextRefiner(TextRefiner):
             return refined
         return [self._refine_one(line) or line for line in lines]
 
-    def split_lines(self, text: str, max_chars: int) -> list[str] | None:
-        return self.split_lines_with_diagnostics(text, max_chars).lines
+    def supports_multi_split(self) -> bool:
+        return True
 
-    def split_lines_with_diagnostics(self, text: str, max_chars: int) -> SplitPlanResult:
-        prompt = split_planning_prompt(text, max_chars)
-        try:
-            raw = self._chat(prompt, max_tokens=512, operation="split")
-        except Exception as exc:
-            print(f"Warning: hosted LLM split planning failed; using deterministic split. {exc}")
-            return SplitPlanResult(lines=None, accepted=False, reject_reason="request_failed", input_text=text)
-        raw_lines = [line for line in raw.splitlines() if line.strip()]
-        lines = _split_marker_response(raw)
-        if lines is None:
-            cleaned_lines = [_clean_response_line(line) for line in raw_lines]
-            if len(cleaned_lines) == 2:
-                lines = cleaned_lines
-        if lines is None:
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=0,
-                accepted=False,
-                reject_reason="missing_split_marker",
-                input_text=text,
-                raw_response=raw,
-            )
-        if any(not _valid_cleaned_line(line) for line in lines):
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=len([line for line in lines if line.strip()]),
-                accepted=False,
-                reject_reason="invalid_line",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=[line for line in lines if line.strip()],
-            )
-        lines = [line for line in lines if line.strip()]
-        if len(lines) != 2:
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=len(lines),
-                accepted=False,
-                reject_reason="wrong_line_count",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=lines,
-            )
-        return SplitPlanResult(
-            lines=lines,
-            raw_line_count=len(raw_lines),
-            clean_line_count=len(lines),
-            accepted=True,
-            reject_reason="none",
-            input_text=text,
-            raw_response=raw,
-            cleaned_lines=lines,
+    def split_input_capacity(self, max_chars: int) -> int:
+        return max(2000, max_chars * 100)
+
+    def select_split_boundaries(
+        self,
+        text: str,
+        annotated_text: str,
+        candidate_ids: list[str],
+        max_chars: int,
+        *,
+        multiple: bool = False,
+    ) -> SplitPlanResult:
+        prompt = boundary_selection_prompt(
+            annotated_text,
+            candidate_ids,
+            max_chars,
+            multiple=multiple,
         )
+        output_budget = min(256, max(32, len(candidate_ids) * 4))
+        request_attempts: list[dict[str, Any]] = []
+
+        def record_request_attempt(event: dict[str, Any]) -> None:
+            request_attempts.append(
+                {
+                    **event,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "operation": "split",
+                    "source_chars": len(text),
+                    "annotated_chars": len(annotated_text),
+                    "prompt_chars": len(prompt),
+                    "candidate_count": len(candidate_ids),
+                    "zone_count": _split_zone_count(candidate_ids),
+                    "max_chars": max_chars,
+                    "max_tokens": output_budget,
+                }
+            )
+
+        try:
+            raw = self._chat(
+                prompt,
+                max_tokens=output_budget,
+                operation="split",
+                attempt_observer=record_request_attempt,
+            )
+        except Exception as exc:
+            print(f"Warning: hosted boundary selection failed; using deterministic split. {exc}")
+            return SplitPlanResult(
+                selected_ids=None,
+                candidate_ids=candidate_ids,
+                accepted=False,
+                reject_reason="request_failed",
+                input_text=text,
+                request_attempts=request_attempts,
+            )
+        result = _parse_boundary_selection(
+            raw,
+            text=text,
+            candidate_ids=candidate_ids,
+            multiple=multiple,
+        )
+        result.request_attempts = request_attempts
+        return result
 
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
         if not numbered_lines:
@@ -183,6 +202,22 @@ class HostedTextRefiner(TextRefiner):
             print("Warning: YouTube chapter generation returned no usable chapters.", flush=True)
         return chapters
 
+    def complete_structured(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        operation: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """Run a provider-neutral structured planning request through this hosted backend."""
+        return self._chat(
+            prompt,
+            max_tokens=max_tokens,
+            operation=operation,
+            response_schema=response_schema,
+        )
+
     def _base_rules(self) -> str:
         return cleanup_base_rules(self.mode)
 
@@ -251,8 +286,13 @@ class HostedTextRefiner(TextRefiner):
         return cleaned if _valid_cleaned_line(cleaned) else None
 
     def _refine_many(self, lines: list[str]) -> list[str] | None:
+        output_budget = min(16384, max(1024, sum(len(line) for line in lines) * 6))
         try:
-            raw = self._chat(self._prompt_many(lines), operation="cleanup")
+            raw = self._chat(
+                self._prompt_many(lines),
+                max_tokens=output_budget,
+                operation="cleanup",
+            )
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
@@ -263,14 +303,60 @@ class HostedTextRefiner(TextRefiner):
             return None
         return cleaned_lines
 
-    def _chat(self, prompt: str, max_tokens: int = 512, operation: str = "cleanup") -> str:
+    def _chat(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        operation: str = "cleanup",
+        attempt_observer: Callable[[dict[str, Any]], None] | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
         raise NotImplementedError
 
+    def _record_structured_response(
+        self,
+        *,
+        operation: str,
+        max_tokens: int,
+        finish_reason: str,
+        content: str,
+        usage: dict[str, Any],
+        schema_enabled: bool,
+    ) -> None:
+        if self.structured_diagnostics_path is None or not operation.startswith("editorial_"):
+            return
+        record = {
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "provider": self.provider,
+            "model": self.model,
+            "operation": operation,
+            "max_output_tokens": max_tokens,
+            "finish_reason": finish_reason,
+            "schema_enabled": schema_enabled,
+            "usage": usage,
+            "response_content": content,
+        }
+        path = self.structured_diagnostics_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._structured_diagnostics_lock, path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-def _hosted_text_timeout(prompt: str, max_tokens: int) -> float:
+
+def _hosted_text_timeout(prompt: str, max_tokens: int, operation: str = "cleanup") -> float:
     prompt_chars = len(prompt)
     estimated_seconds = prompt_chars / 60.0 + max_tokens / 25.0
+    if operation == "split":
+        return min(1200.0, max(90.0, estimated_seconds * 2.0))
     return min(600.0, max(45.0, estimated_seconds))
+
+
+def _split_zone_count(candidate_ids: list[str]) -> int:
+    zones = {
+        match.group(0)
+        for candidate_id in candidate_ids
+        if (match := re.match(r"Z\d+", candidate_id.upper())) is not None
+    }
+    return len(zones)
 
 
 def parse_youtube_chapter_response(
@@ -384,23 +470,45 @@ class OpenAITextRefiner(HostedTextRefiner):
         usage: ApiUsageLedger,
         api_key: str | None = None,
         reasoning_effort: str | None = None,
+        structured_diagnostics_path: Path | None = None,
     ) -> None:
-        super().__init__(model, glossary, usage)
+        super().__init__(model, glossary, usage, structured_diagnostics_path)
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
         self.reasoning_effort = reasoning_effort
         verify_openai_model_available(model, self.api_key)
 
-    def _chat(self, prompt: str, max_tokens: int = 512, operation: str = "cleanup") -> str:
+    def _chat(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        operation: str = "cleanup",
+        attempt_observer: Callable[[dict[str, Any]], None] | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        structured_operation = operation.startswith("editorial_")
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."},
+                {"role": "system", "content": _openai_system_prompt(operation)},
                 {"role": "user", "content": prompt},
             ],
         }
+        if response_schema is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _response_schema_name(operation),
+                    "strict": True,
+                    "schema": response_schema,
+                },
+            }
+        elif structured_operation:
+            payload["response_format"] = {"type": "json_object"}
         if not self.model.startswith("gpt-5"):
             payload["temperature"] = 0.0
-        if self.reasoning_effort is not None:
+        if operation == "split" and self.model.startswith("gpt-5"):
+            payload["reasoning_effort"] = "none"
+        elif self.reasoning_effort is not None:
             payload["reasoning_effort"] = self.reasoning_effort
         payload[_openai_max_tokens_key(self.model)] = max_tokens
         data = _request_json_with_retries(
@@ -408,8 +516,9 @@ class OpenAITextRefiner(HostedTextRefiner):
             "https://api.openai.com/v1/chat/completions",
             payload,
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            timeout_sec=_hosted_text_timeout(prompt, max_tokens),
+            timeout_sec=_hosted_text_timeout(prompt, max_tokens, operation),
             message=f"OpenAI hosted text {operation} request failed",
+            attempt_observer=attempt_observer,
         )
         usage = data.get("usage") or {}
         input_tokens = int(usage.get("prompt_tokens") or 0)
@@ -422,7 +531,31 @@ class OpenAITextRefiner(HostedTextRefiner):
             output_tokens=output_tokens,
             total_tokens=int(usage.get("total_tokens") or input_tokens + output_tokens),
         )
-        return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        choice = data.get("choices", [{}])[0]
+        message_data = choice.get("message", {})
+        finish_reason = str(choice.get("finish_reason") or "unknown")
+        refusal = str(message_data.get("refusal") or "")
+        content = str(message_data.get("content") or refusal)
+        self._record_structured_response(
+            operation=operation,
+            max_tokens=max_tokens,
+            finish_reason=finish_reason,
+            content=content,
+            usage=usage,
+            schema_enabled=response_schema is not None,
+        )
+        if structured_operation and refusal:
+            raise StructuredOutputIncompleteError(
+                "OpenAI editorial response was refused",
+                reason="refusal",
+            )
+        if structured_operation and finish_reason != "stop":
+            reason = "max_output_tokens" if finish_reason == "length" else finish_reason
+            raise StructuredOutputIncompleteError(
+                f"OpenAI editorial response ended before completion ({reason})",
+                reason=reason,
+            )
+        return content
 
 
 class GeminiTextRefiner(HostedTextRefiner):
@@ -435,16 +568,28 @@ class GeminiTextRefiner(HostedTextRefiner):
         usage: ApiUsageLedger,
         api_key: str | None = None,
         thinking_level: str | None = None,
+        structured_diagnostics_path: Path | None = None,
     ) -> None:
-        super().__init__(model, glossary, usage)
+        super().__init__(model, glossary, usage, structured_diagnostics_path)
         self.api_key = api_key or require_api_key("GEMINI_API_KEY")
         self.thinking_level = thinking_level
         verify_gemini_model_available(model, self.api_key)
 
-    def _chat(self, prompt: str, max_tokens: int = 512, operation: str = "cleanup") -> str:
+    def _chat(
+        self,
+        prompt: str,
+        max_tokens: int = 512,
+        operation: str = "cleanup",
+        attempt_observer: Callable[[dict[str, Any]], None] | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
         generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
         if self.model.startswith("gemini-3"):
-            if self.thinking_level is not None:
+            if operation == "split":
+                generation_config["thinkingConfig"] = {
+                    "thinkingLevel": "low" if self.model.startswith("gemini-3.1-pro") else "minimal"
+                }
+            elif self.thinking_level is not None:
                 generation_config["thinkingConfig"] = {"thinkingLevel": self.thinking_level}
         else:
             generation_config["temperature"] = 0.0
@@ -460,8 +605,9 @@ class GeminiTextRefiner(HostedTextRefiner):
             f"https://generativelanguage.googleapis.com/v1beta/models/{urllib.parse.quote(self.model)}:generateContent",
             payload,
             headers={"x-goog-api-key": self.api_key},
-            timeout_sec=_hosted_text_timeout(prompt, max_tokens),
+            timeout_sec=_hosted_text_timeout(prompt, max_tokens, operation),
             message=f"Gemini hosted text {operation} request failed",
+            attempt_observer=attempt_observer,
         )
         usage = data.get("usageMetadata") or {}
         input_tokens = int(usage.get("promptTokenCount") or 0)
@@ -478,6 +624,37 @@ class GeminiTextRefiner(HostedTextRefiner):
         return "".join(str(part.get("text", "")) for part in parts)
 
 
+def _openai_system_prompt(operation: str) -> str:
+    if operation == "editorial_map":
+        return (
+            "You are a senior long-form video editor creating a suggestion-only editorial map. "
+            "Judge spoken and visual evidence together, preserve meaningful quiet gameplay, and return "
+            "only the requested JSON structure without markdown or commentary."
+        )
+    if operation == "editorial_global":
+        return (
+            "You are the supervising editor for a long-form video project. Reconcile the supplied local "
+            "findings into a coherent suggestion-only plan and return only the requested JSON structure."
+        )
+    if operation == "editorial_director":
+        return (
+            "You are the final director reviewing a complete long-form video plan. Judge pacing, intrigue, "
+            "information density, continuity, and emotional escalation as one viewer experience. Return "
+            "only the requested JSON structure without markdown or commentary."
+        )
+    if operation.startswith("editorial_"):
+        return (
+            "You are an evidence-driven long-form video editorial analyst. Return only valid JSON in the "
+            "requested structure without markdown or commentary."
+        )
+    return "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."
+
+
+def _response_schema_name(operation: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", operation).strip("_")
+    return (cleaned or "structured_response")[:64]
+
+
 def _request_json_with_retries(
     method: str,
     url: str,
@@ -485,6 +662,7 @@ def _request_json_with_retries(
     headers: dict[str, str] | None = None,
     timeout_sec: float = 300.0,
     message: str = "Hosted text request failed",
+    attempt_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     return request_json(
         method,
@@ -494,6 +672,7 @@ def _request_json_with_retries(
         message,
         headers=headers,
         timeout_sec=timeout_sec,
+        attempt_observer=attempt_observer,
     )
 
 

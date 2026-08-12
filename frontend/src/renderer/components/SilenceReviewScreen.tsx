@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Check, Flag, Scissors, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { SilenceCutCandidate, SilenceCutDecision } from "../lib/types";
+import { useI18n } from "../i18n";
 
 type Props = {
   runId: string;
@@ -11,6 +12,7 @@ type Props = {
 };
 
 export default function SilenceReviewScreen({ runId, reviewId, candidates, onSubmit, onCancel }: Props) {
+  const { t } = useI18n();
   const [index, setIndex] = useState(0);
   const [decisions, setDecisions] = useState<Record<string, SilenceCutDecision>>({});
   const [sourceUrl, setSourceUrl] = useState("");
@@ -84,13 +86,13 @@ export default function SilenceReviewScreen({ runId, reviewId, candidates, onSub
   }, [candidate?.id, candidates.length]);
 
   const rows = useMemo(() => candidates.map((item) => ({ candidateId: item.id, decision: decisions[item.id] })).filter((item): item is { candidateId: string; decision: SilenceCutDecision } => Boolean(item.decision)), [candidates, decisions]);
-  if (!candidate) return <main className="silence-review"><div className="loading">No silence cuts require review.</div></main>;
+  if (!candidate) return <main className="silence-review"><div className="loading">{t("silence.none")}</div></main>;
 
   function choose(decision: SilenceCutDecision) {
     setDecisions((current) => ({ ...current, [candidate.id]: decision }));
     if (index < candidates.length - 1) setIndex(index + 1);
   }
-  function cancel() { if (window.confirm("Cancel this entire subtitle run? No output will be written.")) onCancel(); }
+  function cancel() { if (window.confirm(t("review.cancelConfirm"))) onCancel(); }
   async function submit() {
     setSubmitting(true); setSubmitError("");
     try { await onSubmit(rows); }
@@ -110,27 +112,27 @@ export default function SilenceReviewScreen({ runId, reviewId, candidates, onSub
   const originalUrl = fallback ? proxyUrls.original : sourceUrl;
   const seamUrl = fallback ? proxyUrls.seam : sourceUrl;
   return <main className="silence-review">
-    <header className="silence-review-header"><div><h1>Review silence cut</h1><p>Segment {index + 1} of {candidates.length} · {decided} decided · {candidates.length - decided} remaining</p></div><button onClick={cancel}><X size={17} /> Cancel run</button></header>
-    <section className="silence-review-summary"><strong>{formatTime(candidate.cutStart)} – {formatTime(candidate.cutEnd)}</strong><span>Proposed removal: {candidate.cutDuration.toFixed(2)} seconds</span><span>Decision: {decisionLabel(decisions[candidate.id])}</span></section>
+    <header className="silence-review-header"><div><h1>{t("silence.title")}</h1><p>{t("silence.progress", { current: index + 1, total: candidates.length, decided, remaining: candidates.length - decided })}</p></div><button onClick={cancel}><X size={17} /> {t("review.cancelRun")}</button></header>
+    <section className="silence-review-summary"><strong>{formatTime(candidate.cutStart)} – {formatTime(candidate.cutEnd)}</strong><span>{t("silence.proposedRemoval", { seconds: candidate.cutDuration.toFixed(2) })}</span><span>{t("silence.decision", { decision: decisionLabel(decisions[candidate.id], t) })}</span></section>
     <section className="silence-review-previews">
-      <Preview title="Original neighborhood" description="Starts two seconds before the proposed cut and remains fully scrubbable." videoRef={originalRef} url={originalUrl} onTime={track} onSeeking={seeking} onSeeked={seeked} onError={() => fallback ? setPreviewError("The compatible original preview could not be played.") : setFallback(true)} />
-      <Preview title="After cut" description="Starts two seconds before and simulates the resulting visual and audio seam during playback." videoRef={seamRef} url={seamUrl} onTime={track} onSeeking={seeking} onSeeked={seeked} onError={() => fallback ? setPreviewError("The compatible seam preview could not be played.") : setFallback(true)} />
+      <Preview title={t("silence.original")} description={t("silence.originalHelp")} videoRef={originalRef} url={originalUrl} onTime={track} onSeeking={seeking} onSeeked={seeked} onError={() => fallback ? setPreviewError(t("silence.originalPreviewError")) : setFallback(true)} />
+      <Preview title={t("silence.after")} description={t("silence.afterHelp")} videoRef={seamRef} url={seamUrl} onTime={track} onSeeking={seeking} onSeeked={seeked} onError={() => fallback ? setPreviewError(t("silence.seamPreviewError")) : setFallback(true)} />
     </section>
-    {fallback && !proxyUrls.original && !previewError && <div className="silence-preview-status">Preparing compatible preview…</div>}
+    {fallback && !proxyUrls.original && !previewError && <div className="silence-preview-status">{t("silence.preparingCompatible")}</div>}
     {previewError && <div className="field-error" role="alert">{previewError}</div>}
     {submitError && <div className="field-error" role="alert">{submitError}</div>}
     <section className="silence-review-decisions">
-      <button className={decisions[candidate.id] === "accept_cut" ? "active" : ""} onClick={() => choose("accept_cut")}><Scissors size={18} /> Accept cut <kbd>A</kbd></button>
-      <button className={decisions[candidate.id] === "reject_cut" ? "active" : ""} onClick={() => choose("reject_cut")}><Check size={18} /> Reject cut <kbd>R</kbd></button>
-      <button className={decisions[candidate.id] === "mark_and_reject" ? "active" : ""} onClick={() => choose("mark_and_reject")}><Flag size={18} /> Mark and reject <kbd>M</kbd></button>
+      <button className={decisions[candidate.id] === "accept_cut" ? "active" : ""} onClick={() => choose("accept_cut")}><Scissors size={18} /> {t("silence.accept")} <kbd>A</kbd></button>
+      <button className={decisions[candidate.id] === "reject_cut" ? "active" : ""} onClick={() => choose("reject_cut")}><Check size={18} /> {t("silence.reject")} <kbd>R</kbd></button>
+      <button className={decisions[candidate.id] === "mark_and_reject" ? "active" : ""} onClick={() => choose("mark_and_reject")}><Flag size={18} /> {t("silence.markReject")} <kbd>M</kbd></button>
     </section>
-    <footer className="silence-review-footer"><div className="silence-review-navigation"><button disabled={index === 0 || submitting} onClick={() => setIndex(index - 1)}><ArrowLeft size={17} /> Previous</button><div className="silence-review-dots">{candidates.map((item, itemIndex) => <button key={item.id} className={`${itemIndex === index ? "current" : ""} ${decisions[item.id] ? "decided" : ""}`} aria-label={`Review segment ${itemIndex + 1}`} onClick={() => setIndex(itemIndex)} />)}</div><button disabled={index === candidates.length - 1 || submitting} onClick={() => setIndex(index + 1)}>Next <ArrowRight size={17} /></button></div><button className="primary" disabled={!complete || submitting} onClick={() => void submit()}>{submitting ? "Submitting…" : "Submit decisions"}</button></footer>
-    <small className="silence-review-id">Review {reviewId}</small>
+    <footer className="silence-review-footer"><div className="silence-review-navigation"><button disabled={index === 0 || submitting} onClick={() => setIndex(index - 1)}><ArrowLeft size={17} /> {t("common.previous")}</button><div className="silence-review-dots">{candidates.map((item, itemIndex) => <button key={item.id} className={`${itemIndex === index ? "current" : ""} ${decisions[item.id] ? "decided" : ""}`} aria-label={t("silence.reviewSegment", { number: itemIndex + 1 })} onClick={() => setIndex(itemIndex)} />)}</div><button disabled={index === candidates.length - 1 || submitting} onClick={() => setIndex(index + 1)}>{t("common.next")} <ArrowRight size={17} /></button></div><button className="primary" disabled={!complete || submitting} onClick={() => void submit()}>{submitting ? t("common.submitting") : t("silence.submit")}</button></footer>
+    <small className="silence-review-id">{t("silence.reviewId", { id: reviewId })}</small>
   </main>;
 }
 
 type PreviewProps = { title: string; description: string; url: string; videoRef: RefObject<HTMLVideoElement>; onTime(video: HTMLVideoElement): void; onSeeking(video: HTMLVideoElement): void; onSeeked(video: HTMLVideoElement): void; onError(): void };
-const Preview = ({ title, description, url, videoRef, onTime, onSeeking, onSeeked, onError }: PreviewProps) => <article className="silence-preview"><h2>{title}</h2><p>{description}</p>{url ? <video ref={videoRef} controls preload="metadata" src={url} onTimeUpdate={(event) => onTime(event.currentTarget)} onSeeking={(event) => onSeeking(event.currentTarget)} onSeeked={(event) => onSeeked(event.currentTarget)} onError={onError} /> : <div className="silence-preview-placeholder">Preparing preview…</div>}</article>;
+const Preview = ({ title, description, url, videoRef, onTime, onSeeking, onSeeked, onError }: PreviewProps) => { const { t } = useI18n(); return <article className="silence-preview"><h2>{title}</h2><p>{description}</p>{url ? <video ref={videoRef} controls preload="metadata" src={url} onTimeUpdate={(event) => onTime(event.currentTarget)} onSeeking={(event) => onSeeking(event.currentTarget)} onSeeked={(event) => onSeeked(event.currentTarget)} onError={onError} /> : <div className="silence-preview-placeholder">{t("silence.preparingPreview")}</div>}</article>; };
 
-function decisionLabel(decision?: SilenceCutDecision): string { return decision === "accept_cut" ? "Accept cut" : decision === "reject_cut" ? "Reject cut" : decision === "mark_and_reject" ? "Mark and reject" : "Pending"; }
+function decisionLabel(decision: SilenceCutDecision | undefined, t: ReturnType<typeof useI18n>["t"]): string { return decision === "accept_cut" ? t("silence.accept") : decision === "reject_cut" ? t("silence.reject") : decision === "mark_and_reject" ? t("silence.markReject") : t("common.pending"); }
 function formatTime(seconds: number): string { const whole = Math.max(0, Math.floor(seconds)); const hours = Math.floor(whole / 3600); const minutes = Math.floor((whole % 3600) / 60); const remainder = whole % 60; return `${hours ? `${hours}:` : ""}${minutes.toString().padStart(hours ? 2 : 1, "0")}:${remainder.toString().padStart(2, "0")}.${Math.floor((seconds % 1) * 10)}`; }

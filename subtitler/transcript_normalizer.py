@@ -13,6 +13,17 @@ def backend_result_to_aligned_chunks(result: BackendTranscriptResult) -> list[Al
         if not segment.text.strip():
             continue
         region = regions.get(segment.index)
+        segment_group_index = segment.metadata.get("vad_group_index")
+        region_group_index = (
+            region.metadata.get("vad_group_index") if region is not None else None
+        )
+        vad_group_index = (
+            int(segment_group_index)
+            if segment_group_index is not None
+            else int(region_group_index)
+            if region_group_index is not None
+            else None
+        )
         audio_chunk = AudioChunk(
             index=segment.index,
             start=segment.start,
@@ -21,7 +32,7 @@ def backend_result_to_aligned_chunks(result: BackendTranscriptResult) -> list[Al
             wav_path=None,
             vad_activation=float(region.activation or 0.0) if region is not None else 0.0,
             vad_peak=float(region.peak or 0.0) if region is not None else 0.0,
-            vad_group_index=int(region.metadata["vad_group_index"]) if region is not None and "vad_group_index" in region.metadata else None,
+            vad_group_index=vad_group_index,
         )
         tokens = [
             AlignedToken(

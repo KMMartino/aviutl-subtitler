@@ -1,9 +1,10 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { applySharedAlignment } from "../lib/configPatch";
 import type { AppSettings, CoreWorkflowSettings, RuntimeSetupStatus, WorkflowConfig, WorkflowName } from "../lib/types";
+import { useI18n } from "../i18n";
 
 export type RuntimeFeedback = {
-  section: "python" | "ffmpeg" | "alignment";
+  section: "python" | "ffmpeg" | "ytDlp" | "alignment";
   text: string;
   ok: boolean;
 };
@@ -18,6 +19,7 @@ type Options = {
 };
 
 export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs, setCoreSettings, refreshHfDownloaderStatus }: Options) {
+  const { t } = useI18n();
   const runtimeRequest = useRef(0);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeSetupStatus | null>(null);
   const [runtimeAction, setRuntimeAction] = useState("");
@@ -37,7 +39,13 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
       setPythonReady(status.python.ready && status.python.requirementsInstalled);
       void refreshHfDownloaderStatus();
       if (feedbackSection) {
-        const text = feedbackSection === "python" ? "Python runtime status refreshed" : feedbackSection === "ffmpeg" ? "FFmpeg status refreshed" : "Alignment model status refreshed";
+        const text = feedbackSection === "python"
+          ? t("notice.pythonStatusRefreshed")
+          : feedbackSection === "ffmpeg"
+            ? t("notice.ffmpegStatusRefreshed")
+            : feedbackSection === "ytDlp"
+              ? t("notice.ytdlpStatusRefreshed")
+              : t("notice.alignmentStatusRefreshed");
         setRuntimeFeedback({ section: feedbackSection, text, ok: true });
         setNotice(text);
       }
@@ -55,13 +63,13 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
   async function createManagedPythonEnv() {
     setRuntimeAction("create-python");
     setRuntimeFeedback(null);
-    appendLog(`\n$ managed Python venv setup\n`);
+    appendLog(`\n$ ${t("notice.pythonSetupLog")}\n`);
     try {
       await window.subtitler.createManagedPythonEnv();
       await refreshRuntimeStatus();
       await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Managed Python venv created", ok: true });
-      setNotice("Managed Python venv created");
+      setRuntimeFeedback({ section: "python", text: t("notice.pythonCreated"), ok: true });
+      setNotice(t("notice.pythonCreated"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "python", text, ok: false });
@@ -73,15 +81,15 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
 
   async function deleteManagedPythonEnv() {
     if (!runtimeStatus?.python.managedInstalled) return;
-    if (!window.confirm("Delete the app-managed Python venv from disk? User-selected Python installs will not be touched.")) return;
+    if (!window.confirm(t("notice.deletePythonConfirm"))) return;
     setRuntimeAction("delete-python");
     setRuntimeFeedback(null);
     try {
       await window.subtitler.deleteManagedPythonEnv();
       await refreshRuntimeStatus();
       await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Managed Python venv deleted", ok: true });
-      setNotice("Managed Python venv deleted");
+      setRuntimeFeedback({ section: "python", text: t("notice.pythonDeleted"), ok: true });
+      setNotice(t("notice.pythonDeleted"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "python", text, ok: false });
@@ -94,13 +102,13 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
   async function installPythonRequirements() {
     setRuntimeAction("install-python");
     setRuntimeFeedback(null);
-    appendLog(`\n$ Python requirements install\n`);
+    appendLog(`\n$ ${t("notice.pythonRequirementsLog")}\n`);
     try {
       await window.subtitler.installPythonRequirements();
       await refreshRuntimeStatus();
       await refreshHfDownloaderStatus();
-      setRuntimeFeedback({ section: "python", text: "Python requirements installed", ok: true });
-      setNotice("Python requirements installed");
+      setRuntimeFeedback({ section: "python", text: t("notice.pythonRequirementsInstalled"), ok: true });
+      setNotice(t("notice.pythonRequirementsInstalled"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "python", text, ok: false });
@@ -113,12 +121,12 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
   async function downloadFfmpeg() {
     setRuntimeAction("download-ffmpeg");
     setRuntimeFeedback(null);
-    appendLog(`\n$ FFmpeg download\n`);
+    appendLog(`\n$ ${t("notice.ffmpegDownloadLog")}\n`);
     try {
       await window.subtitler.downloadManagedFfmpeg();
       await refreshRuntimeStatus();
-      setRuntimeFeedback({ section: "ffmpeg", text: "FFmpeg downloaded", ok: true });
-      setNotice("FFmpeg downloaded");
+      setRuntimeFeedback({ section: "ffmpeg", text: t("notice.ffmpegDownloaded"), ok: true });
+      setNotice(t("notice.ffmpegDownloaded"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
@@ -130,17 +138,54 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
 
   async function deleteManagedFfmpeg() {
     if (!runtimeStatus?.ffmpeg.managedInstalled) return;
-    if (!window.confirm("Delete app-managed FFmpeg from disk? FFmpeg on PATH will not be touched.")) return;
+    if (!window.confirm(t("notice.deleteFfmpegConfirm"))) return;
     setRuntimeAction("delete-ffmpeg");
     setRuntimeFeedback(null);
     try {
       await window.subtitler.deleteManagedFfmpeg();
       await refreshRuntimeStatus();
-      setRuntimeFeedback({ section: "ffmpeg", text: "Managed FFmpeg deleted", ok: true });
-      setNotice("Managed FFmpeg deleted");
+      setRuntimeFeedback({ section: "ffmpeg", text: t("notice.ffmpegDeleted"), ok: true });
+      setNotice(t("notice.ffmpegDeleted"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "ffmpeg", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
+    }
+  }
+
+  async function installOrUpdateYtDlp() {
+    setRuntimeAction("update-ytdlp");
+    setRuntimeFeedback(null);
+    appendLog(`\n$ ${t("notice.ytdlpUpdateLog")}\n`);
+    try {
+      await window.subtitler.installOrUpdateYtDlp();
+      await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "ytDlp", text: t("notice.ytdlpCurrent"), ok: true });
+      setNotice(t("notice.ytdlpCurrent"));
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "ytDlp", text, ok: false });
+      setNotice(text);
+    } finally {
+      setRuntimeAction("");
+    }
+  }
+
+  async function deleteManagedYtDlp() {
+    if (!runtimeStatus?.ytDlp.managedInstalled) return;
+    if (!window.confirm(t("notice.deleteYtdlpConfirm"))) return;
+    setRuntimeAction("delete-ytdlp");
+    setRuntimeFeedback(null);
+    try {
+      await window.subtitler.deleteManagedYtDlp();
+      await refreshRuntimeStatus();
+      setRuntimeFeedback({ section: "ytDlp", text: t("notice.ytdlpDeleted"), ok: true });
+      setNotice(t("notice.ytdlpDeleted"));
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      setRuntimeFeedback({ section: "ytDlp", text, ok: false });
       setNotice(text);
     } finally {
       setRuntimeAction("");
@@ -157,14 +202,14 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
   async function downloadAlignmentModel() {
     setRuntimeAction("download-alignment");
     setRuntimeFeedback(null);
-    appendLog(`\n$ alignment model download\n`);
+    appendLog(`\n$ ${t("notice.alignmentDownloadLog")}\n`);
     try {
       const status = await window.subtitler.downloadAlignmentModel();
       setRuntimeStatus((current) => current ? { ...current, alignment: status } : current);
       synchronizeSharedAlignment(status.modelPath, true);
       setCoreSettings((current) => current ? { ...current, alignment: { model: status.modelPath, offlineModelCache: true } } : current);
-      setRuntimeFeedback({ section: "alignment", text: "Alignment model downloaded and verified", ok: true });
-      setNotice("Alignment model downloaded and selected");
+      setRuntimeFeedback({ section: "alignment", text: t("notice.alignmentDownloadedVerified"), ok: true });
+      setNotice(t("notice.alignmentDownloadedSelected"));
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setRuntimeFeedback({ section: "alignment", text, ok: false });
@@ -175,14 +220,14 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
   }
 
   async function deleteManagedAlignmentModel() {
-    if (!runtimeStatus?.alignment.installed || !window.confirm("Delete the app-managed alignment model?")) return;
+    if (!runtimeStatus?.alignment.installed || !window.confirm(t("notice.deleteAlignmentConfirm"))) return;
     setRuntimeAction("delete-alignment");
     try {
       const status = await window.subtitler.deleteAlignmentModel();
       setRuntimeStatus((current) => current ? { ...current, alignment: status } : current);
       synchronizeSharedAlignment("MahmoudAshraf/mms-300m-1130-forced-aligner", false);
       setCoreSettings((current) => current ? { ...current, alignment: { model: "MahmoudAshraf/mms-300m-1130-forced-aligner", offlineModelCache: false } } : current);
-      setRuntimeFeedback({ section: "alignment", text: "Managed alignment model deleted", ok: true });
+      setRuntimeFeedback({ section: "alignment", text: t("notice.alignmentDeleted"), ok: true });
     } catch (error) {
       setRuntimeFeedback({ section: "alignment", text: error instanceof Error ? error.message : String(error), ok: false });
     } finally {
@@ -202,6 +247,8 @@ export function useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs,
     installPythonRequirements,
     downloadFfmpeg,
     deleteManagedFfmpeg,
+    installOrUpdateYtDlp,
+    deleteManagedYtDlp,
     downloadAlignmentModel,
     deleteManagedAlignmentModel,
   };

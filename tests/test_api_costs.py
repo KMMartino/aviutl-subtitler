@@ -12,16 +12,12 @@ class ApiCostTests(unittest.TestCase):
         cost = token_cost("gemini", "gemini-2.5-flash", input_tokens=1000, output_tokens=500)
         self.assertAlmostEqual(cost, (1000 * 0.30 + 500 * 2.50) / 1_000_000)
 
-    def test_openai_audio_token_cost_uses_audio_rate(self) -> None:
-        cost = token_cost(
-            "openai",
-            "gpt-4o-transcribe",
-            input_tokens=1200,
-            output_tokens=300,
-            audio_input_tokens=1000,
-        )
-        expected = (200 * 2.50 + 1000 * 6.00 + 300 * 10.00) / 1_000_000
-        self.assertAlmostEqual(cost, expected)
+    def test_gemini_36_flash_cost_uses_current_rates(self) -> None:
+        cost = token_cost("gemini", "gemini-3.6-flash", input_tokens=1000, output_tokens=500)
+        self.assertAlmostEqual(cost, (1000 * 1.50 + 500 * 7.50) / 1_000_000)
+
+    def test_gpt_transcribe_estimate_uses_per_minute_rate(self) -> None:
+        self.assertAlmostEqual(estimate_transcription_cost("openai", "gpt-transcribe", 120.0), 0.009)
 
     def test_cleanup_estimate_is_zero_for_none_backend(self) -> None:
         self.assertEqual(estimate_cleanup_cost("none", "", 600.0), 0.0)

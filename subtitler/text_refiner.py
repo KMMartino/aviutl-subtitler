@@ -49,24 +49,32 @@ def cleanup_base_rules(mode: str, *, include_glossary: bool = True) -> str:
     return "\n".join(f"- {rule}" for rule in rules)
 
 
-def split_planning_prompt(text: str, max_chars: int) -> str:
-    min_chars = max(6, max_chars // 4)
+def boundary_selection_prompt(
+    annotated_text: str,
+    candidate_ids: list[str],
+    max_chars: int,
+    *,
+    multiple: bool,
+) -> str:
+    output_rule = (
+        "Choose at most one ID from each numbered zone and return the chosen IDs in text order, separated by commas."
+        if multiple
+        else "Choose exactly one ID and return only that ID."
+    )
     return (
         "Task:\n"
-        "Insert exactly one split marker into this transcript.\n\n"
+        "Choose natural subtitle boundaries from the supplied candidate IDs.\n\n"
         "Rules:\n"
-        "- Copy the input text exactly.\n"
-        "- Insert the marker <SPLIT> exactly once at the best subtitle break.\n"
-        "- Do not rewrite, summarize, translate, add, remove, normalize, re-spell, or reorder any text.\n"
-        "- Never split inside a contiguous English, product, event, game, or title name when it can be avoided.\n"
-        "- Treat katakana runs, ASCII letters, digits, and title separators such as ・, -, /, and & as fragile title text.\n"
-        "- If the text contains a list of game or event titles, prefer boundaries between list items.\n"
-        f"- Both sides should be at least {min_chars} characters when possible.\n"
-        f"- Prefer both sides to be at most {max_chars} characters when possible.\n"
-        "- Choose a split point near the center if there is no strong natural break.\n"
-        "- Prefer sentence, phrase, clause, or list-item boundaries.\n"
-        "- Output only the copied text with <SPLIT> inserted. No explanations.\n\n"
-        f"Input:\n{text}\n\n"
+        f"- {output_rule}\n"
+        f"- Valid IDs: {', '.join(candidate_ids)}.\n"
+        f"- Aim for natural, balanced subtitles no longer than {max_chars} characters.\n"
+        "- Candidate markers are not transcript text. Do not reproduce the transcript.\n"
+        "- Prefer a complete phrase, clause, list item, or thought.\n"
+        "- Avoid separating a modifier from what it modifies or leaving a connective at the start of the next subtitle.\n"
+        "- Preserve English, product, event, game, and title names as coherent units.\n"
+        "- Output IDs only, with no explanation, bullets, or labels.\n\n"
+        "Transcript with candidate markers:\n"
+        f"{annotated_text}\n\n"
         "Output:"
     )
 
@@ -102,20 +110,28 @@ class TextRefiner:
     def refine(self, lines: list[str]) -> list[str]:
         return lines
 
-    def split_lines(self, text: str, max_chars: int) -> list[str] | None:
-        return None
-
-    def split_lines_with_diagnostics(self, text: str, max_chars: int) -> SplitPlanResult:
-        lines = self.split_lines(text, max_chars)
+    def select_split_boundaries(
+        self,
+        text: str,
+        annotated_text: str,
+        candidate_ids: list[str],
+        max_chars: int,
+        *,
+        multiple: bool = False,
+    ) -> SplitPlanResult:
         return SplitPlanResult(
-            lines=lines,
-            raw_line_count=len(lines or []),
-            clean_line_count=len(lines or []),
-            accepted=lines is not None,
-            reject_reason="none" if lines is not None else "request_failed",
+            selected_ids=None,
+            candidate_ids=candidate_ids,
+            accepted=False,
+            reject_reason="request_failed",
             input_text=text,
-            cleaned_lines=lines or [],
         )
+
+    def supports_multi_split(self) -> bool:
+        return False
+
+    def split_input_capacity(self, max_chars: int) -> int:
+        return max(96, max_chars * 4)
 
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
         return []
@@ -224,82 +240,40 @@ class LlamaServerTextRefiner(TextRefiner):
         )
         return lines
 
-    def split_lines(self, text: str, max_chars: int) -> list[str] | None:
-        return self.split_lines_with_diagnostics(text, max_chars).lines
+    def split_input_capacity(self, max_chars: int) -> int:
+        return max(max_chars * 3, min(384, max(96, self.ctx_size // 32)))
 
-    def split_lines_with_diagnostics(self, text: str, max_chars: int) -> SplitPlanResult:
-        prompt = split_planning_prompt(text, max_chars)
-
+    def select_split_boundaries(
+        self,
+        text: str,
+        annotated_text: str,
+        candidate_ids: list[str],
+        max_chars: int,
+        *,
+        multiple: bool = False,
+    ) -> SplitPlanResult:
+        prompt = boundary_selection_prompt(
+            annotated_text,
+            candidate_ids,
+            max_chars,
+            multiple=False,
+        )
         try:
-            raw = self._chat(prompt)
+            raw = self._chat(prompt, max_tokens=64)
         except Exception as exc:
             print(f"Warning: LLM split planning failed; using deterministic split. {exc}")
             return SplitPlanResult(
-                lines=None,
+                selected_ids=None,
+                candidate_ids=candidate_ids,
                 accepted=False,
                 reject_reason="request_failed",
                 input_text=text,
             )
-        raw_lines = [line for line in raw.splitlines() if line.strip()]
-        lines = _split_marker_response(raw)
-        if lines is None:
-            cleaned_lines = [_clean_response_line(line) for line in raw_lines]
-            if len(cleaned_lines) == 2:
-                lines = cleaned_lines
-        if lines is None:
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=0,
-                accepted=False,
-                reject_reason="missing_split_marker",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=[],
-            )
-        if any(not _valid_cleaned_line(line) for line in lines):
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=len([line for line in lines if line.strip()]),
-                accepted=False,
-                reject_reason="invalid_line",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=[line for line in lines if line.strip()],
-            )
-        lines = [line for line in lines if line.strip()]
-        if len(lines) != 2:
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=len(lines),
-                accepted=False,
-                reject_reason="wrong_line_count",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=lines,
-            )
-        if _normalize_for_validation("".join(lines)) != _normalize_for_validation(text):
-            return SplitPlanResult(
-                lines=None,
-                raw_line_count=len(raw_lines),
-                clean_line_count=len(lines),
-                accepted=False,
-                reject_reason="normalized_text_mismatch",
-                input_text=text,
-                raw_response=raw,
-                cleaned_lines=lines,
-            )
-        return SplitPlanResult(
-            lines=lines,
-            raw_line_count=len(raw_lines),
-            clean_line_count=len(lines),
-            accepted=True,
-            reject_reason="none",
-            input_text=text,
-            raw_response=raw,
-            cleaned_lines=lines,
+        return _parse_boundary_selection(
+            raw,
+            text=text,
+            candidate_ids=candidate_ids,
+            multiple=False,
         )
 
     def flag_mistranscriptions(self, numbered_lines: list[tuple[int, str]]) -> list[MisTranscriptionFlag]:
@@ -582,19 +556,45 @@ def _parse_indexed_cleanup_response(
     return cleaned_lines, None
 
 
-def _split_marker_response(raw: str) -> list[str] | None:
-    text = raw.strip()
-    text = re.sub(r"^```(?:text)?", "", text).strip()
-    text = re.sub(r"```$", "", text).strip()
-    marker_pattern = re.compile(r"\s*(?:<\s*SPLIT\s*>|＜\s*SPLIT\s*＞|\[SPLIT\]|【SPLIT】)\s*", re.IGNORECASE)
-    parts = marker_pattern.split(text)
-    if len(parts) != 2:
-        return None
-    left = _clean_response_line(parts[0])
-    right = _clean_response_line(parts[1])
-    if not left or not right:
-        return None
-    return [left, right]
+def _parse_boundary_selection(
+    raw: str,
+    *,
+    text: str,
+    candidate_ids: list[str],
+    multiple: bool,
+) -> SplitPlanResult:
+    """Extract only known IDs; transcript reconstruction is never accepted or needed."""
+    known = {candidate.casefold(): candidate for candidate in candidate_ids}
+    parsed = [
+        known[match.group(0).casefold()]
+        for match in re.finditer(r"(?<![A-Za-z0-9])Z\d+[A-Z](?![A-Za-z0-9])", raw, re.IGNORECASE)
+        if match.group(0).casefold() in known
+    ]
+    selected: list[str] = []
+    seen_zones: set[str] = set()
+    for candidate_id in parsed:
+        zone = re.match(r"Z\d+", candidate_id, re.IGNORECASE)
+        zone_id = zone.group(0).casefold() if zone is not None else candidate_id.casefold()
+        if candidate_id in selected or zone_id in seen_zones:
+            continue
+        selected.append(candidate_id)
+        seen_zones.add(zone_id)
+        if not multiple:
+            break
+    order = {candidate_id: index for index, candidate_id in enumerate(candidate_ids)}
+    selected.sort(key=order.__getitem__)
+    raw_lines = [line for line in raw.splitlines() if line.strip()]
+    return SplitPlanResult(
+        selected_ids=selected or None,
+        candidate_ids=candidate_ids,
+        raw_line_count=len(raw_lines),
+        valid_id_count=len(selected),
+        accepted=bool(selected),
+        reject_reason="none" if selected else "no_valid_boundary_id",
+        input_text=text,
+        raw_response=raw,
+        parsed_ids=parsed,
+    )
 
 
 def _valid_cleaned_line(text: str) -> bool:

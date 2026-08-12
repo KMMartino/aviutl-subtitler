@@ -8,11 +8,12 @@ import {
 
 describe("settings expansion state", () => {
   it("keeps the existing readiness-based defaults", () => {
-    expect(defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, alignmentInstalled: true, envExists: true, serverExists: true })).toEqual({
+    expect(defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, ytDlpReady: true, alignmentInstalled: true, envExists: true, serverExists: true })).toEqual({
       localModel: true,
       server: false,
       python: false,
       ffmpeg: false,
+      ytDlp: false,
       alignment: false,
       env: false,
       cutSilence: false,
@@ -20,7 +21,7 @@ describe("settings expansion state", () => {
   });
 
   it("retains independent choices for local and hosted workflow families", () => {
-    const initial = defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, alignmentInstalled: true, envExists: true, serverExists: true });
+    const initial = defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, ytDlpReady: true, alignmentInstalled: true, envExists: true, serverExists: true });
     const states: SettingsExpansionByFamily = {
       local: updateSettingsExpansion(initial, "python"),
       hosted: updateSettingsExpansion(initial, "env"),
@@ -38,7 +39,7 @@ describe("settings expansion state", () => {
     expect(workflowFamily("hosted")).toBe("hosted");
     expect(workflowFamily("hosted-long-stream")).toBe("hosted");
 
-    const initial = defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, alignmentInstalled: true, envExists: true, serverExists: true });
+    const initial = defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, ytDlpReady: true, alignmentInstalled: true, envExists: true, serverExists: true });
     const states: SettingsExpansionByFamily = {};
     const localFamily = workflowFamily("local-long-stream");
     states[localFamily] = updateSettingsExpansion(states[localFamily] ?? initial, "python");

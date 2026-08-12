@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 import os
+import re
+import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,14 +16,16 @@ from subtitler.aligner import ctc_language_code, is_japanese_language
 from subtitler.alignment_pool import AlignmentConfig, AlignmentPool
 from subtitler.api_costs import estimate_run_cost
 from subtitler.api_usage import ApiUsageLedger
+from subtitler.audio import write_wav_segment
 from subtitler.errors import SubtitlerError
 from subtitler.external_transcribers import (
     FallbackTranscriber,
     GeminiTranscriber,
+    GPTTranscribeAdapter,
     MalformedTranscriptionResponse,
     OpenAITranscriber,
 )
-from subtitler.models import AlignedChunk, AudioChunk, TranscriptChunk
+from subtitler.models import AlignedChunk, AlignedToken, AudioChunk, TranscriptChunk
 from subtitler.profiling import PipelineProfiler, now
 from subtitler.transcriber import ServerGemmaTranscriber
 from subtitler.transcription_backend import (
@@ -34,7 +39,13 @@ from subtitler.transcription_backend import (
     TranscriptToken,
     TranscriptionRequest,
 )
-from subtitler.vad import VadSession, segment_speech_with_groups, select_high_activation_chunks
+from subtitler.vad import (
+    VadSession,
+    assign_vad_groups_by_largest_gaps,
+    segment_speech_with_groups,
+    select_high_activation_chunks,
+    split_chunk_with_tighter_vad,
+)
 from subtitler.silence_cut import build_cut_candidates
 
 
@@ -151,6 +162,12 @@ class HostedAttemptOutcome:
     model: str = ""
 
 
+@dataclass
+class HostedSplitRecovery:
+    text: str
+    unrecovered: list[tuple[AudioChunk, Exception]]
+
+
 class ExistingPipelineBackend:
     name = "existing-pipeline"
 
@@ -178,10 +195,22 @@ class ExistingPipelineBackend:
         print("Running Silero VAD...")
         cleanup_group_max_sec = _cleanup_group_max_sec(request.duration_sec, cleanup_group_policy(self.config))
         vad_session = VadSession()
+        configured_vad_max_sec = float(vad_cfg["max_chunk_sec"])
+        transcription_vad_max_sec = (
+            min(configured_vad_max_sec, 30.0)
+            if backend_cfg["transcriber"] == "local-gemma"
+            else configured_vad_max_sec
+        )
+        if transcription_vad_max_sec < configured_vad_max_sec:
+            print(
+                f"Local transcription VAD maximum capped at {transcription_vad_max_sec:.1f}s "
+                f"(configured {configured_vad_max_sec:.1f}s).",
+                flush=True,
+            )
         vad_segmentation = segment_speech_with_groups(
             samples=request.metadata["samples"],
             sample_rate=request.sample_rate,
-            max_chunk_sec=float(vad_cfg["max_chunk_sec"]),
+            max_chunk_sec=transcription_vad_max_sec,
             min_speech_sec=float(vad_cfg["min_speech_sec"]),
             min_silence_ms=int(vad_cfg["min_silence_ms"]),
             speech_pad_ms=int(vad_cfg["speech_pad_ms"]),
@@ -202,6 +231,21 @@ class ExistingPipelineBackend:
             flush=True,
         )
         selection = build_speech_selection(workflow_cfg, chunks, request.duration_sec)
+        transcription_chunks = selection.selected_chunks
+        if uses_larger_hosted_transcription_segments(self.config):
+            transcription_chunks = build_hosted_transcription_chunks(
+                all_chunks=chunks,
+                selected_chunks=selection.selected_chunks,
+                samples=request.metadata["samples"],
+                sample_rate=request.sample_rate,
+                max_group_sec=cleanup_group_max_sec,
+                temp_dir=request.temp_dir,
+            )
+            print(
+                f"Hosted transcription segments: {len(transcription_chunks)} larger VAD group(s) "
+                f"from {len(selection.selected_chunks)} selected fine chunk(s).",
+                flush=True,
+            )
         normalized_raw_vad = [RawVadSpeechInterval(start, end) for start, end in raw_vad_intervals]
         control_event = request.metadata.get("control_event")
         cut_mode = self.config["additional_settings"].get("cut_silence_mode", "off")
@@ -216,11 +260,14 @@ class ExistingPipelineBackend:
             write_vad_selection(request.sidecar_base.with_suffix(".vad_selection.csv"), chunks, selection.selected_chunks)
             write_vad_selection(request.sidecar_base.with_suffix(".vad_groups.csv"), vad_groups, vad_groups)
 
-        estimated_api_cost = estimate_backend_run_cost(self.config, selection.selected_speech_seconds)
+        transcribed_audio_seconds = sum(
+            max(0.0, chunk.end - chunk.start) for chunk in transcription_chunks
+        )
+        estimated_api_cost = estimate_backend_run_cost(self.config, transcribed_audio_seconds)
         print(
             "Estimated hosted API cost: "
             f"${estimated_api_cost:.4f} "
-            f"(transcribed_speech={selection.selected_speech_seconds / 60.0:.2f} min, "
+            f"(transcribed_audio={transcribed_audio_seconds / 60.0:.2f} min, "
             f"vad_speech={selection.total_speech_seconds / 60.0:.2f} min)",
             flush=True,
         )
@@ -244,11 +291,16 @@ class ExistingPipelineBackend:
                     )
                 ],
                 capabilities=self.capabilities,
-                metadata=_backend_metadata(self.config, selection, estimated_api_cost),
+                metadata=_backend_metadata(
+                    self.config,
+                    selection,
+                    estimated_api_cost,
+                    transcription_chunks,
+                ),
             )
         enforce_cost_guard(self.config, estimated_api_cost)
 
-        for chunk in selection.selected_chunks:
+        for chunk in transcription_chunks:
             self.profiler.start_chunk(chunk.index, chunk.start, chunk.end)
 
         transcriber = self._build_transcriber(request, vad_session)
@@ -281,13 +333,18 @@ class ExistingPipelineBackend:
                 vad_session=vad_session,
             )
             aligned, failed_transcripts = transcribe_and_align(
-                chunks=selection.selected_chunks,
+                chunks=transcription_chunks,
                 transcriber=transcriber,
                 alignment_config=config,
                 profiler=self.profiler,
                 audio_prep_workers=max(1, int(backend_cfg["audio_prep_workers"])),
                 align_workers=max(1, align_workers),
                 transcription_workers=max(1, transcription_workers(self.config)),
+                hosted_recovery_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
+                hosted_recovery_temp_dir=request.temp_dir,
+                hosted_recovery_vad_session=vad_session,
+                hosted_recovery_min_silence_ms=int(vad_cfg["min_silence_ms"]),
+                hosted_recovery_speech_pad_ms=int(vad_cfg["speech_pad_ms"]),
             )
         finally:
             close = getattr(transcriber, "close", None)
@@ -296,7 +353,7 @@ class ExistingPipelineBackend:
 
         segments = aligned_chunks_to_segments(aligned, request.language)
         status = transcription_result_status(
-            selected_chunk_count=len(selection.selected_chunks),
+            selected_chunk_count=len(transcription_chunks),
             usable_segment_count=sum(bool(segment.text.strip()) for segment in segments),
             failed_chunk_count=len(failed_transcripts),
         )
@@ -315,17 +372,24 @@ class ExistingPipelineBackend:
                     message=f"Transcription failed for chunk {item.chunk.index}",
                     region_index=item.chunk.index,
                     code="transcription_failed",
+                    metadata={"error": item.error} if item.error else {},
                 )
                 for item in failed_transcripts
             ],
             capabilities=self.capabilities,
-            metadata=_backend_metadata(self.config, selection, estimated_api_cost),
+            metadata=_backend_metadata(
+                self.config,
+                selection,
+                estimated_api_cost,
+                transcription_chunks,
+            ),
         )
 
     def _build_transcriber(self, request: TranscriptionRequest, vad_session: VadSession | None = None):
         backend_cfg = self.config["backend"]
         name = backend_cfg["transcriber"]
         model = transcription_model(self.config)
+        allow_sparse_transcript = self.config["workflow"]["mode"] == "long-stream"
         if name == "local-gemma":
             if not model:
                 raise SubtitlerError("Local workflow requires backend.model")
@@ -358,23 +422,31 @@ class ExistingPipelineBackend:
                     temp_dir=request.temp_dir,
                     usage=self.api_usage,
                     glossary=request.glossary,
+                    allow_sparse_transcript=allow_sparse_transcript,
                 ),
-                self._build_fallback_transcriber(request),
+                self._build_fallback_transcriber(request, allow_sparse_transcript=allow_sparse_transcript),
             )
         if name == "openai":
+            transcriber_type = GPTTranscribeAdapter if model == "gpt-transcribe" else OpenAITranscriber
             return FallbackTranscriber(
-                OpenAITranscriber(
+                transcriber_type(
                     model=model,
                     temp_dir=request.temp_dir,
                     usage=self.api_usage,
                     glossary=request.glossary,
                     language=request.language,
+                    allow_sparse_transcript=allow_sparse_transcript,
                 ),
-                self._build_fallback_transcriber(request),
+                self._build_fallback_transcriber(request, allow_sparse_transcript=allow_sparse_transcript),
             )
         raise SubtitlerError(f"Unknown existing-pipeline transcriber: {name}")
 
-    def _build_fallback_transcriber(self, request: TranscriptionRequest):
+    def _build_fallback_transcriber(
+        self,
+        request: TranscriptionRequest,
+        *,
+        allow_sparse_transcript: bool = False,
+    ):
         backend_cfg = self.config["backend"]
         name = str(backend_cfg.get("fallback_transcriber") or "").strip()
         model = str(backend_cfg.get("fallback_transcription_model") or "").strip()
@@ -389,15 +461,18 @@ class ExistingPipelineBackend:
                 usage=self.api_usage,
                 glossary=request.glossary,
                 timeout_scale=2.0,
+                allow_sparse_transcript=allow_sparse_transcript,
             )
         if name == "openai":
-            return OpenAITranscriber(
+            transcriber_type = GPTTranscribeAdapter if model == "gpt-transcribe" else OpenAITranscriber
+            return transcriber_type(
                 model=model,
                 temp_dir=request.temp_dir,
                 usage=self.api_usage,
                 glossary=request.glossary,
                 language=request.language,
                 timeout_scale=2.0,
+                allow_sparse_transcript=allow_sparse_transcript,
             )
         raise SubtitlerError(f"Unknown hosted fallback transcriber: {name}")
 
@@ -478,11 +553,19 @@ def _validated_cost_guard_settings(
     return float(max_cost), allow_api_spend, estimate_cost_only
 
 
-def _backend_metadata(config: dict[str, Any], selection: SpeechSelection, estimated_api_cost: float) -> dict[str, Any]:
+def _backend_metadata(
+    config: dict[str, Any],
+    selection: SpeechSelection,
+    estimated_api_cost: float,
+    transcription_chunks: list[AudioChunk] | None = None,
+) -> dict[str, Any]:
+    chunks = selection.selected_chunks if transcription_chunks is None else transcription_chunks
     return {
         "transcriber": config["backend"]["transcriber"],
         "selected_speech_seconds": selection.selected_speech_seconds,
         "total_speech_seconds": selection.total_speech_seconds,
+        "transcribed_audio_seconds": sum(max(0.0, chunk.end - chunk.start) for chunk in chunks),
+        "transcription_segment_count": len(chunks),
         "estimated_api_cost_usd": estimated_api_cost,
     }
 
@@ -510,6 +593,13 @@ def transcription_workers(config: dict[str, Any]) -> int:
     if explicit is not None:
         return max(1, int(explicit))
     return 6 if hosted else 1
+
+
+def uses_larger_hosted_transcription_segments(config: dict[str, Any]) -> bool:
+    return (
+        config["backend"]["transcriber"] == "openai"
+        and transcription_model(config) == "gpt-transcribe"
+    )
 
 
 def long_stream_default_duration_ratio(media_duration_sec: float) -> float:
@@ -544,8 +634,89 @@ def build_speech_selection(workflow_cfg: dict[str, Any], chunks: list[AudioChunk
     )
 
 
+def build_hosted_transcription_chunks(
+    *,
+    all_chunks: list[AudioChunk],
+    selected_chunks: list[AudioChunk],
+    samples: Any,
+    sample_rate: int,
+    max_group_sec: float,
+    temp_dir: Path,
+) -> list[AudioChunk]:
+    """Pack consecutive selected VAD chunks into continuous hosted-audio groups."""
+    if not selected_chunks:
+        return []
+    ordered_all = sorted(all_chunks, key=lambda item: (item.start, item.end, item.index))
+    positions = {chunk.index: position for position, chunk in enumerate(ordered_all)}
+    ordered_selected = sorted(
+        selected_chunks,
+        key=lambda item: (positions.get(item.index, len(positions)), item.start, item.end),
+    )
+    consecutive_runs: list[list[AudioChunk]] = []
+    for chunk in ordered_selected:
+        position = positions.get(chunk.index)
+        if (
+            not consecutive_runs
+            or position is None
+            or positions.get(consecutive_runs[-1][-1].index) != position - 1
+        ):
+            consecutive_runs.append([chunk])
+        else:
+            consecutive_runs[-1].append(chunk)
+
+    metadata_groups: list[AudioChunk] = []
+    for run in consecutive_runs:
+        copies = [
+            AudioChunk(
+                index=chunk.index,
+                start=chunk.start,
+                end=chunk.end,
+                samples=[],
+                vad_activation=chunk.vad_activation,
+                vad_peak=chunk.vad_peak,
+                vad_group_index=chunk.vad_group_index,
+            )
+            for chunk in run
+        ]
+        metadata_groups.extend(
+            assign_vad_groups_by_largest_gaps(copies, max_group_sec=max_group_sec)
+        )
+
+    result: list[AudioChunk] = []
+    total_samples = len(samples)
+    for index, group in enumerate(sorted(metadata_groups, key=lambda item: (item.start, item.end))):
+        start_sample = max(0, min(total_samples, round(group.start * sample_rate)))
+        end_sample = max(start_sample, min(total_samples, round(group.end * sample_rate)))
+        group_samples = samples[start_sample:end_sample]
+        wav_path = temp_dir / f"hosted_transcription_group_{index:05d}.wav"
+        write_wav_segment(group_samples, sample_rate, wav_path)
+        result.append(
+            AudioChunk(
+                index=index,
+                start=start_sample / sample_rate,
+                end=end_sample / sample_rate,
+                samples=group_samples,
+                wav_path=wav_path,
+                vad_activation=group.vad_activation,
+                vad_peak=group.vad_peak,
+                vad_group_index=index,
+            )
+        )
+    return result
+
+
 def select_transcription_chunks(workflow_cfg: dict[str, Any], chunks: list[AudioChunk], media_duration_sec: float) -> list[AudioChunk]:
-    if workflow_cfg["mode"] != "long-stream":
+    if (
+        workflow_cfg["mode"] != "long-stream"
+        or workflow_cfg.get("transcription_scope", "full") == "full"
+    ):
+        if workflow_cfg["mode"] == "long-stream" and chunks:
+            total_speech_minutes = sum(max(0.0, chunk.end - chunk.start) for chunk in chunks) / 60.0
+            print(
+                "Long-stream mode: full detected speech selected "
+                f"({len(chunks)} VAD chunks, {total_speech_minutes:.2f} active voice min).",
+                flush=True,
+            )
         return chunks
     ratio = workflow_cfg.get("long_stream_selection_ratio")
     duration_ratio = long_stream_default_duration_ratio(media_duration_sec) if ratio is None else max(0.0, min(1.0, float(ratio)))
@@ -600,6 +771,7 @@ def aligned_chunks_to_segments(chunks: list[AlignedChunk], language: str) -> lis
                 timing_kind=timing_kind if item.tokens else "segment",
                 fallback_timing=item.fallback,
                 source="existing-pipeline",
+                metadata={"vad_group_index": item.chunk.vad_group_index},
             )
         )
     return segments
@@ -613,17 +785,34 @@ def transcribe_and_align(
     audio_prep_workers: int,
     align_workers: int,
     transcription_workers: int = 1,
+    hosted_recovery_depth: int = 0,
+    hosted_recovery_temp_dir: Path | None = None,
+    hosted_recovery_vad_session: VadSession | None = None,
+    hosted_recovery_min_silence_ms: int = 400,
+    hosted_recovery_speech_pad_ms: int = 200,
 ):
+    if not chunks:
+        return [], []
     if isinstance(transcriber, FallbackTranscriber):
         return transcribe_and_align_hosted(
-            chunks, transcriber, alignment_config, profiler, transcription_workers, align_workers
+            chunks,
+            transcriber,
+            alignment_config,
+            profiler,
+            transcription_workers,
+            align_workers,
+            recovery_max_split_depth=hosted_recovery_depth,
+            recovery_temp_dir=hosted_recovery_temp_dir,
+            recovery_vad_session=hosted_recovery_vad_session,
+            recovery_min_silence_ms=hosted_recovery_min_silence_ms,
+            recovery_speech_pad_ms=hosted_recovery_speech_pad_ms,
         )
     if hasattr(transcriber, "prepare_payload") and hasattr(transcriber, "transcribe_payload"):
         return transcribe_and_align_server(chunks, transcriber, alignment_config, profiler, audio_prep_workers, align_workers)
     if transcription_workers > 1:
         return transcribe_and_align_parallel(chunks, transcriber, alignment_config, profiler, transcription_workers, align_workers)
 
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
+    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
     for i, chunk in enumerate(chunks, start=1):
         print(f"Transcribing chunk {i}/{len(chunks)} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
@@ -677,8 +866,14 @@ def transcribe_and_align_hosted(
     profiler: PipelineProfiler,
     workers: int,
     align_workers: int,
+    recovery_max_split_depth: int = 0,
+    recovery_temp_dir: Path | None = None,
+    recovery_vad_session: VadSession | None = None,
+    recovery_min_silence_ms: int = 400,
+    recovery_speech_pad_ms: int = 200,
 ):
     ordered = sorted(chunks, key=lambda item: (item.start, item.end, item.index))
+    pool = AlignmentPool(capped_align_workers(align_workers, len(ordered)), alignment_config, profiler)
     normal: dict[int, HostedAttemptOutcome] = {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as transcribe_pool:
         futures = {}
@@ -735,11 +930,41 @@ def transcribe_and_align_hosted(
             resolved[chunk.index] = None
         else:
             exc = final.error or RuntimeError("hosted transcription produced no usable output")
-            failed_item = failed_transcript(chunk, exc)
-            failed.append(failed_item)
-            resolved[chunk.index] = None
+            recovered = _recover_hosted_chunk_with_split(
+                transcriber,
+                chunk,
+                max_depth=recovery_max_split_depth,
+                temp_dir=recovery_temp_dir,
+                vad_session=recovery_vad_session,
+                min_silence_ms=recovery_min_silence_ms,
+                speech_pad_ms=recovery_speech_pad_ms,
+            )
+            if recovered is None or (not recovered.text and recovered.unrecovered):
+                profiler.mark_error(chunk.index, exc)
+                failed_item = failed_transcript(chunk, exc)
+                failed.append(failed_item)
+                resolved[chunk.index] = None
+            elif recovered.text:
+                print(f"Recovered hosted transcription chunk {chunk.index} with smaller audio segments.", flush=True)
+                resolved[chunk.index] = TranscriptChunk(chunk, recovered.text)
+                if recovered.unrecovered:
+                    for failed_chunk, recovery_error in recovered.unrecovered:
+                        profiler.mark_error(chunk.index, recovery_error)
+                        failed.append(
+                            TranscriptChunk(
+                                chunk=failed_chunk,
+                                text=FAILED_TRANSCRIPTION_TEXT,
+                                error=str(recovery_error),
+                            )
+                        )
+                    print(
+                        f"Warning: retained the usable recovery text for hosted chunk {chunk.index}; "
+                        f"{len(recovered.unrecovered)} smaller segment(s) remain untranscribed.",
+                        flush=True,
+                    )
+            else:
+                resolved[chunk.index] = None
 
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
     for chunk in ordered:
         transcript = resolved[chunk.index]
         if transcript is not None:
@@ -748,6 +973,71 @@ def transcribe_and_align_hosted(
     aligned = pool.close_and_collect()
     print_transcription_failure_summary(failed)
     return aligned, failed
+
+
+def _recover_hosted_chunk_with_split(
+    transcriber: FallbackTranscriber,
+    chunk: AudioChunk,
+    *,
+    max_depth: int,
+    temp_dir: Path | None,
+    vad_session: VadSession | None,
+    min_silence_ms: int,
+    speech_pad_ms: int,
+    depth: int = 0,
+) -> HostedSplitRecovery | None:
+    if depth >= max_depth:
+        return None
+    subchunks = split_chunk_with_tighter_vad(
+        chunk,
+        sample_rate=16000,
+        temp_dir=temp_dir,
+        keep_temp=temp_dir is not None,
+        session=vad_session,
+        recovery_min_silence_ms=min_silence_ms,
+        recovery_speech_pad_ms=speech_pad_ms,
+        max_pieces=2,
+    )
+    if len(subchunks) < 2:
+        return None
+    print(
+        f"Retrying failed hosted chunk {chunk.index} [{chunk.start:.2f}-{chunk.end:.2f}s] "
+        f"as {len(subchunks)} smaller segment(s), recovery depth {depth + 1}/{max_depth}.",
+        flush=True,
+    )
+    parts: list[str] = []
+    unrecovered: list[tuple[AudioChunk, Exception]] = []
+    for subchunk in subchunks:
+        outcome = hosted_attempt(transcriber.primary, subchunk)
+        if outcome.status not in {"success", "untranscribable"} and transcriber.fallback is not None:
+            outcome = hosted_attempt(transcriber.fallback, subchunk)
+        if outcome.status == "success" and outcome.transcript is not None:
+            parts.append(outcome.transcript.text)
+            continue
+        if outcome.status == "untranscribable":
+            continue
+        nested = _recover_hosted_chunk_with_split(
+            transcriber,
+            subchunk,
+            max_depth=max_depth,
+            temp_dir=temp_dir,
+            vad_session=vad_session,
+            min_silence_ms=min_silence_ms,
+            speech_pad_ms=speech_pad_ms,
+            depth=depth + 1,
+        )
+        if nested is None:
+            unrecovered.append(
+                (subchunk, outcome.error or RuntimeError("hosted recovery produced no usable output"))
+            )
+            continue
+        if nested.text:
+            parts.append(nested.text)
+        unrecovered.extend(nested.unrecovered)
+    return HostedSplitRecovery(
+        text="".join(part.strip() for part in parts if part.strip()),
+        unrecovered=unrecovered,
+    )
 
 
 def transcribe_one(transcriber, chunk, profiler: PipelineProfiler):
@@ -769,7 +1059,7 @@ def transcribe_and_align_parallel(
     workers: int,
     align_workers: int,
 ):
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
+    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as transcribe_pool:
         futures = {}
@@ -812,7 +1102,7 @@ def transcribe_and_align_server(
     prep_futures: dict[int, Future] = {}
     next_to_submit = 0
     total = len(chunks)
-    pool = AlignmentPool(align_workers, alignment_config, profiler)
+    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
     previous_text: str | None = None
     with ThreadPoolExecutor(max_workers=audio_prep_workers) as prep_pool:
@@ -831,22 +1121,182 @@ def transcribe_and_align_server(
                     prep_futures[upcoming.index] = prep_pool.submit(prepare_payload, transcriber, upcoming, profiler)
                     next_to_submit += 1
                 start = now()
-                text = transcriber.transcribe_payload(chunk, payload, previous_text)
+                transcripts = [
+                    TranscriptChunk(
+                        chunk=chunk,
+                        text=transcriber.transcribe_payload(chunk, payload, previous_text),
+                    )
+                ]
                 profiler.add_ms(chunk.index, "transcribe_wait_ms", (now() - start) * 1000)
-                if not text:
+                transcripts = [item for item in transcripts if item.text.strip()]
+                if not transcripts:
                     print(f"Warning: empty transcript for chunk {chunk.index}")
                     previous_text = None
                     continue
-                pool.submit(TranscriptChunk(chunk=chunk, text=text))
-                previous_text = text
+                for transcript in transcripts:
+                    pool.submit(transcript)
+                previous_text = "".join(item.text for item in transcripts)
             except Exception as exc:
                 profiler.mark_error(chunk.index, exc)
                 failed.append(failed_transcript(chunk, exc))
                 previous_text = None
     print("Waiting for alignment workers...", flush=True)
-    aligned = pool.close_and_collect()
+    aligned = deduplicate_overlapping_aligned_chunks(pool.close_and_collect())
     print_transcription_failure_summary(failed)
     return aligned, failed
+
+
+def deduplicate_overlapping_aligned_chunks(chunks: list[AlignedChunk]) -> list[AlignedChunk]:
+    """Remove duplicate boundary text produced by independently aligned overlap audio."""
+    ordered = sorted(chunks, key=lambda item: (item.chunk.start, item.chunk.end, item.chunk.index))
+    if len(ordered) < 2:
+        return ordered
+    result: list[AlignedChunk] = [ordered[0]]
+    for current in ordered[1:]:
+        previous = result[-1]
+        if previous.chunk.end <= current.chunk.start or not previous.tokens or not current.tokens:
+            result.append(current)
+            continue
+        match = _aligned_overlap_match(previous, current)
+        if match is None:
+            fuzzy_seam = _aligned_fuzzy_overlap_seam(previous, current)
+            if _trim_aligned_overlap_at_seam(previous, current, seam=fuzzy_seam):
+                if not previous.tokens:
+                    result.pop()
+                if current.tokens:
+                    result.append(current)
+                continue
+            result.append(current)
+            continue
+        size, keep = match
+        if keep == "left":
+            current.tokens = current.tokens[size:]
+            if not current.tokens:
+                continue
+            current.text = "".join(token.text for token in current.tokens)
+        else:
+            previous.tokens = previous.tokens[:-size]
+            if previous.tokens:
+                previous.text = "".join(token.text for token in previous.tokens)
+            else:
+                result.pop()
+        result.append(current)
+    return result
+
+
+def _aligned_overlap_match(left: AlignedChunk, right: AlignedChunk) -> tuple[int, str] | None:
+    maximum = min(24, len(left.tokens), len(right.tokens))
+    for size in range(maximum, 1, -1):
+        left_tokens = left.tokens[-size:]
+        right_tokens = right.tokens[:size]
+        left_text = "".join(token.text for token in left_tokens)
+        right_text = "".join(token.text for token in right_tokens)
+        if re.sub(r"\s+", "", left_text) != re.sub(r"\s+", "", right_text):
+            continue
+        left_midpoint = (left_tokens[0].start + left_tokens[-1].end) / 2.0
+        right_midpoint = (right_tokens[0].start + right_tokens[-1].end) / 2.0
+        overlap_duration = max(
+            0.0,
+            min(left.chunk.end, right.chunk.end) - max(left.chunk.start, right.chunk.start),
+        )
+        if abs(left_midpoint - right_midpoint) > max(0.75, overlap_duration):
+            continue
+        left_edge_margin = max(0.0, left.chunk.end - left_midpoint)
+        right_edge_margin = max(0.0, right_midpoint - right.chunk.start)
+        return size, "left" if left_edge_margin >= right_edge_margin else "right"
+    return None
+
+
+def _aligned_fuzzy_overlap_seam(left: AlignedChunk, right: AlignedChunk) -> float | None:
+    """Locate a shared phrase in the overlap without requiring equal chunk edges."""
+    overlap_start = max(left.chunk.start, right.chunk.start)
+    overlap_end = min(left.chunk.end, right.chunk.end)
+    if overlap_end <= overlap_start:
+        return None
+
+    def overlap_characters(
+        tokens: list[AlignedToken],
+        *,
+        after: float | None = None,
+        before: float | None = None,
+    ) -> tuple[list[str], list[int]]:
+        characters: list[str] = []
+        owners: list[int] = []
+        for token_index, token in enumerate(tokens):
+            midpoint = (token.start + token.end) / 2.0
+            if after is not None and midpoint < after:
+                continue
+            if before is not None and midpoint > before:
+                continue
+            normalized = re.sub(r"\s+", "", unicodedata.normalize("NFKC", token.text)).casefold()
+            for character in normalized:
+                characters.append(character)
+                owners.append(token_index)
+        return characters, owners
+
+    left_chars, left_owners = overlap_characters(left.tokens, after=overlap_start - 0.25)
+    right_chars, right_owners = overlap_characters(right.tokens, before=overlap_end + 0.25)
+    if len(left_chars) < 3 or len(right_chars) < 3:
+        return None
+    matcher = SequenceMatcher(None, left_chars, right_chars, autojunk=False)
+    best: tuple[int, float] | None = None
+    for block in matcher.get_matching_blocks():
+        if block.size < 3:
+            continue
+        left_first = left.tokens[left_owners[block.a]]
+        left_last = left.tokens[left_owners[block.a + block.size - 1]]
+        right_first = right.tokens[right_owners[block.b]]
+        right_last = right.tokens[right_owners[block.b + block.size - 1]]
+        left_midpoint = (left_first.start + left_last.end) / 2.0
+        right_midpoint = (right_first.start + right_last.end) / 2.0
+        if abs(left_midpoint - right_midpoint) > max(0.6, (overlap_end - overlap_start) * 0.75):
+            continue
+        seam = max(overlap_start, min(overlap_end, (left_midpoint + right_midpoint) / 2.0))
+        score = block.size
+        if best is None or score > best[0]:
+            best = (score, seam)
+    return best[1] if best is not None else None
+
+
+def _trim_aligned_overlap_at_seam(
+    left: AlignedChunk,
+    right: AlignedChunk,
+    *,
+    seam: float | None = None,
+) -> bool:
+    """Assign non-identical overlap text to one side using absolute aligned time."""
+    overlap_start = max(left.chunk.start, right.chunk.start)
+    overlap_end = min(left.chunk.end, right.chunk.end)
+    if overlap_end <= overlap_start:
+        return False
+    if seam is None:
+        seam = (overlap_start + overlap_end) / 2.0
+    else:
+        seam = max(overlap_start, min(overlap_end, seam))
+    left_tokens = [
+        token
+        for token in left.tokens
+        if (token.start + token.end) / 2.0 <= seam
+    ]
+    right_tokens = [
+        token
+        for token in right.tokens
+        if (token.start + token.end) / 2.0 > seam
+    ]
+    removed = len(left_tokens) < len(left.tokens) or len(right_tokens) < len(right.tokens)
+    if not removed:
+        return False
+    left.tokens = left_tokens
+    left.text = "".join(token.text for token in left_tokens)
+    right.tokens = right_tokens
+    right.text = "".join(token.text for token in right_tokens)
+    return True
+
+
+def capped_align_workers(configured_workers: int, segment_count: int) -> int:
+    if segment_count <= 0:
+        return 0
+    return min(max(1, configured_workers), segment_count)
 
 
 def failed_transcript(chunk, exc: Exception) -> TranscriptChunk:
@@ -855,7 +1305,7 @@ def failed_transcript(chunk, exc: Exception) -> TranscriptChunk:
         f"[{chunk.start:.2f}-{chunk.end:.2f}s]; leaving blank and continuing. {exc}",
         flush=True,
     )
-    return TranscriptChunk(chunk=chunk, text=FAILED_TRANSCRIPTION_TEXT)
+    return TranscriptChunk(chunk=chunk, text=FAILED_TRANSCRIPTION_TEXT, error=str(exc))
 
 
 def is_failed_transcript(transcript: TranscriptChunk) -> bool:
@@ -867,6 +1317,7 @@ def print_transcription_failure_summary(failed_transcripts: list[TranscriptChunk
         return
     details = ", ".join(f"{item.chunk.index} [{item.chunk.start:.2f}-{item.chunk.end:.2f}s]" for item in failed_transcripts)
     print(
-        f"Transcription failed for {len(failed_transcripts)} chunk(s); left blank and continued: {details}",
+        f"Transcription failed for {len(failed_transcripts)} chunk(s); "
+        f"those ranges remain untranscribed: {details}",
         flush=True,
     )

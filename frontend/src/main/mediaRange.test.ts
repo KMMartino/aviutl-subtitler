@@ -17,5 +17,7 @@ describe("private media byte ranges", () => {
   it("reports media content types", () => {
     expect(mediaContentType("preview.mp4")).toBe("video/mp4");
     expect(mediaContentType("source.mkv")).toBe("video/x-matroska");
+    expect(mediaContentType("still.png")).toBe("image/png");
+    expect(mediaContentType("photo.JPEG")).toBe("image/jpeg");
   });
 });

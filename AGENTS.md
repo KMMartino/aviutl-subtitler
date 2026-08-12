@@ -4,6 +4,8 @@
 
 Run the checks matching the changed code without waiting for approval.
 
+Only write tests that test behavior of the program, not tests that merely duplicate implementation details.
+
 For backend changes:
 
 ```powershell
@@ -28,11 +30,32 @@ For EXO-only styling or layout changes, the focused check is sufficient:
 
 ## App Testing
 
-`npm run dist` creates ignored artifacts under `release/` and always requires user approval. Propose a rebuild after a significant product change or an accumulation of smaller changes.
+Rebuilding creates ignored artifacts under `release/` and always requires user approval. Propose a rebuild after a significant product change or an accumulation of smaller changes.
 
-After an approved rebuild, copy the portable artifact to `C:\tools\personal\Subtitler-latest\SubUtl.exe` for user testing. Do not push until the user has tested and approved the build.
+Whenever a rebuild has been approved or explicitly requested, run this deterministic project-root command instead of invoking `npm run dist` or copying the executable manually:
+
+```powershell
+.\rebuild-and-install.ps1
+```
+
+It builds the distribution, verifies the versioned portable artifact, and copies it to `C:\tools\personal\Subtitler-latest\SubUtl.exe` for user testing. Do not push until the user has tested and approved the build.
 
 For EXO styling or layout changes, also generate a short EXO under `testing-grounds/` for visual inspection before pushing.
+
+## Editorial Pipeline Versions
+
+Long-stream editorial checkpoints reuse paid intermediate artifacts. The boundary versions live in `EDITORIAL_STAGE_VERSIONS` in `subtitler/editorial_project.py`.
+
+Whenever a change alters a boundary's behavior, input assumptions, output schema, or interpretation, increment that boundary's integer before testing:
+
+1. `source_probe`
+2. `transcription`
+3. `visual_learning`
+4. `semantic_spans`
+5. `local_reconciliation`
+6. `global_reconciliation`
+
+Increment the earliest affected boundary. Resume automatically invalidates that boundary and every downstream boundary, so do not increment downstream versions merely because an upstream artifact changed. The `semantic_spans` boundary currently produces interpreted spans, candidate edits, narration briefs, connections, and cumulative context. `local_reconciliation` turns that per-source output into durable project material. `global_reconciliation` produces the project-wide duration and selection plans. Put suggestion changes at the earliest boundary whose stored output would actually differ; use only `global_reconciliation` when all per-source analysis and candidate suggestions remain valid. Never change editorial boundary behavior without reviewing and, when applicable, incrementing this version vector.
 
 ## EXO Invariants
 

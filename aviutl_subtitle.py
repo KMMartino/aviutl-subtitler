@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from subtitler.api_usage import ApiUsageLedger
+from subtitler.broll import build_broll_provider, plan_broll
 from subtitler.config import WORKFLOWS
 from subtitler.errors import SubtitlerError
 from subtitler.exo import generate_exo_file, write_exo
@@ -31,8 +32,10 @@ from subtitler.run_context import (
 from subtitler.silence_cut import (
     ENCODER_ARGS,
     build_cut_candidates,
+    build_rendered_media_plan,
     emit_frontend_event,
     execute_silence_cut,
+    probe_media_streams,
     write_silence_manifest,
 )
 from subtitler.subtitle_stage import (
@@ -49,6 +52,7 @@ from subtitler.transcription_stage import (
     handle_backend_result_status,
     run_transcription_stage,
 )
+from subtitler.web_assets import discover_web_assets
 
 
 def parse_args() -> CliArguments:
@@ -74,6 +78,7 @@ def parse_args() -> CliArguments:
     parser.add_argument("--no-glossary", action="store_true", help="Disable glossary loading")
     parser.add_argument("--frontend-protocol", choices=["stdio-v1"], help=argparse.SUPPRESS)
     parser.add_argument("--cut-silence-encoder", choices=sorted(ENCODER_ARGS), help="Encoder preset for Cut silence")
+    parser.add_argument("--media-library-db", help="Managed media-library SQLite database")
     return CliArguments(**vars(parser.parse_args()))
 
 
@@ -213,6 +218,72 @@ def main() -> int:
                 else:
                     print("No silence cuts were selected; no media output was created.", flush=True)
 
+            broll_placements = []
+            broll_mode = config["additional_settings"].get("broll_mode", "off")
+            if broll_mode != "off":
+                print("Planning B-roll from the indexed Media Library...", flush=True)
+                provider = build_broll_provider(config, api_usage)
+                try:
+                    broll_outcome = plan_broll(
+                        mode=broll_mode,
+                        database_path=Path(args.media_library_db) if args.media_library_db else None,
+                        subtitles=subtitles,
+                        fps=settings.rate,
+                        canvas_width=settings.width,
+                        canvas_height=settings.height,
+                        provider=provider,
+                        frontend_protocol=args.frontend_protocol,
+                        sidecar_path=artifacts.broll_plan if context.sidecars_enabled else None,
+                        web_discovery=(
+                            lambda needs: discover_web_assets(
+                                needs,
+                                model=str(config["broll"]["web_search_model"]),
+                                usage=api_usage,
+                            )
+                            if config["broll"].get("discover_web_assets", True)
+                            else []
+                        ),
+                    )
+                finally:
+                    provider.close()
+                broll_placements = broll_outcome.placements
+                backend_result.metadata["broll"] = {
+                    "mode": broll_mode,
+                    "provider": broll_outcome.provider,
+                    "model": broll_outcome.model,
+                    "proposed_count": len(broll_outcome.proposed),
+                    "placement_count": len(broll_outcome.placements),
+                    "editorial_need_count": broll_outcome.editorial_need_count,
+                    "catalog_asset_count": broll_outcome.catalog_asset_count,
+                    "retrieved_asset_count": broll_outcome.retrieved_asset_count,
+                    "filename_review_count": broll_outcome.filename_review_count,
+                    "filename_described_count": broll_outcome.filename_described_count,
+                    "filename_rejected_count": broll_outcome.filename_rejected_count,
+                    "planner_rejection_count": broll_outcome.planner_rejection_count,
+                    "safety_omission_count": broll_outcome.safety_omission_count,
+                    "missing_asset_count": len(broll_outcome.missing_assets),
+                    "web_candidate_count": len(broll_outcome.web_candidates),
+                    "omitted_count": len(broll_outcome.omitted),
+                    "error": broll_outcome.error,
+                }
+                print(
+                    f"B-roll candidates: {broll_outcome.editorial_need_count} editorial need(s), "
+                    f"{broll_outcome.retrieved_asset_count}/{broll_outcome.catalog_asset_count} catalog asset(s) "
+                    f"retrieved, {broll_outcome.filename_review_count} filename-only match(es) reviewed "
+                    f"({broll_outcome.filename_described_count} described, "
+                    f"{broll_outcome.filename_rejected_count} rejected), "
+                    f"{len(broll_outcome.proposed)} placement(s) proposed, "
+                    f"{broll_outcome.planner_rejection_count} malformed/invalid proposal(s), "
+                    f"{broll_outcome.safety_omission_count} safety-filtered.",
+                    flush=True,
+                )
+                print(
+                    f"B-roll result: {len(broll_placements)} placement(s), "
+                    f"{len(broll_outcome.missing_assets)} unmet asset need(s), "
+                    f"{len(broll_outcome.web_candidates)} web candidate(s).",
+                    flush=True,
+                )
+
             profiler.write()
             if artifacts.api_usage is not None:
                 api_usage.write_csv(artifacts.api_usage)
@@ -232,6 +303,17 @@ def main() -> int:
                 )
 
             try:
+                media_plan = cut_outcome.media_plan
+                if broll_placements and media_plan is None:
+                    try:
+                        if probe_media_streams(input_path).has_video:
+                            media_plan = build_rendered_media_plan(input_path, duration, settings.rate)
+                    except SubtitlerError as exc:
+                        print(
+                            f"Warning: Could not include the primary video in the B-roll EXO; "
+                            f"continuing with B-roll assets and subtitles only. {exc}",
+                            flush=True,
+                        )
                 content = generate_exo_file(
                     subtitles,
                     settings,
@@ -239,7 +321,8 @@ def main() -> int:
                     insert_initial_empty=True,
                     chapter_markers=chapter_markers,
                     mistranscription_markers=mistranscription_markers,
-                    media_plan=cut_outcome.media_plan,
+                    media_plan=media_plan,
+                    broll_placements=broll_placements,
                 )
                 write_exo(output_path, content)
                 output_committed = True

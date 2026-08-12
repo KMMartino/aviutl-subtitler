@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { isHostedSelectionConfigured, isHostedSelectionVerified, selectVerifiedHostedSettings } from "../lib/hostedSelection";
 import type { AppSettings, CoreWorkflowSettings, EnvStatus, HostedModelVerification } from "../lib/types";
+import { useI18n } from "../i18n";
 
 const emptyEnv: EnvStatus = { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false } };
 
@@ -12,6 +13,7 @@ type Options = {
 };
 
 export function useHostedModels({ settings, coreSettings, setCoreSettings, setNotice }: Options) {
+  const { t } = useI18n();
   const requestRevision = useRef(0);
   const [envStatus, setEnvStatus] = useState<EnvStatus>(emptyEnv);
   const [hostedVerification, setHostedVerification] = useState<HostedModelVerification | null>(null);
@@ -37,7 +39,7 @@ export function useHostedModels({ settings, coreSettings, setCoreSettings, setNo
       setHostedVerification(result);
       const selected = selectVerifiedHostedSettings(coreSettings, result);
       setCoreSettings(selected.settings);
-      setNotice(selected.transcriptionAvailable && selected.cleanupAvailable ? "Hosted models verified" : "Model verification completed with unavailable models");
+      setNotice(selected.transcriptionAvailable && selected.cleanupAvailable ? t("notice.hostedVerified") : t("notice.hostedUnavailable"));
     } finally {
       if (request === requestRevision.current) setVerifyingHosted(false);
     }

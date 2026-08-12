@@ -51,9 +51,27 @@ describe("config store runtime paths", () => {
     expect(fs.existsSync(path.join(paths.stateRoot, "settings.json"))).toBe(true);
     expect(fs.existsSync(paths.envFile)).toBe(true);
     const settings = loadAppState(paths).settings;
+    expect(settings.appLocale).toBe("en");
     expect(settings.cutSilenceEncoderPreset).toBe("unconfigured");
     expect(settings.silencePreviewHeight).toBe(360);
     expect(settings.silencePreviewFps).toBe(8);
+  });
+
+  it("migrates existing settings to English without changing other selections", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    const file = path.join(paths.stateRoot, "settings.json");
+    const legacy = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete legacy.appLocale;
+    legacy.theme = "forest";
+    fs.writeFileSync(file, JSON.stringify(legacy), "utf8");
+
+    const settings = loadAppState(paths).settings;
+
+    expect(settings.appLocale).toBe("en");
+    expect(settings.theme).toBe("forest");
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).appLocale).toBe("en");
   });
 
   it("does not overwrite existing user workflow configs", () => {
@@ -121,7 +139,7 @@ describe("config store runtime paths", () => {
     expect(state.configs.hosted.alignment?.split_size).toBe("char");
   });
 
-  it("migrates the old hosted fallback default to Gemini Pro", () => {
+  it("migrates the previous hosted default to GPT Transcribe without a distinct fallback", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -130,7 +148,7 @@ describe("config store runtime paths", () => {
         transcriber: "gemini",
         transcription_model: "gemini-3.5-flash",
         fallback_transcriber: "openai",
-        fallback_transcription_model: "gpt-4o-mini-transcribe"
+        fallback_transcription_model: "retired-default-fallback"
       },
       cleanup: {
         backend: "openai",
@@ -142,12 +160,52 @@ describe("config store runtime paths", () => {
 
     const state = loadAppState(paths);
 
-    expect(state.configs.hosted.backend.fallback_transcriber).toBe("gemini");
-    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.1-pro-preview");
+    expect(state.configs.hosted.backend.transcriber).toBe("openai");
+    expect(state.configs.hosted.backend.transcription_model).toBe("gpt-transcribe");
+    expect(state.configs.hosted.backend.fallback_transcriber).toBe("openai");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-transcribe");
     expect(state.configs.hosted.cleanup.skip_final_review).toBe(false);
   });
 
-  it("keeps a user-selected fallback while migrating an obsolete cleanup model", () => {
+  it("raises the old long-stream transcription default to four concurrent requests", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    saveWorkflowConfig("hosted-long-stream", {
+      backend: {
+        transcriber: "openai",
+        transcription_model: "gpt-transcribe",
+        fallback_transcriber: "openai",
+        fallback_transcription_model: "gpt-transcribe",
+        transcription_workers: 2,
+      },
+    }, paths);
+
+    const state = loadAppState(paths);
+
+    expect(state.configs["hosted-long-stream"].backend.transcription_workers).toBe(4);
+  });
+
+  it("migrates unsupported OpenAI transcription options", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    saveWorkflowConfig("hosted", {
+      backend: {
+        transcriber: "openai",
+        transcription_model: "retired-openai-transcription",
+        fallback_transcriber: "openai",
+        fallback_transcription_model: "retired-openai-fallback"
+      }
+    }, paths);
+
+    const state = loadAppState(paths);
+
+    expect(state.configs.hosted.backend.transcription_model).toBe("gpt-transcribe");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-transcribe");
+  });
+
+  it("keeps a user-selected fallback while migrating Gemini 3.5 cleanup to 3.6", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -156,21 +214,21 @@ describe("config store runtime paths", () => {
         transcriber: "gemini",
         transcription_model: "gemini-3.1-pro-preview",
         fallback_transcriber: "openai",
-        fallback_transcription_model: "gpt-4o-mini-transcribe"
+        fallback_transcription_model: "retired-fallback"
       },
       cleanup: {
         backend: "gemini",
-        api_model: "gemini-3.1-pro-preview",
+        api_model: "gemini-3.5-flash",
         skip_final_review: true
       }
     }, paths);
 
     const state = loadAppState(paths);
 
-    expect(state.configs.hosted.backend.fallback_transcriber).toBe("openai");
-    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(state.configs.hosted.backend.fallback_transcriber).toBe("gemini");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.5-flash");
     expect(state.configs.hosted.cleanup.backend).toBe("gemini");
-    expect(state.configs.hosted.cleanup.api_model).toBe("gemini-3.5-flash");
+    expect(state.configs.hosted.cleanup.api_model).toBe("gemini-3.6-flash");
     expect(state.configs.hosted.cleanup.thinking_level).toBe("minimal");
     expect(state.configs.hosted.cleanup.skip_final_review).toBe(true);
   });
@@ -265,6 +323,11 @@ function makePaths(): RuntimePaths {
     userModelsRoot: path.join(root, "userData", "models"),
     managedPythonRoot: path.join(root, "userData", "python"),
     managedFfmpegRoot: path.join(root, "userData", "tools", "ffmpeg"),
+    mediaLibraryRoot: path.join(root, "userData", "media-library"),
+    mediaLibraryDatabase: path.join(root, "userData", "media-library", "library.sqlite3"),
+    managedMediaRoot: path.join(root, "Videos", "SubUtl Media"),
+    managedWebMediaRoot: path.join(root, "Videos", "SubUtl Web Media"),
+    managedYtDlpRoot: path.join(root, "tools", "yt-dlp"),
     envFile: path.join(root, "userData", ".env"),
     glossaryFile: path.join(root, "userData", "glossary.txt"),
   };
@@ -284,6 +347,11 @@ function makeSubUtlPaths(): RuntimePaths {
     userModelsRoot: path.join(root, "SubUtl", "models"),
     managedPythonRoot: path.join(root, "SubUtl", "python"),
     managedFfmpegRoot: path.join(root, "SubUtl", "tools", "ffmpeg"),
+    mediaLibraryRoot: path.join(root, "SubUtl", "media-library"),
+    mediaLibraryDatabase: path.join(root, "SubUtl", "media-library", "library.sqlite3"),
+    managedMediaRoot: path.join(root, "Videos", "SubUtl Media"),
+    managedWebMediaRoot: path.join(root, "Videos", "SubUtl Web Media"),
+    managedYtDlpRoot: path.join(root, "tools", "yt-dlp"),
     envFile: path.join(root, "SubUtl", ".env"),
     glossaryFile: path.join(root, "SubUtl", "glossary.txt"),
   };

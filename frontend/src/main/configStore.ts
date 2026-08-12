@@ -2,12 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, AppState, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { workflows } from "../renderer/lib/workflowLabels";
-import { APPROVED_MODELS, hostedCleanupTuning, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
+import { APPROVED_MODELS, hostedCleanupTuning, isHostedModelApproved, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
+import { isAppLocale } from "../shared/i18n";
 import { defaultPythonPath } from "./python";
 import { runtimePaths, type RuntimePaths } from "./paths";
 
 const legacyUserDataDirName = "subtitler-frontend";
-const settingsSchemaVersion = 3;
+const settingsSchemaVersion = 4;
 const remoteAlignmentModel = "MahmoudAshraf/mms-300m-1130-forced-aligner";
 const appStateMarkers = ["settings.json", "settings.json.bak", "configs", ".env", "glossary.txt", "tools", "models", "python"];
 
@@ -26,6 +27,7 @@ export function settingsPath(paths = runtimePaths()): string {
 export function defaultSettings(paths = runtimePaths()): AppSettings {
   return {
     schemaVersion: settingsSchemaVersion,
+    appLocale: "en",
     pythonPath: defaultPythonPath(paths),
     envFile: paths.envFile,
     lastInputPath: "",
@@ -38,6 +40,9 @@ export function defaultSettings(paths = runtimePaths()): AppSettings {
     localModelProfile: "16gb-gpu-gemma",
     llamaBackend: "vulkan",
     ffmpegMode: "auto",
+    ytDlpDenoPath: "",
+    ytDlpCookiesBrowser: "",
+    ytDlpCookiesProfile: "",
     modelDownloadMode: "direct",
     alignmentModel: remoteAlignmentModel,
     alignmentOfflineModelCache: false,
@@ -208,6 +213,7 @@ function validateSettings(value: unknown, paths: RuntimePaths): AppSettings {
   const defaults = defaultSettings(paths);
   const merged = { ...defaults, ...value } as Record<string, unknown>;
   if (!workflows.includes(merged.selectedWorkflow as WorkflowName)) throw new Error("Settings contain an invalid workflow.");
+  if (!isAppLocale(merged.appLocale)) throw new Error("Settings contain an invalid application language.");
   if (!["paper", "sage", "sky", "rose", "graphite", "forest", "midnight", "plum"].includes(String(merged.theme))) throw new Error("Settings contain an invalid theme.");
   if (!["vulkan", "cuda-12"].includes(String(merged.llamaBackend))) throw new Error("Settings contain an invalid llama backend.");
   if (!["auto", "managed", "path"].includes(String(merged.ffmpegMode))) throw new Error("Settings contain an invalid FFmpeg mode.");
@@ -215,8 +221,11 @@ function validateSettings(value: unknown, paths: RuntimePaths): AppSettings {
   if (!["unconfigured", "hevc-amf-cqp21", "hevc-nvenc-qp21", "hevc-qsv-q21", "libx265-crf21"].includes(String(merged.cutSilenceEncoderPreset))) throw new Error("Settings contain an invalid Cut silence encoder.");
   if (![240, 360, 480, 720].includes(Number(merged.silencePreviewHeight))) throw new Error("Settings contain an invalid silence preview height.");
   if (![4, 8, 12, 24].includes(Number(merged.silencePreviewFps))) throw new Error("Settings contain an invalid silence preview frame rate.");
-  for (const key of ["pythonPath", "envFile", "lastInputPath", "lastOutputDir", "lastSidecarDir", "modelsDirectory", "localModelProfile", "alignmentModel"] as const) {
+  for (const key of ["pythonPath", "envFile", "lastInputPath", "lastOutputDir", "lastSidecarDir", "modelsDirectory", "localModelProfile", "alignmentModel", "ytDlpDenoPath", "ytDlpCookiesProfile"] as const) {
     if (typeof merged[key] !== "string") throw new Error(`Settings field ${key} must be a string.`);
+  }
+  if (!["", "brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"].includes(String(merged.ytDlpCookiesBrowser ?? ""))) {
+    throw new Error("Settings contain an invalid yt-dlp cookies browser.");
   }
   for (const key of ["sidecarsEnabled", "alignmentOfflineModelCache"] as const) {
     if (typeof merged[key] !== "boolean") throw new Error(`Settings field ${key} must be a boolean.`);
@@ -319,27 +328,53 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
     const file = workflowConfigPath(workflow, paths);
     if (!fs.existsSync(file)) continue;
     const config = validateWorkflowConfig(readRecoverableJson(file), workflow);
+    // Partial/user-authored fixtures and forward-compatible configs may omit
+    // hosted backend settings entirely; there is nothing to migrate in them.
+    if (!config.backend) continue;
     let changed = false;
-    const oldHostedDefaultFallback = (
-      config.backend?.transcriber === "gemini"
-      && config.backend.transcription_model === APPROVED_MODELS.gemini
-      && config.backend.fallback_transcriber === "openai"
-      && config.backend.fallback_transcription_model === APPROVED_MODELS.openaiTranscriptionMini
+    if (workflow === "hosted-long-stream" && config.backend.transcription_workers === 2) {
+      config.backend.transcription_workers = 4;
+      changed = true;
+    }
+    const primaryProvider = config.backend.transcriber;
+    const primaryModel = String(config.backend.transcription_model ?? "");
+    const primarySupported = (
+      (primaryProvider === "openai" || primaryProvider === "gemini")
+      && isHostedModelApproved(primaryProvider, primaryModel, "transcription")
+    );
+    const fallbackProvider = config.backend.fallback_transcriber;
+    const fallbackModel = String(config.backend.fallback_transcription_model ?? "");
+    const fallbackConfigured = Boolean(fallbackProvider || fallbackModel);
+    const fallbackSupported = (
+      (fallbackProvider === "openai" || fallbackProvider === "gemini")
+      && isHostedModelApproved(fallbackProvider, fallbackModel, "transcription")
+    );
+    const previousHostedDefault = (
+      primaryProvider === "gemini"
+      && primaryModel === APPROVED_MODELS.gemini
+      && (!fallbackSupported || (
+        fallbackProvider === "gemini"
+        && fallbackModel === APPROVED_MODELS.gemini31Pro
+      ))
     );
     const oldHostedDefaultCleanup = (
       config.cleanup?.backend === "openai"
       && config.cleanup.api_model === APPROVED_MODELS.openaiCleanup
       && (config.cleanup.window_subtitles === 8 || config.cleanup.window_subtitles === 256 || config.cleanup.window_subtitles === undefined)
     );
-    if (
-      oldHostedDefaultFallback
-    ) {
-      const fallback = recommendedFallbackTranscription("gemini", APPROVED_MODELS.gemini);
-      config.backend!.fallback_transcriber = fallback.provider;
-      config.backend!.fallback_transcription_model = fallback.model;
+    if (!primarySupported || previousHostedDefault) {
+      config.backend.transcriber = "openai";
+      config.backend.transcription_model = APPROVED_MODELS.openaiTranscriptionGpt;
+      config.backend.fallback_transcriber = "openai";
+      config.backend.fallback_transcription_model = APPROVED_MODELS.openaiTranscriptionGpt;
+      changed = true;
+    } else if (fallbackConfigured && !fallbackSupported) {
+      const fallback = recommendedFallbackTranscription(primaryProvider === "gemini" ? "gemini" : "openai", primaryModel);
+      config.backend.fallback_transcriber = fallback.provider;
+      config.backend.fallback_transcription_model = fallback.model;
       changed = true;
     }
-    if (oldHostedDefaultFallback && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
+    if (previousHostedDefault && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
       config.cleanup.skip_final_review = false;
       changed = true;
     }
@@ -347,7 +382,7 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       let tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model ?? ""));
       if (!tuning) {
         config.cleanup.api_model = config.cleanup.backend === "gemini"
-          ? APPROVED_MODELS.gemini
+          ? APPROVED_MODELS.gemini36Flash
           : APPROVED_MODELS.openaiCleanup;
         tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model));
         changed = true;

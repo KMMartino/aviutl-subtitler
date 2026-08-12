@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
@@ -103,15 +104,11 @@ class LlmSplitProfile:
     input_tokens: int
     max_chars: int
     raw_line_count: int
-    clean_line_count: int
+    valid_id_count: int
     accepted: bool
     reject_reason: str
-    output_line_count: int
+    selected_id_count: int
     pass_name: str = ""
-    partial_accept_count: int = 0
-    partial_reject_count: int = 0
-    accepted_prefix_chars: int = 0
-    remaining_chars_after_partial: int = 0
     input_preview: str = ""
     sentence_break_count: int = 0
     connective_break_count: int = 0
@@ -155,15 +152,11 @@ def write_llm_split_profile(path: Path, rows: list[LlmSplitProfile]) -> None:
                 "input_tokens",
                 "max_chars",
                 "raw_line_count",
-                "clean_line_count",
+                "valid_id_count",
                 "accepted",
                 "reject_reason",
-                "output_line_count",
+                "selected_id_count",
                 "pass_name",
-                "partial_accept_count",
-                "partial_reject_count",
-                "accepted_prefix_chars",
-                "remaining_chars_after_partial",
                 "input_preview",
                 "sentence_break_count",
                 "connective_break_count",
@@ -174,13 +167,21 @@ def write_llm_split_profile(path: Path, rows: list[LlmSplitProfile]) -> None:
             writer.writerow(row.__dict__)
 
 
+def write_llm_split_request_diagnostics(path: Path, rows: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+
 def write_llm_split_rejections(
     path: Path,
-    rows: list[tuple[LlmSplitProfile, str, str, list[str], list[str], list[str]]],
+    rows: list[tuple[LlmSplitProfile, str, str, list[str], list[str]]],
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for index, (row, input_text, raw_response, cleaned_lines, accepted_lines, rejected_lines) in enumerate(rows, start=1):
+        for index, (row, input_text, raw_response, candidate_ids, parsed_ids) in enumerate(rows, start=1):
             handle.write(f"=== Rejected LLM split attempt {index} ===\n")
             handle.write(f"chain_index: {row.chain_index}\n")
             handle.write(f"attempt_index: {row.attempt_index}\n")
@@ -189,27 +190,19 @@ def write_llm_split_rejections(
             handle.write(f"input_tokens: {row.input_tokens}\n")
             handle.write(f"max_chars: {row.max_chars}\n")
             handle.write(f"raw_line_count: {row.raw_line_count}\n")
-            handle.write(f"clean_line_count: {row.clean_line_count}\n")
+            handle.write(f"valid_id_count: {row.valid_id_count}\n")
             handle.write("\n--- Input text ---\n")
             handle.write(input_text)
             handle.write("\n\n--- Raw LLM response ---\n")
             handle.write(raw_response or "<empty>")
-            handle.write("\n\n--- Cleaned response lines ---\n")
-            if cleaned_lines:
-                for line_number, line in enumerate(cleaned_lines, start=1):
-                    handle.write(f"{line_number}. {line}\n")
+            handle.write("\n\n--- Candidate boundary IDs ---\n")
+            if candidate_ids:
+                handle.write(", ".join(candidate_ids) + "\n")
             else:
                 handle.write("<none>\n")
-            handle.write("\n--- Accepted prefix lines ---\n")
-            if accepted_lines:
-                for line_number, line in enumerate(accepted_lines, start=1):
-                    handle.write(f"{line_number}. {line}\n")
-            else:
-                handle.write("<none>\n")
-            handle.write("\n--- Rejected/unused LLM lines ---\n")
-            if rejected_lines:
-                for line_number, line in enumerate(rejected_lines, start=1):
-                    handle.write(f"{line_number}. {line}\n")
+            handle.write("\n--- Parsed boundary IDs ---\n")
+            if parsed_ids:
+                handle.write(", ".join(parsed_ids) + "\n")
             else:
                 handle.write("<none>\n")
             handle.write("\n")

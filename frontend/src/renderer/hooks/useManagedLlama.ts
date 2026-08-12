@@ -1,6 +1,7 @@
 import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { applyCoreSettings } from "../lib/configPatch";
 import type { AppSettings, CoreWorkflowSettings, CurrentLlamaServerState, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, ManagedLlamaStatus, WorkflowConfig, WorkflowName } from "../lib/types";
+import { useI18n } from "../i18n";
 
 type Options = {
   settings: AppSettings | null;
@@ -16,6 +17,7 @@ type Options = {
 };
 
 export function useManagedLlama({ settings, coreSettings, configs, workflow, setCoreSettings, setConfigs, setManagedDeleteAction, appendLog, setNotice, refreshPathStatus }: Options) {
+  const { t } = useI18n();
   const requestRevision = useRef(0);
   const [llamaBackends, setLlamaBackends] = useState<LlamaBackendOption[]>([]);
   const [llamaRelease, setLlamaRelease] = useState<LlamaReleaseCheck | null>(null);
@@ -31,7 +33,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
   }
 
   async function checkLlamaRelease() {
-    appendLog(`\n$ llama.cpp server release check\n`);
+    appendLog(`\n$ ${t("notice.llamaCheckLog")}\n`);
     try {
       const result = await window.subtitler.checkLatestLlamaRelease();
       setLlamaRelease(result);
@@ -39,7 +41,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
         const status = await window.subtitler.getManagedLlamaStatus(settings.llamaBackend, undefined);
         setManagedLlamaStatus(status);
       }
-      setNotice(`Latest llama.cpp: ${result.releaseTag}`);
+      setNotice(t("notice.latestLlama", { version: result.releaseTag }));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     }
@@ -57,7 +59,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
         checkedAt: new Date().toISOString()
       });
       await useManagedLlama(status.serverPath);
-      setNotice("llama-server downloaded and selected");
+      setNotice(t("notice.llamaDownloaded"));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -67,7 +69,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
 
   async function deleteManagedLlama() {
     if (!settings || !managedLlamaStatus?.installed) return;
-    if (!window.confirm("Delete this app-managed llama-server backend from disk? Manual server paths will not be touched.")) return;
+    if (!window.confirm(t("notice.deleteLlamaConfirm"))) return;
     setManagedDeleteAction("llama");
     try {
       const status = await window.subtitler.deleteManagedLlamaServer(settings.llamaBackend);
@@ -76,7 +78,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
         await refreshPathStatus(coreSettings);
         setCurrentLlamaState(await window.subtitler.getCurrentLlamaServerState(coreSettings.local.llamaServer));
       }
-      setNotice("Managed llama-server deleted");
+      setNotice(t("notice.llamaDeleted"));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -98,7 +100,7 @@ export function useManagedLlama({ settings, coreSettings, configs, workflow, set
     const workflowConfig = applyCoreSettings(configs[workflow], nextCore, workflow);
     await window.subtitler.saveWorkflowConfig(workflow, workflowConfig);
     setConfigs({ ...configs, [workflow]: workflowConfig });
-    setNotice("Managed llama-server selected");
+    setNotice(t("notice.llamaSelected"));
   }
 
   return {

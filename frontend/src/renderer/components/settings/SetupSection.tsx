@@ -1,12 +1,14 @@
 import { AlertTriangle, CheckCircle, ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
+import { useI18n } from "../../i18n";
 
 export type SetupStatus = { kind: "ready" | "warning" | "required"; label: string };
 
 type Props = { title: string; detail: string; ready: boolean; readyLabel?: string; notReadyLabel?: string; status?: SetupStatus; expanded: boolean; onToggle(): void; children: ReactNode };
 
-export default function SetupSection({ title, detail, ready, readyLabel = "Ready", notReadyLabel = "Not ready", status, expanded, onToggle, children }: Props) {
-  const displayedStatus = status ?? { kind: ready ? "ready" as const : "required" as const, label: ready ? readyLabel : notReadyLabel };
+export default function SetupSection({ title, detail, ready, readyLabel, notReadyLabel, status, expanded, onToggle, children }: Props) {
+  const { t } = useI18n();
+  const displayedStatus = status ?? { kind: ready ? "ready" as const : "required" as const, label: ready ? readyLabel ?? t("common.ready") : notReadyLabel ?? t("common.notReady") };
   return <div className="setup-section">
     <button type="button" className="setup-summary" onClick={onToggle} aria-expanded={expanded}>
       <span><strong>{title}</strong><small>{detail}</small></span>

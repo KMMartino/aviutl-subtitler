@@ -12,15 +12,7 @@ from .errors import SubtitlerError
 
 
 WORKFLOWS = {"local", "hosted", "local-long-stream", "hosted-long-stream"}
-OPENAI_TRANSCRIPTION_MODEL_ALIASES = {
-    "gpt-4o-mini-transcribe": {
-        "gpt-4o-mini-transcribe",
-        "gpt-4o-mini-transcribe-2025-12-15",
-    },
-    "gpt-4o-transcribe": {
-        "gpt-4o-transcribe",
-    },
-}
+OPENAI_TRANSCRIPTION_MODELS = {"gpt-transcribe"}
 
 
 def project_root() -> Path:
@@ -33,24 +25,8 @@ def default_config_path(workflow: str) -> Path:
     return project_root() / "configs" / f"{workflow}.json"
 
 
-def canonical_openai_transcription_model(model: str) -> str:
-    for canonical, aliases in OPENAI_TRANSCRIPTION_MODEL_ALIASES.items():
-        if model in aliases:
-            return canonical
-    return model
-
-
-def openai_transcription_aliases(model: str) -> set[str]:
-    canonical = canonical_openai_transcription_model(model)
-    return set(OPENAI_TRANSCRIPTION_MODEL_ALIASES.get(canonical, {model}))
-
-
 def openai_model_available(configured_model: str, available_names: list[str] | set[str]) -> str | None:
-    available = set(available_names)
-    for alias in openai_transcription_aliases(configured_model):
-        if alias in available:
-            return alias
-    return None
+    return configured_model if configured_model in set(available_names) else None
 
 
 def load_workflow_config(workflow: str, explicit_path: Path | None = None) -> dict[str, Any]:
@@ -91,6 +67,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     exo = _section(config, "exo")
     cost = _section(config, "cost")
     additional_settings = _section(config, "additional_settings")
+    broll = _section(config, "broll")
     diagnostics = _section(config, "diagnostics")
 
     _choice(backend.get("name"), {"existing-pipeline"}, "backend.name")
@@ -113,6 +90,11 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _int_min(backend.get("spec_draft_n_max"), 1, "backend.spec_draft_n_max")
     _int_min(audio.get("track"), 0, "audio.track")
     _choice(workflow_cfg.get("mode"), {"full", "long-stream"}, "workflow.mode")
+    _choice(
+        workflow_cfg.get("transcription_scope"),
+        {"full", "high-activity"},
+        "workflow.transcription_scope",
+    )
     _int_min(workflow_cfg.get("long_stream_min_chunks"), 0, "workflow.long_stream_min_chunks")
     ratio = workflow_cfg.get("long_stream_selection_ratio")
     if ratio is not None:
@@ -185,7 +167,25 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
         {"off", "automatic", "review"},
         "additional_settings.cut_silence_mode",
     )
+    _non_empty_string(broll.get("web_search_model"), "broll.web_search_model")
+    _non_empty_string(broll.get("analysis_model"), "broll.analysis_model")
+    _boolean(broll.get("discover_web_assets"), "broll.discover_web_assets")
     _boolean(additional_settings.get("render_cut_video"), "additional_settings.render_cut_video")
+    _choice(
+        additional_settings.get("editorial_map_mode"),
+        {"off", "suggestions"},
+        "additional_settings.editorial_map_mode",
+    )
+    _choice(
+        additional_settings.get("editorial_subtitle_mode"),
+        {"full", "emphasis"},
+        "additional_settings.editorial_subtitle_mode",
+    )
+    _choice(
+        additional_settings.get("broll_mode"),
+        {"off", "automatic"},
+        "additional_settings.broll_mode",
+    )
 
     expected_mode = "long-stream" if workflow.endswith("-long-stream") else "full"
     is_hosted = workflow.startswith("hosted")
@@ -195,6 +195,8 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
         raise SubtitlerError("additional_settings.cut_silence_mode is only supported by short workflows")
     if additional_settings["render_cut_video"] and workflow not in {"local", "hosted"}:
         raise SubtitlerError("additional_settings.render_cut_video is only supported by short workflows")
+    if additional_settings["broll_mode"] != "off" and workflow != "hosted":
+        raise SubtitlerError("additional_settings.broll_mode is only supported by the hosted short workflow")
     valid_pairing = (
         backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"gemini", "openai"}
         if is_hosted
@@ -239,7 +241,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
 
     if is_hosted:
         approved_transcription = {
-            "openai": set().union(*OPENAI_TRANSCRIPTION_MODEL_ALIASES.values()),
+            "openai": OPENAI_TRANSCRIPTION_MODELS,
             "gemini": {"gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"},
         }
         approved_cleanup = {
@@ -250,7 +252,12 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
             },
-            "gemini": {"gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"},
+            "gemini": {
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3.1-pro-preview",
+                "gemini-3.1-flash-lite",
+            },
         }
         if backend.get("transcription_model") not in approved_transcription[backend["transcriber"]]:
             raise SubtitlerError(
@@ -296,6 +303,7 @@ def _defaults() -> dict[str, Any]:
         "audio": {"track": 1},
         "workflow": {
             "mode": "full",
+            "transcription_scope": "full",
             "long_stream_selection_ratio": None,
             "long_stream_min_chunks": 1,
         },
@@ -363,6 +371,14 @@ def _defaults() -> dict[str, Any]:
             "youtube_chapters": False,
             "cut_silence_mode": "off",
             "render_cut_video": False,
+            "editorial_map_mode": "off",
+            "editorial_subtitle_mode": "full",
+            "broll_mode": "off",
+        },
+        "broll": {
+            "web_search_model": "gpt-5.6-terra",
+            "analysis_model": "gpt-5.6-terra",
+            "discover_web_assets": False,
         },
     }
 

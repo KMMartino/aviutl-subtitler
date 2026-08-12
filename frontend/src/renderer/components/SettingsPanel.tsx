@@ -7,9 +7,13 @@ import HostedSettingsSection from "./settings/HostedSettingsSection";
 import LocalSettingsSection from "./settings/LocalSettingsSection";
 import RuntimeSettingsSection from "./settings/RuntimeSettingsSection";
 import CutSilenceSettingsSection from "./settings/CutSilenceSettingsSection";
+import LanguageSettingsSection from "./settings/LanguageSettingsSection";
+import type { AppLocale } from "../../shared/i18n";
+import { useI18n } from "../i18n";
 
 type Props = {
   workflow: WorkflowName;
+  appLocale: AppLocale;
   settings: CoreWorkflowSettings;
   envFile: string;
   envStatus: EnvStatus;
@@ -36,13 +40,17 @@ type Props = {
   pythonReady: boolean;
   runtimeStatus: RuntimeSetupStatus | null;
   runtimeAction: string;
-  runtimeFeedback: { section: "python" | "ffmpeg" | "alignment"; text: string; ok: boolean } | null;
+  runtimeFeedback: { section: "python" | "ffmpeg" | "ytDlp" | "alignment"; text: string; ok: boolean } | null;
+  ytDlpDenoPath: string;
+  ytDlpCookiesBrowser: "" | "brave" | "chrome" | "chromium" | "edge" | "firefox" | "opera" | "safari" | "vivaldi" | "whale";
+  ytDlpCookiesProfile: string;
   sidecarsEnabled: boolean;
   sidecarDir: string;
   outputPath: string;
   runActive?: boolean;
   expansion: SettingsExpansion;
   onToggleExpansion(section: keyof SettingsExpansion): void;
+  onAppLocale(locale: AppLocale): void;
   onChange(settings: CoreWorkflowSettings): void;
   onPythonPath(path: string): void;
   onEnvFile(path: string): void;
@@ -61,12 +69,17 @@ type Props = {
   onDeleteLlama(): void;
   onUseManagedLlama(path: string): void;
   onRevertManagedLlama(path: string): void;
-  onRefreshRuntime(action?: string, feedbackSection?: "python" | "ffmpeg" | "alignment"): void;
+  onRefreshRuntime(action?: string, feedbackSection?: "python" | "ffmpeg" | "ytDlp" | "alignment"): void;
   onCreateManagedPython(): void;
   onInstallPythonRequirements(): void;
   onDeleteManagedPython(): void;
   onDownloadFfmpeg(): void;
   onDeleteFfmpeg(): void;
+  onInstallOrUpdateYtDlp(): void;
+  onDeleteYtDlp(): void;
+  onYtDlpDenoPath(value: string): void;
+  onYtDlpCookiesBrowser(value: Props["ytDlpCookiesBrowser"]): void;
+  onYtDlpCookiesProfile(value: string): void;
   onDownloadAlignment(): void;
   onDeleteAlignment(): void;
   cutSilenceEncoderPreset: CutSilenceEncoderPreset;
@@ -80,13 +93,15 @@ type Props = {
   onProbeEncoders(): void;
 };
 
-export default function SettingsPanel({ workflow, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onDownloadAlignment, onDeleteAlignment, cutSilenceEncoderPreset, silencePreviewHeight, silencePreviewFps, encoderProbes, probingEncoders, onCutSilenceEncoder, onSilencePreviewHeight, onSilencePreviewFps, onProbeEncoders }: Props) {
+export default function SettingsPanel({ workflow, appLocale, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, ytDlpDenoPath, ytDlpCookiesBrowser, ytDlpCookiesProfile, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onAppLocale, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onInstallOrUpdateYtDlp, onDeleteYtDlp, onYtDlpDenoPath, onYtDlpCookiesBrowser, onYtDlpCookiesProfile, onDownloadAlignment, onDeleteAlignment, cutSilenceEncoderPreset, silencePreviewHeight, silencePreviewFps, encoderProbes, probingEncoders, onCutSilenceEncoder, onSilencePreviewHeight, onSilencePreviewFps, onProbeEncoders }: Props) {
+  const { t } = useI18n();
   return (
     <section className="panel">
       <div className="panel-title">
-        <span><Settings size={18} /> Settings</span>
+        <span><Settings size={18} /> {t("settings.title")}</span>
       </div>
       <fieldset className="settings-lock" disabled={runActive}>
+        <LanguageSettingsSection value={appLocale} onChange={onAppLocale} />
         {isLocalWorkflow(workflow) && (
           <LocalSettingsSection
             settings={settings}
@@ -140,6 +155,14 @@ export default function SettingsPanel({ workflow, settings, envFile, envStatus, 
           onDeletePython={onDeleteManagedPython}
           onDownloadFfmpeg={onDownloadFfmpeg}
           onDeleteFfmpeg={onDeleteFfmpeg}
+          ytDlpDenoPath={ytDlpDenoPath}
+          ytDlpCookiesBrowser={ytDlpCookiesBrowser}
+          ytDlpCookiesProfile={ytDlpCookiesProfile}
+          onInstallOrUpdateYtDlp={onInstallOrUpdateYtDlp}
+          onDeleteYtDlp={onDeleteYtDlp}
+          onYtDlpDenoPath={onYtDlpDenoPath}
+          onYtDlpCookiesBrowser={onYtDlpCookiesBrowser}
+          onYtDlpCookiesProfile={onYtDlpCookiesProfile}
           onDownloadAlignment={onDownloadAlignment}
           onDeleteAlignment={onDeleteAlignment}
         />

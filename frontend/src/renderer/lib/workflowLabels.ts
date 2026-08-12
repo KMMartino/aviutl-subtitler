@@ -12,8 +12,8 @@ export const workflowLabels: Record<WorkflowName, string> = {
 export const workflowDescriptions: Record<WorkflowName, string> = {
   local: "Local Gemma transcription and local cleanup",
   hosted: "Hosted transcription and tested cleanup profiles",
-  "local-long-stream": "Local transcription for selected high-activation speech",
-  "hosted-long-stream": "Hosted transcription for selected high-activation speech"
+  "local-long-stream": "Local transcription for long recordings",
+  "hosted-long-stream": "Hosted transcription and editorial tools for long recordings"
 };
 
 export function isHostedWorkflow(workflow: WorkflowName): boolean {

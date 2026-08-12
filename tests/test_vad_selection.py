@@ -1,6 +1,11 @@
 import unittest
 
-from subtitler.backends.existing_pipeline import CleanupGroupPolicy, _cleanup_group_max_sec, long_stream_default_duration_ratio
+from subtitler.backends.existing_pipeline import (
+    CleanupGroupPolicy,
+    _cleanup_group_max_sec,
+    long_stream_default_duration_ratio,
+    select_transcription_chunks,
+)
 from subtitler.models import AudioChunk
 from subtitler.vad import _speech_timestamps_from_probabilities, assign_vad_groups_by_largest_gaps, select_high_activation_chunks
 
@@ -10,6 +15,33 @@ def _chunk(index: int, activation: float, peak: float = 0.0) -> AudioChunk:
 
 
 class VadSelectionTests(unittest.TestCase):
+    def test_long_stream_defaults_to_all_detected_speech(self) -> None:
+        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2)]
+
+        selected = select_transcription_chunks(
+            {"mode": "long-stream", "transcription_scope": "full"},
+            chunks,
+            media_duration_sec=7200.0,
+        )
+
+        self.assertEqual([chunk.index for chunk in selected], [0, 1, 2])
+
+    def test_high_activity_scope_preserves_existing_selection_behavior(self) -> None:
+        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2), _chunk(3, 0.8)]
+
+        selected = select_transcription_chunks(
+            {
+                "mode": "long-stream",
+                "transcription_scope": "high-activity",
+                "long_stream_selection_ratio": 0.5,
+                "long_stream_min_chunks": 1,
+            },
+            chunks,
+            media_duration_sec=7200.0,
+        )
+
+        self.assertEqual([chunk.index for chunk in selected], [1, 3])
+
     def test_select_high_activation_chunks_targets_active_voice_duration_in_timeline_order(self) -> None:
         chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2), _chunk(3, 0.8), _chunk(4, 0.3)]
 

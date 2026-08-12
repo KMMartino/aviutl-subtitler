@@ -1,10 +1,10 @@
 {
   "backend": {
     "name": "existing-pipeline",
-    "transcriber": "gemini",
-    "transcription_model": "gemini-3.5-flash",
-    "fallback_transcriber": "gemini",
-    "fallback_transcription_model": "gemini-3.1-pro-preview",
+    "transcriber": "openai",
+    "transcription_model": "gpt-transcribe",
+    "fallback_transcriber": "openai",
+    "fallback_transcription_model": "gpt-transcribe",
     "language": "ja",
     "transcription_workers": 4
   },
@@ -37,6 +37,12 @@
   "additional_settings": {
     "youtube_chapters": false,
     "cut_silence_mode": "off",
-    "render_cut_video": false
+    "render_cut_video": false,
+    "broll_mode": "off"
+  },
+  "broll": {
+    "web_search_model": "gpt-5.6-terra",
+    "analysis_model": "gpt-5.6-terra",
+    "discover_web_assets": false
   }
 }

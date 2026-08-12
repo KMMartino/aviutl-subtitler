@@ -1,11 +1,11 @@
 import unittest
 
-from subtitler.models import AlignedToken
+from subtitler.models import AlignedToken, SplitPlanResult
 from subtitler.splitter import (
     TokenSegment,
     _assert_or_repair_connective_heads,
+    _boundary_options,
     _is_legal_boundary,
-    _llm_boundary_candidate,
     _tokens_to_text,
     split_token_chain,
 )
@@ -19,13 +19,20 @@ def _tokens(text: str) -> list[AlignedToken]:
 
 
 class FakeSplitPlanner:
-    def __init__(self, lines: list[str]) -> None:
-        self.lines = lines
+    def __init__(self) -> None:
         self.calls = 0
 
-    def split_lines(self, text: str, max_chars: int) -> list[str]:
+    def supports_multi_split(self) -> bool:
+        return False
+
+    def split_input_capacity(self, max_chars: int) -> int:
+        return 120
+
+    def select_split_boundaries(
+        self, text: str, annotated_text: str, candidate_ids: list[str], max_chars: int, *, multiple: bool = False
+    ) -> SplitPlanResult:
         self.calls += 1
-        return self.lines
+        return SplitPlanResult(selected_ids=[candidate_ids[-1]], candidate_ids=candidate_ids, accepted=True)
 
 
 class ConnectiveBoundaryTests(unittest.TestCase):
@@ -50,20 +57,11 @@ class ConnectiveBoundaryTests(unittest.TestCase):
         self.assertEqual(subtitles[0].text, "前の話も、")
         self.assertFalse(subtitles[1].text.startswith("も、"))
 
-    def test_llm_boundary_before_mo_phrase_is_repaired(self) -> None:
-        segment = TokenSegment(_tokens("前の話も、続きです"), "initial")
-        candidate = _llm_boundary_candidate(
-            segment,
-            max_chars=8,
-            llm_splitter=FakeSplitPlanner(["前の話", "も、続きです"]),
-            llm_split_callback=None,
-            attempt_index=1,
-            pass_name="llm_boundary",
-        )
+    def test_llm_candidates_never_offer_boundary_before_mo_phrase(self) -> None:
+        options = _boundary_options(_tokens("前の話も、続きですさらに続く"), 8, 6.0, multiple=False)
 
-        self.assertIsNotNone(candidate)
-        self.assertEqual(candidate.index, 5)
-        self.assertEqual(candidate.kind, "llm_boundary_repaired")
+        self.assertTrue(options)
+        self.assertNotIn(3, [option.index for option in options])
 
     def test_hard_max_split_avoids_mo_phrase_head_when_it_fits(self) -> None:
         subtitles = split_token_chain(
@@ -99,7 +97,7 @@ class ConnectiveBoundaryTests(unittest.TestCase):
             self.assertEqual(subtitle.end_time, subtitle.tokens[-1].end)
 
     def test_deterministic_structural_boundary_does_not_call_llm(self) -> None:
-        planner = FakeSplitPlanner(["前の話", "も、続きです"])
+        planner = FakeSplitPlanner()
 
         subtitles = split_token_chain(
             _tokens("前の話も、続きです"),

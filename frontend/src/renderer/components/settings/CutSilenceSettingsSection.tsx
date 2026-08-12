@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle, RefreshCw } from "lucide-react";
 import type { CutSilenceEncoderPreset, EncoderProbeResult } from "../../lib/types";
 import SetupSection from "./SetupSection";
+import { useI18n } from "../../i18n";
 
 type Props = {
   encoder: CutSilenceEncoderPreset;
@@ -18,26 +19,27 @@ type Props = {
 };
 
 export default function CutSilenceSettingsSection(props: Props) {
+  const { t } = useI18n();
   const selected = props.probes.find((probe) => probe.preset === props.encoder);
   const encoderReady = props.encoder !== "unconfigured" && Boolean(selected?.available) && !props.probing;
   const ready = !props.renderEnabled || encoderReady;
-  const detail = !props.renderEnabled ? "EXO source cutting ready — optional video rendering is off" : props.probing ? "Checking encoder hardware" : encoderReady ? selected?.label ?? "Ready" : props.encoder === "unconfigured" ? "Explicit encoder selection required for rendered output" : selected?.error || "Encoder is unavailable";
-  return <SetupSection title="Cut silence" detail={detail} ready={ready} expanded={props.expanded} onToggle={props.onToggle}>
+  const detail = !props.renderEnabled ? t("settings.cut.exoOnly") : props.probing ? t("settings.cut.checkingHardware") : encoderReady ? selected?.label ?? t("common.ready") : props.encoder === "unconfigured" ? t("settings.cut.encoderRequired") : selected?.error || t("settings.cut.encoderUnavailable");
+  return <SetupSection title={t("settings.cut.title")} detail={detail} ready={ready} expanded={props.expanded} onToggle={props.onToggle}>
     <label>
-      Output encoder
+      {t("settings.cut.outputEncoder")}
       <select value={props.encoder} onChange={(event) => props.onEncoder(event.target.value as CutSilenceEncoderPreset)}>
-        <option value="unconfigured">Unconfigured — choose an encoder</option>
-        {props.probes.map((probe) => <option key={probe.preset} value={probe.preset} disabled={!probe.available}>{probe.label}{probe.available ? "" : " — unavailable"}</option>)}
+        <option value="unconfigured">{t("settings.cut.unconfigured")}</option>
+        {props.probes.map((probe) => <option key={probe.preset} value={probe.preset} disabled={!probe.available}>{probe.label}{probe.available ? "" : t("settings.cut.unavailableSuffix")}</option>)}
       </select>
     </label>
     <div className="status-grid">
       {props.probes.map((probe) => <span key={probe.preset} className={probe.available ? "env-ok" : "env-missing"} title={probe.error}>{probe.available ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}{probe.label}</span>)}
     </div>
-    <button onClick={props.onProbe} disabled={props.probing}><RefreshCw className={props.probing ? "spin" : ""} size={16} />{props.probing ? "Checking..." : "Recheck encoders"}</button>
+    <button onClick={props.onProbe} disabled={props.probing}><RefreshCw className={props.probing ? "spin" : ""} size={16} />{props.probing ? t("settings.cut.checking") : t("settings.cut.recheck")}</button>
     <div className="two-col">
-      <label>Fallback preview resolution<select value={props.previewHeight} onChange={(event) => props.onPreviewHeight(Number(event.target.value) as Props["previewHeight"])}>{[240, 360, 480, 720].map((height) => <option key={height} value={height}>{height}p</option>)}</select></label>
-      <label>Fallback preview frame rate<select value={props.previewFps} onChange={(event) => props.onPreviewFps(Number(event.target.value) as Props["previewFps"])}>{[4, 8, 12, 24].map((fps) => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
+      <label>{t("settings.cut.previewResolution")}<select value={props.previewHeight} onChange={(event) => props.onPreviewHeight(Number(event.target.value) as Props["previewHeight"])}>{[240, 360, 480, 720].map((height) => <option key={height} value={height}>{height}p</option>)}</select></label>
+      <label>{t("settings.cut.previewFps")}<select value={props.previewFps} onChange={(event) => props.onPreviewFps(Number(event.target.value) as Props["previewFps"])}>{[4, 8, 12, 24].map((fps) => <option key={fps} value={fps}>{fps} fps</option>)}</select></label>
     </div>
-    <div className="disabled-field">Higher preview settings use more processing time, temporary storage, playback buffering, and memory. {props.renderEnabled ? "Output: constant-frame-rate MKV with HEVC video and all audio tracks encoded as AAC at 256 kbps; the EXO references that MKV." : "Output: the EXO references the original source and AviUtl uses its default first audio track; no video is re-encoded."}</div>
+    <div className="disabled-field">{t("settings.cut.resourceNote")} {props.renderEnabled ? t("settings.cut.renderOutput") : t("settings.cut.exoOutput")}</div>
   </SetupSection>;
 }

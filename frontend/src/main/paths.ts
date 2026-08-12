@@ -12,6 +12,11 @@ export type RuntimePaths = {
   userModelsRoot: string;
   managedPythonRoot: string;
   managedFfmpegRoot: string;
+  managedYtDlpRoot: string;
+  mediaLibraryRoot: string;
+  mediaLibraryDatabase: string;
+  managedMediaRoot: string;
+  managedWebMediaRoot: string;
   envFile: string;
   glossaryFile: string;
 };
@@ -45,6 +50,11 @@ export function runtimePaths(): RuntimePaths {
     userModelsRoot: path.join(stateRoot, "models"),
     managedPythonRoot: path.join(stateRoot, "python"),
     managedFfmpegRoot: path.join(userToolsRoot, "ffmpeg"),
+    managedYtDlpRoot: path.join(userToolsRoot, "yt-dlp"),
+    mediaLibraryRoot: path.join(stateRoot, "media-library"),
+    mediaLibraryDatabase: path.join(stateRoot, "media-library", "library.sqlite3"),
+    managedMediaRoot: path.join(app.getPath("videos"), "SubUtl Media"),
+    managedWebMediaRoot: path.join(app.getPath("videos"), "SubUtl Web Media"),
     envFile: path.join(stateRoot, ".env"),
     glossaryFile: path.join(stateRoot, "glossary.txt"),
   };

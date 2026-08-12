@@ -16,7 +16,7 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
   if (ffmpegBin) {
     env.PATH = `${ffmpegBin}${path.delimiter}${env.PATH ?? ""}`;
   }
-  const args = [
+  const args = request.editorialProject || request.editorialCheckpoint ? buildEditorialArgs(paths, request) : [
     script,
     request.inputPath,
     "--workflow",
@@ -28,8 +28,19 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
     "--output",
     request.outputPath,
     "--frontend-protocol",
-    "stdio-v1"
+    "stdio-v1",
+    "--media-library-db",
+    paths.mediaLibraryDatabase,
   ];
+  if (request.editorialProject || request.editorialCheckpoint) {
+    return {
+      command: pythonPath,
+      args,
+      preview: [pythonPath, ...args].map(quoteArg).join(" "),
+      cwd: paths.bundledBackendRoot,
+      env,
+    };
+  }
   if (request.audioTrack !== undefined) {
     args.push("--audio-track", String(request.audioTrack));
   }
@@ -55,6 +66,62 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
     cwd: paths.bundledBackendRoot,
     env,
   };
+}
+
+function buildEditorialArgs(paths: RuntimePaths, request: RunRequest): string[] {
+  if (request.editorialCheckpoint) {
+    const args = [
+      "-m", "subtitler.editorial_project_cli", "run",
+      "--checkpoint", request.editorialCheckpoint,
+      "--config", request.configPath,
+      "--env-file", request.envFile,
+      "--pipeline-script", path.join(paths.bundledBackendRoot, "aviutl_subtitle.py"),
+      "--audio-track", String(request.audioTrack ?? 1),
+      "--game-knowledge-store", path.join(paths.stateRoot, "editorial-game-knowledge.json"),
+    ];
+    for (const source of request.editorialCheckpointSources ?? []) args.push("--source-spec", JSON.stringify(source));
+    if (request.editorialExtend && request.editorialProject) args.push("--extend-project-spec", JSON.stringify(request.editorialProject));
+    if (request.sidecarDir) args.push("--workspace", request.sidecarDir);
+    if (fs.existsSync(paths.glossaryFile)) args.push("--glossary", paths.glossaryFile);
+    args.push("--restart-from", request.editorialRestartFrom ?? "compatible");
+    return args;
+  }
+  const project = request.editorialProject!;
+  const args = [
+    "-m",
+    "subtitler.editorial_project_cli",
+    "start",
+    "--checkpoint",
+    request.outputPath,
+    "--title",
+    project.titleOrGame,
+    "--objective",
+    project.objective,
+    "--target-min-sec",
+    String(project.targetDurationMinSeconds),
+    "--target-max-sec",
+    String(project.targetDurationMaxSeconds),
+    "--subtitle-mode",
+    project.subtitleMode ?? "full",
+    "--output-locale",
+    project.outputLocale ?? "en",
+    "--config",
+    request.configPath,
+    "--env-file",
+    request.envFile,
+    "--pipeline-script",
+    path.join(paths.bundledBackendRoot, "aviutl_subtitle.py"),
+    "--audio-track",
+    String(request.audioTrack ?? 1),
+    "--game-knowledge-store",
+    path.join(paths.stateRoot, "editorial-game-knowledge.json"),
+  ];
+  for (const source of project.sources) args.push("--source-spec", JSON.stringify(source));
+  for (const note of project.mustKeepNotes) args.push("--must-keep", note);
+  for (const note of project.deEmphasizeNotes) args.push("--de-emphasize", note);
+  if (request.sidecarDir) args.push("--workspace", request.sidecarDir);
+  if (fs.existsSync(paths.glossaryFile)) args.push("--glossary", paths.glossaryFile);
+  return args;
 }
 
 function quoteArg(value: string): string {

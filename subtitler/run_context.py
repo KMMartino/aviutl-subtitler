@@ -28,6 +28,7 @@ class CliArguments:
     no_glossary: bool
     frontend_protocol: str | None = None
     cut_silence_encoder: str | None = None
+    media_library_db: str | None = None
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,6 @@ def prepare_run_context(args: CliArguments, *, cwd: Path | None = None) -> RunCo
         raise SubtitlerError("Cut silence requires --cut-silence-encoder with an explicitly selected preset")
     if cut_mode == "review" and args.frontend_protocol != "stdio-v1":
         raise SubtitlerError("Cut silence review mode requires the SubUtl desktop review interface")
-
     env_path = Path(args.env_file)
     if not env_path.is_absolute():
         env_path = (cwd or Path.cwd()) / env_path

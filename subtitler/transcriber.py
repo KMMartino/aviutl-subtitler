@@ -193,6 +193,16 @@ class ServerGemmaTranscriber:
             return ""
         if cleaned and not _is_suspect_transcript(cleaned, chunk):
             return cleaned
+        return self._recover_unusable_transcript(chunk, cleaned, previous_transcript)
+
+    def _recover_unusable_transcript(
+        self,
+        chunk: AudioChunk,
+        cleaned: str,
+        previous_transcript: str | None,
+    ) -> str:
+        if cleaned == UNTRANSCRIBABLE_AUDIO_TOKEN:
+            return ""
         recovered = self._recover_with_split(chunk, depth=0)
         if recovered:
             return recovered
@@ -281,15 +291,21 @@ def _repeats_context(text: str, previous_transcript: str) -> bool:
     return any(normalized[:overlap] == previous[-overlap:] for overlap in range(maximum, 7, -1))
 
 
-def _is_suspect_transcript(text: str, chunk: AudioChunk) -> bool:
+def _is_suspect_transcript(
+    text: str,
+    chunk: AudioChunk,
+    *,
+    enforce_minimum_density: bool = True,
+) -> bool:
     normalized = re.sub(r"\s+", "", text)
     duration = max(0.0, chunk.end - chunk.start)
     if not normalized:
         return True
-    if duration >= 12 and len(normalized) < duration * 3.0:
-        return True
-    if duration >= 20 and len(normalized) < duration * 4.0:
-        return True
+    if enforce_minimum_density:
+        if duration >= 12 and len(normalized) < duration * 3.0:
+            return True
+        if duration >= 20 and len(normalized) < duration * 4.0:
+            return True
     if _has_repeated_text_loop(normalized):
         return True
     if "承知" in text:

@@ -75,6 +75,5 @@ class LocalTranscriberRecoveryTests(unittest.TestCase):
         self.assertEqual(transcriber.transcribe_payload(_chunk(), {"messages": []}, "前の発話"), "")
         transcriber._recover_with_split.assert_not_called()
 
-
 if __name__ == "__main__":
     unittest.main()

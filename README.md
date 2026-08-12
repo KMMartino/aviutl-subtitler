@@ -35,6 +35,29 @@ video/audio input
 -> AviUtl .exo output
 ```
 
+### Transcription segment policy
+
+All providers use the same normalized transcript, forced-alignment, and subtitle-planning pipeline. Provider-specific behavior is kept in adapters and segment policy rather than separate backends.
+
+- Hosted OpenAI runs use `gpt-transcribe`. The default fallback selection is the same model, which the backend treats as no distinct fallback; users with Gemini access can select a separate Gemini fallback. GPT Transcribe receives larger continuous VAD groups, which can span several minutes in the short workflow when the cleanup grouping limit permits it.
+- Gemini transcription remains on fine VAD chunks capped at 30 seconds because longer groups failed the quality comparison.
+- Local Gemma is hard-capped at 30-second VAD chunks. The 60-second packing trial was retired after it produced worse long-context substitutions; configuring a larger VAD maximum does not bypass the local cap.
+- Padded VAD chunks can overlap slightly. Each chunk is aligned independently, then exact or fuzzy shared text is reconciled before an aligned-time seam assigns any remaining disagreement to one side.
+- Alignment workers start while transcription is running and are capped at `min(configured workers, transcription segments)`.
+
+Previous-transcript context is not added to every local request. Local transcription first tries the audio alone and uses preceding text only after ordinary and tighter-VAD recovery fail. Hosted transcription also starts context-free, then uses preceding text for a quality-failure retry when it is available.
+
+### Subtitle split and cleanup policy
+
+Subtitle planning ranks sentence and Japanese clause endings first, then connective/phrase boundaries, aligned acoustic pauses, LLM suggestions, duration limits, and the hard character fallback.
+
+- Deterministic planning first exhausts sentence, clause, phrase, pause, title-safe, character, and duration evidence. For an ambiguous hard frontier it builds a small lattice of legal boundary IDs at roughly 60–100% of the available budget.
+- Candidate boundaries keep contiguous katakana and kanji runs, common grammatical phrases, and compact numeric/date/time expressions intact. Among the remaining choices, clause/particle endings and hiragana-to-content-script transitions outrank arbitrary hiragana seams.
+- Local cleanup models select one boundary ID per request and repeat against a rolling, context-sized prefix. Hosted cleanup models may select one ID from each of several frontier zones in a single request.
+- The model never reproduces transcript text during split planning. Responses are sanitized to known IDs and every selected span is validated against the original aligned tokens before use. If a hosted response returns several alternatives from one zone, the planner scores the complete timed paths and keeps one boundary per zone; invalid or missing IDs fall back to deterministic splitting.
+- Hosted cleanup output budgets scale with the text window. Cleanup keeps the same subtitle count, and a content-fingerprint guard rejects cross-boundary deletion or substantial rewriting.
+- The final planner reapplies both the configured character and duration limits after boundary touching and timing adjustments.
+
 ## Command Line
 
 The public CLI is workflow/config based:

@@ -1,0 +1,4 @@
+chunk_index,vad_group_index,start,end,duration_sec,vad_activation,vad_peak,selected_for_transcription
+0,0,26.968000,228.232000,201.264000,0.888904,1.000000,true
+1,1,246.296000,512.104000,265.808000,0.901902,1.000000,true
+2,2,520.088000,702.024000,181.936000,0.888665,1.000000,true

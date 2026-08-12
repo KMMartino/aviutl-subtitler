@@ -1,0 +1,4 @@
+chain_index,source_chunk_indexes,start,end,duration_sec,chunk_count,token_count,fallback,split_count,reason_closed,max_internal_chunk_gap,avg_internal_chunk_gap,gap_sec_used
+0,0,26.968,228.232,201.264,1,1492,False,65,gap,0.0,0.0,0.5
+1,1,246.296,512.104,265.80800000000005,1,1952,False,92,gap,0.0,0.0,0.5
+2,2,520.088,702.024,181.93600000000004,1,1217,False,54,end,0.0,0.0,0.5

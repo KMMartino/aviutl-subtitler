@@ -1,4 +1,4 @@
-import type { AlignmentModelStatus, AppSettings, AppState, CurrentLlamaServerState, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./renderer/lib/types";
+import type { AlignmentModelStatus, AppSettings, AppState, BrollReviewDecision, CurrentLlamaServerState, EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialGameSummary, EditorialSourceSelection, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetAnalysisEstimate, MediaAssetAnalysisResult, MediaAssetDetail, MediaAssetKind, MediaAssetListRequest, MediaAssetListResult, MediaBulkAnalysisPlan, MediaLibraryDirectory, MediaLibraryRoot, MediaLibraryScanResult, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WebAssetAcquireRequest, WebAssetProbe, WorkflowConfig, WorkflowName, YtDlpStatus } from "./renderer/lib/types";
 
 export {};
 
@@ -6,12 +6,34 @@ declare global {
   interface Window {
     subtitler: {
       chooseInputFile(defaultPath?: string): Promise<string | null>;
+      chooseInputFiles(defaultPath?: string): Promise<string[] | null>;
       chooseFile(): Promise<string | null>;
       chooseOutputFile(defaultPath?: string): Promise<string | null>;
       chooseDirectory(): Promise<string | null>;
       chooseExecutable(): Promise<string | null>;
       filePath(file: File): string;
       analyzeMedia(path: string): Promise<MediaAnalysis>;
+      listMediaLibraryRoots(): Promise<MediaLibraryRoot[]>;
+      addMediaLibraryRoot(path: string): Promise<MediaLibraryRoot>;
+      setMediaLibraryRootEnabled(rootId: string, enabled: boolean): Promise<MediaLibraryRoot>;
+      removeMediaLibraryRoot(rootId: string): Promise<{ removedAssets: number }>;
+      listMediaLibraryDirectories(rootId: string): Promise<MediaLibraryDirectory[]>;
+      setMediaLibraryDirectoryIncluded(rootId: string, relativeDirectory: string, included: boolean): Promise<void>;
+      setMediaLibraryDirectoryVisible(rootId: string, relativeDirectory: string, kind: "subtree" | "direct", visible: boolean): Promise<void>;
+      setMediaLibraryDirectoryHidden(rootId: string, relativeDirectory: string, hidden: boolean): Promise<void>;
+      removeMediaLibraryDirectoryAssets(rootId: string, relativeDirectory: string, deleteFiles: boolean): Promise<{ removedAssets: number; deletedFiles: number; errors: string[] }>;
+      scanMediaLibraryRoot(rootId: string): Promise<MediaLibraryScanResult>;
+      listMediaAssets(request: MediaAssetListRequest): Promise<MediaAssetListResult>;
+      getMediaAsset(assetId: string): Promise<MediaAssetDetail>;
+      getMediaAssetThumbnails(assetIds: string[]): Promise<Record<string, string>>;
+      updateMediaAssetDescription(assetId: string, description: string): Promise<MediaAssetDetail>;
+      addMediaAssetSegment(assetId: string, scope: MediaAnalysisScope, description: string): Promise<MediaAssetDetail>;
+      probeWebAsset(sourceUrl: string): Promise<WebAssetProbe>;
+      acquireWebAsset(request: WebAssetAcquireRequest): Promise<MediaAssetDetail>;
+      estimateMediaAssetAnalysis(assetId: string, scope?: MediaAnalysisScope): Promise<MediaAssetAnalysisEstimate[]>;
+      planBulkMediaAnalysis(mediaKind: MediaAssetKind | ""): Promise<MediaBulkAnalysisPlan>;
+      analyzeMediaAsset(assetId: string, detail: MediaAnalysisDetail, scope?: MediaAnalysisScope): Promise<MediaAssetAnalysisResult>;
+      cancelMediaAssetAnalysis(assetId: string): Promise<boolean>;
       getAppState(): Promise<AppState>;
       resetAppState(): Promise<AppState>;
       saveAppSettings(settings: AppSettings): Promise<void>;
@@ -42,15 +64,25 @@ declare global {
       deleteManagedPythonEnv(): Promise<PythonRuntimeStatus>;
       downloadManagedFfmpeg(): Promise<FfmpegStatus>;
       deleteManagedFfmpeg(): Promise<FfmpegStatus>;
+      installOrUpdateYtDlp(): Promise<YtDlpStatus>;
+      deleteManagedYtDlp(): Promise<YtDlpStatus>;
       downloadAlignmentModel(): Promise<AlignmentModelStatus>;
       deleteAlignmentModel(): Promise<AlignmentModelStatus>;
+      inspectEditorialCheckpoint(checkpoint: string, sources?: EditorialSourceSelection[]): Promise<EditorialCheckpointInspection>;
+      findEditorialCheckpoint(sources: EditorialSourceSelection[]): Promise<{ path: string; inspection: EditorialCheckpointInspection } | null>;
+      listEditorialCheckpoints(): Promise<EditorialCheckpointSummary[]>;
+      removeEditorialCheckpoint(checkpoint: string): Promise<void>;
+      listEditorialGames(): Promise<EditorialGameSummary[]>;
+      rememberEditorialGame(title: string): Promise<EditorialGameSummary>;
       startRun(request: RunRequest): Promise<{ runId: string }>;
       submitSilenceReview(runId: string, reviewId: string, decisions: Array<{ candidateId: string; decision: SilenceCutDecision }>): Promise<void>;
+      submitBrollReview(runId: string, reviewId: string, decisions: BrollReviewDecision[]): Promise<void>;
       probeCutSilenceEncoders(): Promise<EncoderProbeResult[]>;
       getSilenceSource(runId: string): Promise<{ url: string }>;
       getSilenceProxy(runId: string, candidateId: string, variant: "original" | "seam"): Promise<{ url: string }>;
       prefetchSilenceProxies(runId: string, candidateIds: string[]): Promise<void>;
-      cancelRun(runId: string): Promise<void>;
+      getBrollPreview(runId: string, candidateId: string): Promise<{ url: string; mediaKind: "video" | "image" }>;
+      cancelRun(runId: string, immediate?: boolean): Promise<void>;
       onRunEvent(callback: (event: RunEvent) => void): () => void;
       openPath(path: string): Promise<string>;
       showItemInFolder(path: string): Promise<void>;

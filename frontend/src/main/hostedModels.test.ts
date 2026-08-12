@@ -17,11 +17,11 @@ const originalFetch = globalThis.fetch;
 describe("hosted model verification helpers", () => {
   it("uses the intentionally restricted model set", () => {
     expect(APPROVED_MODELS).toEqual({
-      openaiTranscription: "gpt-4o-transcribe",
-      openaiTranscriptionMini: "gpt-4o-mini-transcribe",
+      openaiTranscriptionGpt: "gpt-transcribe",
       openaiCleanup: "gpt-5.4-mini",
       openaiCleanup56Luna: "gpt-5.6-luna",
       gemini: "gemini-3.5-flash",
+      gemini36Flash: "gemini-3.6-flash",
       gemini31Pro: "gemini-3.1-pro-preview",
       gemini31FlashLite: "gemini-3.1-flash-lite"
     });
@@ -31,11 +31,30 @@ describe("hosted model verification helpers", () => {
     expect(hostedOptions("cleanup").map(({ provider, model }) => `${provider}:${model}`)).toEqual([
       "openai:gpt-5.4-mini",
       "openai:gpt-5.6-luna",
-      "gemini:gemini-3.5-flash"
+      "gemini:gemini-3.6-flash"
     ]);
     expect(hostedCleanupTuning("openai", "gpt-5.4-mini")).toEqual({ reasoningEffort: "medium", thinkingLevel: null });
     expect(hostedCleanupTuning("openai", "gpt-5.6-luna")).toEqual({ reasoningEffort: "low", thinkingLevel: null });
-    expect(hostedCleanupTuning("gemini", "gemini-3.5-flash")).toEqual({ reasoningEffort: null, thinkingLevel: "minimal" });
+    expect(hostedCleanupTuning("gemini", "gemini-3.6-flash")).toEqual({ reasoningEffort: null, thinkingLevel: "minimal" });
+    expect(hostedCleanupTuning("gemini", "gemini-3.5-flash")).toBeNull();
+  });
+
+  it("keeps Gemini 3.5 Flash transcription-only and 3.6 Flash cleanup-only", () => {
+    const transcriptionModels = hostedOptions("transcription").map(({ model }) => model);
+    const cleanupModels = hostedOptions("cleanup").map(({ model }) => model);
+
+    expect(transcriptionModels).toContain("gemini-3.5-flash");
+    expect(transcriptionModels).not.toContain("gemini-3.6-flash");
+    expect(cleanupModels).toContain("gemini-3.6-flash");
+    expect(cleanupModels).not.toContain("gemini-3.5-flash");
+  });
+
+  it("offers only GPT Transcribe for OpenAI transcription", () => {
+    expect(
+      hostedOptions("transcription")
+        .filter(({ provider }) => provider === "openai")
+        .map(({ model }) => model)
+    ).toEqual(["gpt-transcribe"]);
   });
 
   it("reads only supported keys from an env file", () => {
@@ -48,7 +67,7 @@ describe("hosted model verification helpers", () => {
     });
   });
 
-  it("recommends a smarter fallback unless the primary is already the smartest", () => {
+  it("recommends a distinct Gemini fallback and no distinct OpenAI fallback", () => {
     expect(recommendedFallbackTranscription("gemini", "gemini-3.5-flash")).toEqual({
       provider: "gemini",
       model: "gemini-3.1-pro-preview"
@@ -57,13 +76,13 @@ describe("hosted model verification helpers", () => {
       provider: "gemini",
       model: "gemini-3.5-flash"
     });
-    expect(recommendedFallbackTranscription("openai", "gpt-4o-mini-transcribe")).toEqual({
+    expect(recommendedFallbackTranscription("openai", "gpt-transcribe")).toEqual({
       provider: "openai",
-      model: "gpt-4o-transcribe"
+      model: "gpt-transcribe"
     });
   });
 
-  it("treats OpenAI dated transcription aliases as the canonical mini model", async () => {
+  it("verifies the supported OpenAI and Gemini models", async () => {
     const file = path.join(os.tmpdir(), `subtitler-env-${Date.now()}.txt`);
     files.push(file);
     fs.writeFileSync(file, "OPENAI_API_KEY=openai-secret\nGEMINI_API_KEY=gemini-secret\n");
@@ -72,7 +91,7 @@ describe("hosted model verification helpers", () => {
       if (text.includes("api.openai.com")) {
         return new Response(JSON.stringify({
           data: [
-            { id: "gpt-4o-mini-transcribe-2025-12-15" },
+            { id: "gpt-transcribe" },
             { id: "gpt-5.4-mini" },
             { id: "gpt-5.5" }
             ,{ id: "gpt-5.6-sol" }
@@ -84,6 +103,7 @@ describe("hosted model verification helpers", () => {
       return new Response(JSON.stringify({
         models: [
           { name: "models/gemini-3.5-flash", supportedGenerationMethods: ["generateContent"] },
+          { name: "models/gemini-3.6-flash", supportedGenerationMethods: ["generateContent"] },
           { name: "models/gemini-3.1-pro-preview", supportedGenerationMethods: ["generateContent"] },
           { name: "models/gemini-3.1-flash-lite", supportedGenerationMethods: ["generateContent"] }
         ]
@@ -92,6 +112,8 @@ describe("hosted model verification helpers", () => {
 
     const result = await verifyHostedModels(file);
 
-    expect(result.openai.transcriptionMini).toBe(true);
+    expect(result.openai.transcriptionGpt).toBe(true);
+    expect(result.gemini.transcription).toBe(true);
+    expect(result.gemini.cleanup).toBe(true);
   });
 });

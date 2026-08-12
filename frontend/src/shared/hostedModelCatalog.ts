@@ -3,11 +3,11 @@ export type HostedRole = "transcription" | "cleanup";
 export type HostedEmphasis = "quality" | "balanced" | "speed";
 
 export const APPROVED_MODELS = {
-  openaiTranscription: "gpt-4o-transcribe",
-  openaiTranscriptionMini: "gpt-4o-mini-transcribe",
+  openaiTranscriptionGpt: "gpt-transcribe",
   openaiCleanup: "gpt-5.4-mini",
   openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
+  gemini36Flash: "gemini-3.6-flash",
   gemini31Pro: "gemini-3.1-pro-preview",
   gemini31FlashLite: "gemini-3.1-flash-lite"
 } as const;
@@ -24,19 +24,11 @@ export function hostedCleanupTuning(provider: HostedProvider, model: string): Ho
   if (provider === "openai" && model === APPROVED_MODELS.openaiCleanup56Luna) {
     return { reasoningEffort: "low", thinkingLevel: null };
   }
-  if (provider === "gemini" && model === APPROVED_MODELS.gemini) {
+  if (provider === "gemini" && model === APPROVED_MODELS.gemini36Flash) {
     return { reasoningEffort: null, thinkingLevel: "minimal" };
   }
   return null;
 }
-
-export const OPENAI_TRANSCRIPTION_MODEL_ALIASES: Record<string, string[]> = {
-  [APPROVED_MODELS.openaiTranscription]: [APPROVED_MODELS.openaiTranscription],
-  [APPROVED_MODELS.openaiTranscriptionMini]: [
-    APPROVED_MODELS.openaiTranscriptionMini,
-    "gpt-4o-mini-transcribe-2025-12-15"
-  ]
-};
 
 export type HostedOption = {
   provider: HostedProvider;
@@ -53,19 +45,11 @@ type HostedModel = HostedOption & {
 export const HOSTED_MODELS: HostedModel[] = [
   {
     provider: "openai",
-    model: APPROVED_MODELS.openaiTranscription,
-    label: "OpenAI GPT-4o Transcribe",
+    model: APPROVED_MODELS.openaiTranscriptionGpt,
+    label: "OpenAI GPT Transcribe",
     emphasis: "quality",
-    blurb: "Higher-accuracy OpenAI speech-to-text model. Medium speed, audio and text input, text output. Best OpenAI choice here when transcription quality matters.",
-    verification: { transcription: "transcription" }
-  },
-  {
-    provider: "openai",
-    model: APPROVED_MODELS.openaiTranscriptionMini,
-    label: "OpenAI GPT-4o mini Transcribe",
-    emphasis: "speed",
-    blurb: "Fast, lower-cost OpenAI speech-to-text model. Audio and text input, text output. A practical choice when throughput matters more than maximum accuracy.",
-    verification: { transcription: "transcriptionMini" }
+    blurb: "OpenAI's current high-accuracy file transcription model. Supports dedicated language and glossary hints while preserving this app's existing alignment pipeline.",
+    verification: { transcription: "transcriptionGpt" }
   },
   {
     provider: "openai",
@@ -86,10 +70,18 @@ export const HOSTED_MODELS: HostedModel[] = [
   {
     provider: "gemini",
     model: APPROVED_MODELS.gemini,
-    label: "Gemini 3.5 Flash · Minimal",
+    label: "Gemini 3.5 Flash",
     emphasis: "balanced",
-    blurb: "Tested Gemini cleanup profile. Minimal thinking was faster and followed the cleanup format more reliably than low or medium.",
-    verification: { transcription: "transcription", cleanup: "cleanup" }
+    blurb: "Best tested transcription profile. The default medium thinking produced the strongest price-to-performance result on the audio benchmark.",
+    verification: { transcription: "transcription" }
+  },
+  {
+    provider: "gemini",
+    model: APPROVED_MODELS.gemini36Flash,
+    label: "Gemini 3.6 Flash · Minimal",
+    emphasis: "balanced",
+    blurb: "Best-value tested cleanup profile. Minimal thinking preserved the benchmark content while running much faster and cheaper than the quality-oriented Luna option.",
+    verification: { cleanup: "cleanup" }
   },
   {
     provider: "gemini",
@@ -130,10 +122,7 @@ export function recommendedFallbackTranscription(
     }
     return { provider: "gemini", model: APPROVED_MODELS.gemini31Pro };
   }
-  if (model === APPROVED_MODELS.openaiTranscription) {
-    return { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionMini };
-  }
-  return { provider: "openai", model: APPROVED_MODELS.openaiTranscription };
+  return { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionGpt };
 }
 
 export function isHostedModelApproved(provider: HostedProvider, model: string, role: HostedRole): boolean {

@@ -425,18 +425,38 @@ def split_chunk_with_tighter_vad(
     keep_temp: bool = False,
     min_piece_sec: float = 0.25,
     session: VadSession | None = None,
+    recovery_min_silence_ms: int | None = None,
+    recovery_speech_pad_ms: int | None = None,
+    max_pieces: int | None = None,
 ) -> list[AudioChunk]:
     """Rerun VAD on one chunk with tighter settings, falling back to a quiet midpoint split."""
     duration = max(chunk.end - chunk.start, 0.0)
     if duration <= min_piece_sec * 2:
         return [chunk]
 
-    attempts = [
-        (max(duration / 2, min_piece_sec), 250, 80),
-        (max(duration / 2, min_piece_sec), 150, 40),
-        (max(duration / 3, min_piece_sec), 80, 20),
-        (max(duration / 4, min_piece_sec), 40, 0),
-    ]
+    if recovery_min_silence_ms is None or recovery_speech_pad_ms is None:
+        attempts = [
+            (max(duration / 2, min_piece_sec), 250, 80),
+            (max(duration / 2, min_piece_sec), 150, 40),
+            (max(duration / 3, min_piece_sec), 80, 20),
+            (max(duration / 4, min_piece_sec), 40, 0),
+        ]
+    else:
+        base_silence = max(0, recovery_min_silence_ms)
+        base_pad = max(0, recovery_speech_pad_ms)
+        attempts = [
+            (max(duration / 2, min_piece_sec), base_silence, base_pad),
+            (
+                max(duration / 2, min_piece_sec),
+                max(200, int(round(base_silence * 0.75))),
+                max(80, int(round(base_pad * 0.75))),
+            ),
+            (
+                max(duration / 3, min_piece_sec),
+                max(150, int(round(base_silence * 0.5))),
+                max(40, int(round(base_pad * 0.5))),
+            ),
+        ]
     try:
         probabilities, window_size = (session or VadSession()).probabilities(chunk.samples, sample_rate)
     except Exception:
@@ -460,10 +480,65 @@ def split_chunk_with_tighter_vad(
             spans, chunk.samples, sample_rate, probabilities, window_size, None, False
         )
         adjusted = _offset_subchunks(chunk, local, sample_rate, temp_dir, keep_temp)
+        if max_pieces is not None and len(adjusted) > max(1, max_pieces):
+            adjusted = _coalesce_subchunks(
+                chunk,
+                adjusted,
+                sample_rate,
+                temp_dir,
+                keep_temp,
+                max(1, max_pieces),
+            )
         if len(adjusted) >= 2:
             return adjusted
 
     return _quiet_midpoint_split(chunk, sample_rate, temp_dir, keep_temp, min_piece_sec)
+
+
+def _coalesce_subchunks(
+    parent: AudioChunk,
+    chunks: list[AudioChunk],
+    sample_rate: int,
+    temp_dir: Path | None,
+    keep_temp: bool,
+    max_pieces: int,
+) -> list[AudioChunk]:
+    """Combine speech islands into a small number of chronological recovery pieces."""
+    piece_count = min(max_pieces, len(chunks))
+    if piece_count >= len(chunks):
+        return chunks
+
+    groups: list[list[AudioChunk]] = []
+    for piece_index in range(piece_count):
+        start = round(piece_index * len(chunks) / piece_count)
+        end = round((piece_index + 1) * len(chunks) / piece_count)
+        if end > start:
+            groups.append(chunks[start:end])
+
+    parent_start_sample = int(round(parent.start * sample_rate))
+    result: list[AudioChunk] = []
+    for piece_index, group in enumerate(groups):
+        start_sample = max(0, int(round(group[0].start * sample_rate)) - parent_start_sample)
+        end_sample = min(
+            len(parent.samples),
+            int(round(group[-1].end * sample_rate)) - parent_start_sample,
+        )
+        if end_sample <= start_sample:
+            continue
+        wav_path = None
+        if keep_temp and temp_dir is not None:
+            wav_path = temp_dir / f"chunk_{parent.index:05d}_split_{piece_index:02d}.wav"
+            write_wav_segment(parent.samples[start_sample:end_sample], sample_rate, wav_path)
+        result.append(
+            AudioChunk(
+                index=parent.index,
+                start=parent.start + start_sample / sample_rate,
+                end=parent.start + end_sample / sample_rate,
+                samples=parent.samples[start_sample:end_sample],
+                wav_path=wav_path,
+            )
+        )
+    return result
 
 
 def _offset_subchunks(

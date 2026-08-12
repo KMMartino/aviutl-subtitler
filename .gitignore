@@ -19,6 +19,8 @@ env/
 .frontend-state/
 diagnostics/
 subtitle_files/
+AI_MODEL_USAGE.md
+/rebuild-and-install.ps1
 *.chunks/
 *.tmp
 *.temp
@@ -71,15 +73,8 @@ release/
 frontend/.vite/
 frontend/coverage/
 frontend/.start-smoke.*.log
-frontend2/node_modules/
-frontend2/dist/
-frontend2/.vite/
-frontend2/coverage/
 Thumbs.db
 Desktop.ini
 .DS_Store
 .idea/
 .vscode/
-
-#frontend candidate
-frontend2/

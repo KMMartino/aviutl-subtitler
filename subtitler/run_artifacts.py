@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import csv
 import os
 import sys
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ class RunArtifactPaths:
     run_metadata: Path | None
     api_usage: Path | None
     aligned_text: Path | None
+    aligned_tokens: Path | None
     final_text: Path | None
     cleanup_diff: Path | None
     mistranscriptions: Path | None
@@ -40,6 +42,7 @@ class RunArtifactPaths:
     planning_profile: Path | None
     chapter_markers: Path | None
     silence_cuts: Path | None
+    broll_plan: Path | None
 
 
 def build_run_artifact_paths(
@@ -65,6 +68,7 @@ def build_run_artifact_paths(
         run_metadata=suffix(".run.json"),
         api_usage=suffix(".api_usage.csv"),
         aligned_text=suffix(".aligned_text.txt"),
+        aligned_tokens=suffix(".aligned_tokens.csv"),
         final_text=suffix(".final_text.txt"),
         cleanup_diff=suffix(".cleanup_diff.txt"),
         mistranscriptions=suffix(".possible_mistranscriptions.txt"),
@@ -75,6 +79,7 @@ def build_run_artifact_paths(
         planning_profile=suffix(".planning.csv"),
         chapter_markers=suffix(".youtube_chapters.json"),
         silence_cuts=suffix(".silence_cuts.json"),
+        broll_plan=suffix(".broll_plan.json"),
     )
 
 
@@ -89,6 +94,29 @@ def write_aligned_text(path: Path, aligned: Sequence[Any]) -> None:
         lines.append(item.text.strip())
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_aligned_tokens(path: Path, aligned: Sequence[Any]) -> None:
+    """Persist exact token timing for later selective subtitle placement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("chunk_index", "token_index", "start", "end", "text", "kind"),
+        )
+        writer.writeheader()
+        for item in sorted(aligned, key=lambda chunk: (chunk.chunk.start, chunk.chunk.end)):
+            for token_index, token in enumerate(item.tokens):
+                writer.writerow(
+                    {
+                        "chunk_index": item.chunk.index,
+                        "token_index": token_index,
+                        "start": token.start,
+                        "end": token.end,
+                        "text": token.text,
+                        "kind": token.kind,
+                    }
+                )
 
 
 def write_final_subtitle_text(path: Path, subtitles: Sequence[Any]) -> None:
@@ -222,7 +250,7 @@ def write_run_metadata(
     argv: Sequence[str] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    api_key_names = ["OPENAI_API_KEY", "GEMINI_API_KEY", "DEEPGRAM_API_KEY"]
+    api_key_names = ["OPENAI_API_KEY", "GEMINI_API_KEY"]
     metadata = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "input": args.input,

@@ -24,7 +24,86 @@ JAPANESE_TRAILING_CONNECTIVE_TERMS = (
     "で",
     "が",
 )
-JAPANESE_CONNECTIVES = JAPANESE_TRAILING_CONNECTIVE_TERMS
+JAPANESE_CLAUSE_ENDINGS = (
+    "ということで",
+    "と思います",
+    "んですけども",
+    "ですけども",
+    "けども",
+    "でした",
+    "ました",
+    "でしょう",
+    "ですね",
+    "ですよ",
+    "です",
+    "ます",
+)
+JAPANESE_SEMANTIC_BOUNDARY_TAILS = (
+    "ということで",
+    "けれども",
+    "けれど",
+    "けども",
+    "けど",
+    "ならば",
+    "なら",
+    "れば",
+    "たら",
+    "ので",
+    "のに",
+    "から",
+    "まで",
+    "より",
+    "って",
+    "では",
+    "には",
+    "とは",
+    "ても",
+    "でも",
+    "が",
+    "を",
+    "に",
+    "で",
+    "は",
+    "も",
+    "と",
+    "へ",
+)
+JAPANESE_STRONG_CLAUSE_BOUNDARY_TAILS = (
+    "ということで",
+    "については",
+    "けれども",
+    "けれど",
+    "けども",
+    "けど",
+    "であれば",
+    "ならば",
+    "なら",
+    "れば",
+    "たら",
+    "ので",
+    "のに",
+    "ですが",
+    "ますが",
+)
+JAPANESE_PROTECTED_GRAMMATICAL_PHRASES = (
+    "であれば",
+    "である",
+    "に合わせて",
+)
+JAPANESE_NUMERAL_CHARS = "〇零一二三四五六七八九十百千万億兆"
+_NUMERIC_CORE = rf"(?:[0-9]+(?:[.,][0-9]+)*|[{JAPANESE_NUMERAL_CHARS}]+)"
+_NUMERIC_UNIT = (
+    r"(?:年|月|日|時|分|秒|人|名|個|本|枚|台|回|話|巻|章|歳|才|円|ドル|"
+    r"万|億|兆|%|％|GB|TB|MB|KB|fps|FPS|Hz|kHz|MHz|GHz|cm|mm|km|kg|g)"
+)
+_NUMERIC_COMPONENT = rf"(?:(?:午前|午後)?{_NUMERIC_CORE}(?:{_NUMERIC_UNIT})?)"
+_WEEKDAY = r"(?:[月火水木金土日]曜日)"
+_NUMERIC_EXPRESSION_RE = re.compile(
+    rf"(?:第|約)?{_NUMERIC_COMPONENT}"
+    rf"(?:(?:{_WEEKDAY})?{_NUMERIC_COMPONENT}|(?:[〜～~\-–—/:：]|から|、){_NUMERIC_COMPONENT})*"
+    rf"(?:{_WEEKDAY})?",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -38,7 +117,22 @@ class BoundaryCandidate:
     index: int
     kind: str
     priority: int
-    distance: int
+    distance: float
+
+
+@dataclass(frozen=True)
+class BoundaryOption:
+    id: str
+    zone: int
+    index: int
+
+
+@dataclass(frozen=True, order=True)
+class BoundaryPathScore:
+    semantic_penalty: int
+    balance_penalty: float
+    negative_pause: float
+    stable_order: tuple[int, ...]
 
 
 def _normalized(text: str) -> str:
@@ -47,6 +141,43 @@ def _normalized(text: str) -> str:
 
 def _is_katakana_char(char: str) -> bool:
     return bool(char) and ("\u30a0" <= char <= "\u30ff" or "\uff66" <= char <= "\uff9f")
+
+
+def _is_hiragana_char(char: str) -> bool:
+    return bool(char) and "\u3040" <= char <= "\u309f"
+
+
+def _is_kanji_char(char: str) -> bool:
+    return bool(char) and (
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        or char in "々〆ヶ"
+    )
+
+
+def _inside_protected_numeric_expression(text: str, index: int) -> bool:
+    if index <= 0 or index >= len(text):
+        return False
+    return any(match.start() < index < match.end() for match in _NUMERIC_EXPRESSION_RE.finditer(text))
+
+
+def _inside_known_grammatical_phrase(text: str, index: int) -> bool:
+    for term in JAPANESE_TRAILING_CONNECTIVE_TERMS + JAPANESE_PROTECTED_GRAMMATICAL_PHRASES:
+        if len(term) < 2:
+            continue
+        start = text.find(term)
+        while start >= 0:
+            if start < index < start + len(term):
+                return True
+            start = text.find(term, start + 1)
+    return False
+
+
+def _normalized_boundary_text(tokens: list[AlignedToken], index: int) -> tuple[str, int]:
+    text = _normalized(_tokens_to_text(tokens))
+    prefix_chars = len(_normalized(_tokens_to_text(tokens[:index])))
+    return text, prefix_chars
 
 
 def _is_title_char(char: str) -> bool:
@@ -85,12 +216,27 @@ def _split_inside_fragile_title_run(tokens: list[AlignedToken], index: int) -> b
     return _inside_fragile_title_run_text(_normalized(text), len(prefix))
 
 
-def _min_split_chars(max_chars: int) -> int:
-    return max(6, max_chars // 4)
-
-
 def _normalized_len(tokens: list[AlignedToken]) -> int:
     return len(_normalized(_tokens_to_text(tokens)))
+
+
+def _token_duration(tokens: list[AlignedToken]) -> float:
+    if not tokens:
+        return 0.0
+    return max(0.0, tokens[-1].end - tokens[0].start)
+
+
+def _candidate_distance(
+    tokens: list[AlignedToken],
+    index: int,
+    target_chars: int,
+    max_duration: float,
+) -> float:
+    distance = float(abs(_normalized_len(tokens[:index]) - target_chars))
+    if max_duration > 0:
+        duration = _token_duration(tokens[:index])
+        distance += max(0.0, duration - max_duration) * max(1.0, target_chars)
+    return distance
 
 
 def _best_cut(text: str, max_chars: int) -> int:
@@ -172,13 +318,26 @@ def _ends_with_trailing_connective_phrase(tokens: list[AlignedToken], index: int
 def _is_safe_boundary(tokens: list[AlignedToken], index: int) -> bool:
     if index <= 0 or index >= len(tokens):
         return False
-    left = tokens[index - 1].text
-    right = tokens[index].text
-    if left == "." and right and right[0].isdigit():
+    left_text = _normalized(tokens[index - 1].text)
+    right_text = _normalized(tokens[index].text)
+    if not left_text or not right_text:
         return False
-    if left and right and left[-1].isdigit() and right[0] == ".":
+    left = left_text[-1]
+    right = right_text[0]
+    if left == "." and right.isdigit():
         return False
-    if left.isascii() and right.isascii() and left[-1:].isalnum() and right[:1].isalnum():
+    if left.isdigit() and right == ".":
+        return False
+    if left.isascii() and right.isascii() and left.isalnum() and right.isalnum():
+        return False
+    if _is_katakana_char(left) and _is_katakana_char(right):
+        return False
+    if _is_kanji_char(left) and _is_kanji_char(right):
+        return False
+    text, char_index = _normalized_boundary_text(tokens, index)
+    if _inside_protected_numeric_expression(text, char_index):
+        return False
+    if _inside_known_grammatical_phrase(text, char_index):
         return False
     if _split_inside_fragile_title_run(tokens, index):
         return False
@@ -189,6 +348,41 @@ def _is_legal_boundary(tokens: list[AlignedToken], index: int) -> bool:
     if not _is_safe_boundary(tokens, index):
         return False
     return _trailing_connective_phrase_end(tokens, index) is None
+
+
+def _semantic_boundary_penalty(tokens: list[AlignedToken], index: int) -> int:
+    """Rank legal Japanese boundaries without pretending to be a tokenizer."""
+    if index <= 0 or index >= len(tokens):
+        return 99
+    left_text = _normalized(_tokens_to_text(tokens[:index]))
+    right_text = _normalized(_tokens_to_text(tokens[index:]))
+    if not left_text or not right_text:
+        return 99
+    left = left_text[-1]
+    right = right_text[0]
+    if left in SENTENCE_BREAK_CHARS or left in PHRASE_BREAK_CHARS:
+        return 0
+    if any(left_text.endswith(tail) for tail in JAPANESE_STRONG_CLAUSE_BOUNDARY_TAILS):
+        return 0
+    if any(left_text.endswith(tail) for tail in JAPANESE_SEMANTIC_BOUNDARY_TAILS) and (
+        _is_kanji_char(right)
+        or _is_katakana_char(right)
+        or right.isdigit()
+        or (right.isascii() and right.isalnum())
+    ):
+        return 0
+    if _is_hiragana_char(left) and (
+        _is_kanji_char(right)
+        or _is_katakana_char(right)
+        or right.isdigit()
+        or (right.isascii() and right.isalnum())
+    ):
+        return 1
+    if _is_hiragana_char(left) and _is_hiragana_char(right):
+        return 4
+    if (_is_kanji_char(left) or _is_katakana_char(left)) and _is_hiragana_char(right):
+        return 3
+    return 2
 
 
 def _normalized_boundary(tokens: list[AlignedToken], index: int, max_chars: int) -> int | None:
@@ -206,42 +400,77 @@ def _classify_boundary(tokens: list[AlignedToken], index: int) -> tuple[str, int
     previous_text = tokens[index - 1].text
     if previous_text and previous_text[-1] in SENTENCE_BREAK_CHARS:
         return "structural_sentence", 0
+    left_text = _normalized(_tokens_to_text(tokens[:index]))
+    if any(left_text.endswith(ending) for ending in JAPANESE_CLAUSE_ENDINGS):
+        return "structural_clause", 1
     if _ends_with_trailing_connective_phrase(tokens, index):
-        return "structural_connective", 1
+        return "structural_connective", 2
     if previous_text and previous_text[-1] in PHRASE_BREAK_CHARS:
         return "structural_phrase", 2
     return None
 
 
-def _boundary_candidates(tokens: list[AlignedToken], max_chars: int, target_chars: int) -> list[BoundaryCandidate]:
+def _boundary_candidates(
+    tokens: list[AlignedToken],
+    max_chars: int,
+    target_chars: int,
+    max_duration: float = 0.0,
+) -> list[BoundaryCandidate]:
     candidates: dict[tuple[int, str], BoundaryCandidate] = {}
     for raw_index in range(1, len(tokens)):
         index = _normalized_boundary(tokens, raw_index, max_chars)
         if index is None:
             continue
         kind_priority = _classify_boundary(tokens, index)
-        if kind_priority is None:
-            continue
-        kind, priority = kind_priority
-        distance = abs(_normalized_len(tokens[:index]) - target_chars)
-        candidates[(index, kind)] = BoundaryCandidate(index, kind, priority, distance)
+        distance = _candidate_distance(tokens, index, target_chars, max_duration)
+        if kind_priority is not None:
+            kind, priority = kind_priority
+            candidates[(index, kind)] = BoundaryCandidate(index, kind, priority, distance)
+        gap = max(0.0, tokens[index].start - tokens[index - 1].end)
+        if gap >= 0.08:
+            candidates[(index, "acoustic_pause")] = BoundaryCandidate(
+                index,
+                "acoustic_pause",
+                3,
+                distance - min(gap, 1.0) * max_chars,
+            )
+
+    if max_duration > 0 and _token_duration(tokens) > max_duration:
+        duration_indexes = [
+            index
+            for index in range(1, len(tokens))
+            if _is_legal_boundary(tokens, index)
+            and _token_duration(tokens[:index]) <= max_duration
+        ]
+        if duration_indexes:
+            index = max(duration_indexes, key=lambda item: _token_duration(tokens[:item]))
+            candidates[(index, "duration_boundary")] = BoundaryCandidate(
+                index,
+                "duration_boundary",
+                5,
+                _candidate_distance(tokens, index, target_chars, max_duration),
+            )
 
     max_index = _max_char_boundary(tokens, max_chars)
     if max_index is not None:
         candidates[(max_index, "max_chars_boundary")] = BoundaryCandidate(
             max_index,
             "max_chars_boundary",
-            4,
-            abs(_normalized_len(tokens[:max_index]) - target_chars),
+            5,
+            _candidate_distance(tokens, max_index, target_chars, max_duration),
         )
     return sorted(candidates.values(), key=lambda item: (item.priority, item.distance, item.index))
 
 
-def _best_boundary_candidate(tokens: list[AlignedToken], max_chars: int) -> BoundaryCandidate | None:
+def _best_boundary_candidate(
+    tokens: list[AlignedToken],
+    max_chars: int,
+    max_duration: float = 0.0,
+) -> BoundaryCandidate | None:
     if len(tokens) <= 1:
         return None
     target_chars = max(1, min(max_chars, _normalized_len(tokens) // 2))
-    candidates = _boundary_candidates(tokens, max_chars, target_chars)
+    candidates = _boundary_candidates(tokens, max_chars, target_chars, max_duration)
     return candidates[0] if candidates else None
 
 
@@ -269,129 +498,204 @@ def _max_char_boundary(tokens: list[AlignedToken], max_chars: int) -> int | None
     return min(legal, key=lambda item: abs(_normalized_len(tokens[:item]) - max_chars))
 
 
-def _boundary_score(tokens: list[AlignedToken], index: int, target_chars: int) -> tuple[int, int] | None:
-    if not _is_safe_boundary(tokens, index):
-        return None
-    text_before = _tokens_to_text(tokens[:index])
-    norm_len = len(_normalized(text_before))
-    distance = abs(norm_len - target_chars)
-    previous_text = tokens[index - 1].text
-    if previous_text and previous_text[-1] in SENTENCE_BREAK_CHARS:
-        return (0, distance)
-    text_for_match = text_before
-    if text_for_match and text_for_match[-1] in PHRASE_BREAK_CHARS:
-        text_for_match = text_for_match[:-1]
-    if any(text_for_match.endswith(term) for term in JAPANESE_CONNECTIVES):
-        return (1, distance)
-    return None
+def _span_duration(tokens: list[AlignedToken], start: int, end: int) -> float:
+    if start >= end:
+        return 0.0
+    return max(0.0, tokens[end - 1].end - tokens[start].start)
 
 
-def _first_sentence_cut(tokens: list[AlignedToken], max_chars: int) -> int | None:
-    for index in range(1, len(tokens)):
-        if not _is_safe_boundary(tokens, index):
-            continue
-        if not _cut_is_balanced_enough(tokens, index, max_chars):
-            continue
-        previous_text = tokens[index - 1].text
-        if previous_text and previous_text[-1] in SENTENCE_BREAK_CHARS:
-            return index
-    return None
-
-
-def _connective_cut(tokens: list[AlignedToken], max_chars: int) -> int | None:
-    if len(tokens) <= 1:
-        return None
-    candidates: list[tuple[int, int]] = []
-    min_chars = max(1, max_chars // 3)
-    for index in range(1, len(tokens)):
-        if not _is_safe_boundary(tokens, index):
-            continue
-        chars = len(_normalized(_tokens_to_text(tokens[:index])))
-        if chars < min_chars:
-            continue
-        if not _cut_is_balanced_enough(tokens, index, max_chars):
-            continue
-        text_before = _tokens_to_text(tokens[:index])
-        text_for_match = text_before
-        if text_for_match and text_for_match[-1] in PHRASE_BREAK_CHARS:
-            text_for_match = text_for_match[:-1]
-        if any(text_for_match.endswith(term) for term in JAPANESE_CONNECTIVES):
-            candidates.append((abs(chars - max_chars), index))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
-
-
-def _best_structural_cut(tokens: list[AlignedToken], max_chars: int) -> int | None:
-    if len(tokens) <= 1:
-        return None
-    candidates: list[tuple[tuple[int, int], int]] = []
-    search_limit = min(len(tokens), max_chars + max(6, max_chars // 3))
-    min_chars = max(1, max_chars // 3)
-    for index in range(1, search_limit):
-        chars = len(_normalized(_tokens_to_text(tokens[:index])))
-        if chars < min_chars:
-            continue
-        score = _boundary_score(tokens, index, max_chars)
-        if score is not None:
-            candidates.append((score, index))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
-
-
-def _map_lines_to_token_counts(tokens: list[AlignedToken], lines: list[str]) -> list[int] | None:
-    counts: list[int] = []
-    cursor = 0
-    for line in lines:
-        target = len(_normalized(line))
-        if target <= 0:
-            return None
-        seen = 0
-        start = cursor
-        while cursor < len(tokens) and seen < target:
-            seen += len(_normalized(tokens[cursor].text))
-            cursor += 1
-        if seen != target or cursor == start:
-            return None
-        counts.append(cursor - start)
-    if cursor != len(tokens):
-        return None
-    return counts
-
-
-def _map_prefix_lines_to_token_groups(
+def _span_within_limits(
     tokens: list[AlignedToken],
-    lines: list[str],
+    start: int,
+    end: int,
     max_chars: int,
-    enforce_max_chars: bool = True,
-) -> tuple[list[list[AlignedToken]], list[AlignedToken], str | None, list[str], list[str]]:
-    groups: list[list[AlignedToken]] = []
+    max_duration: float,
+) -> bool:
+    return (
+        _normalized_len(tokens[start:end]) <= max_chars
+        and (max_duration <= 0 or _span_duration(tokens, start, end) <= max_duration)
+    )
+
+
+def _span_utilization(
+    tokens: list[AlignedToken],
+    start: int,
+    end: int,
+    max_chars: int,
+    max_duration: float,
+) -> float:
+    char_ratio = _normalized_len(tokens[start:end]) / max(1, max_chars)
+    duration_ratio = _span_duration(tokens, start, end) / max_duration if max_duration > 0 else 0.0
+    return max(char_ratio, duration_ratio)
+
+
+def _boundary_options(
+    tokens: list[AlignedToken],
+    max_chars: int,
+    max_duration: float,
+    *,
+    multiple: bool,
+) -> list[BoundaryOption]:
+    """Build a small legal lattice near each upcoming hard frontier.
+
+    Deterministic sentence, clause, pause, and phrase boundaries have already
+    been exhausted before this is called. Each zone therefore offers the model
+    only a handful of otherwise ambiguous positions spanning roughly 60–100%
+    of a local budget or 75–100% of each compatible hosted frontier band.
+    """
+    options: list[BoundaryOption] = []
     cursor = 0
-    accepted: list[str] = []
-    rejected: list[str] = []
-    for line_index, line in enumerate(lines):
-        norm_line = _normalized(line)
-        if not norm_line:
-            rejected = lines[line_index:]
-            return groups, tokens[cursor:], "invalid_line", accepted, rejected
-        if enforce_max_chars and len(norm_line) > max_chars:
-            rejected = lines[line_index:]
-            return groups, tokens[cursor:], "line_over_max_chars", accepted, rejected
-        seen = ""
-        start = cursor
-        while cursor < len(tokens) and len(seen) < len(norm_line):
-            seen += _normalized(tokens[cursor].text)
-            cursor += 1
-        if seen != norm_line or cursor == start:
-            rejected = lines[line_index:]
-            reason = "line_order_mismatch" if groups else "line_not_substring"
-            return groups, tokens[start:], reason, accepted, rejected
-        groups.append(tokens[start:cursor])
-        accepted.append(line)
-    return groups, tokens[cursor:], None, accepted, rejected
+    zone = 1
+    while cursor < len(tokens) - 1:
+        remainder = TokenSegment(tokens[cursor:], "candidate_lattice")
+        if not _over_limit(remainder, max_chars, max_duration):
+            break
+        if cursor:
+            deterministic = _best_boundary_candidate(remainder.tokens, max_chars, max_duration)
+            if deterministic is not None and deterministic.priority < 4:
+                break
+        legal = [
+            index
+            for index in range(cursor + 1, len(tokens))
+            if _is_legal_boundary(tokens, index)
+            and _span_within_limits(tokens, cursor, index, max_chars, max_duration)
+        ]
+        if not legal:
+            break
+        needs_multiple_zones = (
+            _normalized_len(remainder.tokens) > max_chars * 2
+            or (max_duration > 0 and _token_duration(remainder.tokens) > max_duration * 2)
+        )
+        compatible_multi_zone = multiple and needs_multiple_zones
+        targets = (
+            (0.75, 0.80, 0.85, 0.90, 0.98)
+            if compatible_multi_zone
+            else (0.60, 0.70, 0.80, 0.90, 0.98)
+        )
+        preferred = [
+            index
+            for index in legal
+            if _span_utilization(tokens, cursor, index, max_chars, max_duration)
+            >= (0.70 if compatible_multi_zone else 0.55)
+        ] or legal
+        minimum_tail_chars = max(6, max_chars // 3)
+        balanced = [
+            index
+            for index in preferred
+            if _over_limit(TokenSegment(tokens[index:], "candidate_tail"), max_chars, max_duration)
+            or _normalized_len(tokens[index:]) >= minimum_tail_chars
+            or (max_duration > 0 and _token_duration(tokens[index:]) >= max_duration * 0.4)
+        ]
+        if balanced:
+            preferred = balanced
+        best_semantic_penalty = min(_semantic_boundary_penalty(tokens, index) for index in preferred)
+        semantic_candidates = [
+            index
+            for index in preferred
+            if _semantic_boundary_penalty(tokens, index) == best_semantic_penalty
+        ]
+        if semantic_candidates:
+            preferred = semantic_candidates
+        selected_indexes: list[int] = []
+        for target in targets:
+            index = min(
+                preferred,
+                key=lambda item: (
+                    abs(_span_utilization(tokens, cursor, item, max_chars, max_duration) - target),
+                    -item,
+                ),
+            )
+            if index not in selected_indexes:
+                selected_indexes.append(index)
+        selected_indexes.sort()
+        for letter_index, index in enumerate(selected_indexes):
+            options.append(BoundaryOption(f"Z{zone}{chr(ord('A') + letter_index)}", zone, index))
+        # Multi-zone bands advance from the earliest offered position. With a
+        # 75–100% band, every choice in the next zone remains within one full
+        # budget of every choice in the current zone. This avoids presenting
+        # hosted models with combinations that cannot pass span validation.
+        cursor = min(selected_indexes) if compatible_multi_zone else max(legal)
+        zone += 1
+        if not multiple:
+            break
+    return options
+
+
+def _annotate_boundary_options(tokens: list[AlignedToken], options: list[BoundaryOption]) -> str:
+    by_index: dict[int, list[str]] = {}
+    for option in options:
+        by_index.setdefault(option.index, []).append(option.id)
+    pieces: list[str] = []
+    for index, token in enumerate(tokens):
+        if index in by_index:
+            pieces.append("".join(f"⟦{candidate_id}⟧" for candidate_id in by_index[index]))
+        pieces.append(token.text)
+    return "".join(pieces)
+
+
+def _choose_returned_boundary_options(
+    tokens: list[AlignedToken],
+    options: list[BoundaryOption],
+    returned_ids: list[str],
+    max_chars: int,
+    max_duration: float,
+    *,
+    multiple: bool,
+) -> list[BoundaryOption]:
+    """Resolve duplicate zone answers using the complete timed boundary path."""
+    option_by_id = {option.id: option for option in options}
+    if not multiple:
+        for candidate_id in returned_ids:
+            option = option_by_id.get(candidate_id)
+            if option is not None:
+                return [option]
+        return []
+
+    choices_by_zone: dict[int, list[BoundaryOption]] = {}
+    for candidate_id in returned_ids:
+        option = option_by_id.get(candidate_id)
+        if option is None:
+            continue
+        choices = choices_by_zone.setdefault(option.zone, [])
+        if option not in choices:
+            choices.append(option)
+    if not choices_by_zone:
+        return []
+
+    stable_order = {option.id: index for index, option in enumerate(options)}
+    states: dict[int, tuple[BoundaryPathScore, list[BoundaryOption]]] = {
+        0: (BoundaryPathScore(0, 0.0, 0.0, ()), [])
+    }
+    completed_zones = 0
+    for zone in sorted(choices_by_zone):
+        next_states: dict[int, tuple[BoundaryPathScore, list[BoundaryOption]]] = {}
+        for option in choices_by_zone[zone]:
+            for cursor, (score, path) in states.items():
+                if option.index <= cursor:
+                    continue
+                if not _span_within_limits(tokens, cursor, option.index, max_chars, max_duration):
+                    continue
+                utilization = _span_utilization(tokens, cursor, option.index, max_chars, max_duration)
+                pause = max(0.0, tokens[option.index].start - tokens[option.index - 1].end)
+                candidate_score = BoundaryPathScore(
+                    semantic_penalty=(
+                        score.semantic_penalty
+                        + _semantic_boundary_penalty(tokens, option.index)
+                    ),
+                    balance_penalty=score.balance_penalty + abs(utilization - 0.8),
+                    negative_pause=score.negative_pause - min(pause, 1.0),
+                    stable_order=score.stable_order + (stable_order[option.id],),
+                )
+                previous = next_states.get(option.index)
+                if previous is None or candidate_score < previous[0]:
+                    next_states[option.index] = (candidate_score, path + [option])
+        if not next_states:
+            break
+        states = next_states
+        completed_zones += 1
+    if not completed_zones:
+        return []
+    return min(states.values(), key=lambda item: item[0])[1]
 
 
 def _subtitles_from_token_groups(groups: list[list[AlignedToken]], fallback: bool, source: str) -> list[Subtitle]:
@@ -419,196 +723,89 @@ def _segments_to_subtitles(segments: list[TokenSegment], fallback: bool) -> list
     return subtitles
 
 
-def _split_once_at(tokens: list[AlignedToken], index: int, source: str) -> list[TokenSegment]:
-    index = max(1, min(index, len(tokens) - 1))
-    left = tokens[:index]
-    right = tokens[index:]
-    left_source = _source_with(source, SENTENCE_TERMINAL_SOURCE) if _ends_with_sentence_break(left) else source
-    return [TokenSegment(left, left_source), TokenSegment(right, source)]
+def _over_limit(segment: TokenSegment, max_chars: int, max_duration: float = 0.0) -> bool:
+    return (
+        len(_normalized(_tokens_to_text(segment.tokens))) > max_chars
+        or (max_duration > 0 and _token_duration(segment.tokens) > max_duration)
+    )
 
 
-def _cut_is_balanced_enough(tokens: list[AlignedToken], index: int, max_chars: int) -> bool:
-    if index <= 0 or index >= len(tokens):
-        return False
-    minimum = _min_split_chars(max_chars)
-    return _normalized_len(tokens[:index]) >= minimum and _normalized_len(tokens[index:]) >= minimum
-
-
-def _over_limit(segment: TokenSegment, max_chars: int) -> bool:
-    return len(_normalized(_tokens_to_text(segment.tokens))) > max_chars
-
-
-def _split_pass1(segment: TokenSegment, max_chars: int) -> list[TokenSegment]:
-    pending = [segment]
-    changed = True
-    for mode in ("sentence", "connective"):
-        changed = True
-        while changed:
-            changed = False
-            next_pending: list[TokenSegment] = []
-            for item in pending:
-                if not _over_limit(item, max_chars):
-                    next_pending.append(item)
-                    continue
-                cut = _first_sentence_cut(item.tokens, max_chars) if mode == "sentence" else _connective_cut(item.tokens, max_chars)
-                if cut is None:
-                    next_pending.append(item)
-                    continue
-                source = "sentence_pass1" if mode == "sentence" else "connective_pass1"
-                next_pending.extend(_split_once_at(item.tokens, cut, source))
-                changed = True
-            pending = next_pending
-    return pending
-
-
-def _phrase_cut(tokens: list[AlignedToken], target_chars: int, mode: str, max_chars: int) -> int | None:
-    candidates: list[tuple[int, int]] = []
-    total_chars = len(_normalized(_tokens_to_text(tokens)))
-    if mode == "center":
-        target_chars = max(1, total_chars // 2)
-    for index in range(1, len(tokens)):
-        if not _is_safe_boundary(tokens, index):
-            continue
-        previous_text = tokens[index - 1].text
-        if not previous_text or previous_text[-1] not in PHRASE_BREAK_CHARS:
-            continue
-        if not _cut_is_balanced_enough(tokens, index, max_chars):
-            continue
-        chars = len(_normalized(_tokens_to_text(tokens[:index])))
-        candidates.append((abs(chars - target_chars), index))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
-
-
-def _phrase_split_until(
+def _llm_boundary_candidates(
     segment: TokenSegment,
     max_chars: int,
-    target_chars: int,
-    source: str,
-    mode: str,
-    stop_at_chars: int | None = None,
-) -> list[TokenSegment]:
-    pending = [segment]
-    changed = True
-    while changed:
-        changed = False
-        next_pending: list[TokenSegment] = []
-        for item in pending:
-            length = len(_normalized(_tokens_to_text(item.tokens)))
-            if length <= max_chars or (stop_at_chars is not None and length <= stop_at_chars):
-                next_pending.append(item)
-                continue
-            cut = _phrase_cut(item.tokens, target_chars, mode, max_chars)
-            if cut is None:
-                next_pending.append(item)
-                continue
-            next_pending.extend(_split_once_at(item.tokens, cut, source))
-            changed = True
-        pending = next_pending
-    return pending
-
-
-def _max_char_split(segment: TokenSegment, max_chars: int) -> list[TokenSegment]:
-    remaining = segment.tokens[:]
-    result: list[TokenSegment] = []
-    minimum = _min_split_chars(max_chars)
-    while remaining:
-        if len(_normalized(_tokens_to_text(remaining))) <= max_chars:
-            result.append(TokenSegment(remaining, "max_chars_pass7" if segment.source == "initial" else segment.source))
-            break
-        cut = None
-        count = 0
-        for index, token in enumerate(remaining, start=1):
-            count += len(_normalized(token.text))
-            if count >= max_chars:
-                if _is_safe_boundary(remaining, index):
-                    cut = index
-                else:
-                    cut = max(1, index - 1)
-                break
-        if cut is None:
-            cut = min(max(1, max_chars), len(remaining) - 1)
-        cut = max(1, min(cut, len(remaining)))
-        tail_len = _normalized_len(remaining[cut:])
-        if 0 < tail_len < minimum:
-            target_left_len = max(minimum, _normalized_len(remaining) - minimum)
-            adjusted_cut = None
-            count = 0
-            for index, token in enumerate(remaining, start=1):
-                count += len(_normalized(token.text))
-                if count >= target_left_len:
-                    adjusted_cut = index if _is_safe_boundary(remaining, index) else max(1, index - 1)
-                    break
-            if adjusted_cut is not None and adjusted_cut > 0:
-                cut = max(1, min(adjusted_cut, len(remaining) - 1))
-        result.append(TokenSegment(remaining[:cut], "max_chars_pass7"))
-        remaining = remaining[cut:]
-    return result
-
-
-def _llm_boundary_candidate(
-    segment: TokenSegment,
-    max_chars: int,
+    max_duration: float,
     llm_splitter,
     llm_split_callback: Callable[[SplitPlanResult, int, int, int, str], None] | None,
     attempt_index: int,
     pass_name: str,
-) -> BoundaryCandidate | None:
+) -> list[BoundaryCandidate]:
     text = _tokens_to_text(segment.tokens)
     sentence_break_count = sum(1 for char in text if char in SENTENCE_BREAK_CHARS)
     connective_break_count = sum(text.count(term) for term in JAPANESE_TRAILING_CONNECTIVE_TERMS)
     input_chars = len(_normalized(text))
-    if hasattr(llm_splitter, "split_lines_with_diagnostics"):
-        result = llm_splitter.split_lines_with_diagnostics(text, max_chars)
-    else:
-        lines = llm_splitter.split_lines(text, max_chars)
-        result = SplitPlanResult(
-            lines=lines,
-            raw_line_count=len(lines or []),
-            clean_line_count=len(lines or []),
-            accepted=lines is not None,
-            reject_reason="none" if lines is not None else "request_failed",
-            input_text=text,
-            cleaned_lines=lines or [],
-        )
+    multiple = bool(getattr(llm_splitter, "supports_multi_split", lambda: False)())
+    options = _boundary_options(
+        segment.tokens,
+        max_chars,
+        max_duration,
+        multiple=multiple,
+    )
+    if not options:
+        return []
+    candidate_ids = [option.id for option in options]
+    result = llm_splitter.select_split_boundaries(
+        text,
+        _annotate_boundary_options(segment.tokens, options),
+        candidate_ids,
+        max_chars,
+        multiple=multiple,
+    )
     result.sentence_break_count = sentence_break_count
     result.connective_break_count = connective_break_count
-    lines = result.lines or result.cleaned_lines
-    candidate: BoundaryCandidate | None = None
-    if not lines or len(lines) != 2:
+    returned_ids = (
+        result.parsed_ids
+        if multiple and result.parsed_ids
+        else result.selected_ids or []
+    )
+    selected_options = _choose_returned_boundary_options(
+        segment.tokens,
+        options,
+        returned_ids,
+        max_chars,
+        max_duration,
+        multiple=multiple,
+    )
+    accepted: list[BoundaryCandidate] = []
+    cursor = 0
+    for option in selected_options:
+        if not _span_within_limits(segment.tokens, cursor, option.index, max_chars, max_duration):
+            break
+        accepted.append(
+            BoundaryCandidate(
+                index=option.index,
+                kind="llm_boundary",
+                priority=4,
+                distance=abs(_normalized_len(segment.tokens[cursor : option.index]) - max_chars),
+            )
+        )
+        cursor = option.index
+    if not accepted:
         result.accepted = False
-        result.reject_reason = "wrong_line_count" if lines else result.reject_reason
+        if returned_ids:
+            result.reject_reason = "selected_boundary_span_invalid"
     else:
-        counts = _map_lines_to_token_counts(segment.tokens, lines)
-        if counts is None:
-            result.accepted = False
-            result.reject_reason = "line_not_substring"
-        else:
-            raw_index = counts[0]
-            if _split_inside_fragile_title_run(segment.tokens, raw_index) and _best_boundary_candidate(segment.tokens, max_chars) is not None:
-                result.accepted = False
-                result.reject_reason = "title_cluster_split"
-            else:
-                index = _normalized_boundary(segment.tokens, raw_index, max_chars)
-                if index is None:
-                    result.accepted = False
-                    result.reject_reason = "llm_boundary_rejected_illegal_head"
-                else:
-                    result.lines = lines
-                    result.accepted = True
-                    result.reject_reason = "llm_boundary_repaired" if index != raw_index else "none"
-                    kind = "llm_boundary_repaired" if index != raw_index else "llm_boundary"
-                    candidate = BoundaryCandidate(
-                        index=index,
-                        kind=kind,
-                        priority=3,
-                        distance=abs(_normalized_len(segment.tokens[:index]) - max_chars),
-                    )
+        result.selected_ids = [
+            option.id
+            for candidate in accepted
+            for option in options
+            if option.index == candidate.index
+        ]
+        result.valid_id_count = len(result.selected_ids)
+        result.accepted = True
+        result.reject_reason = "none"
     if llm_split_callback is not None:
         llm_split_callback(result, attempt_index, input_chars, len(segment.tokens), pass_name)
-    return candidate
+    return accepted
 
 
 def _hard_boundary(tokens: list[AlignedToken], max_chars: int) -> int | None:
@@ -626,19 +823,16 @@ def _hard_boundary(tokens: list[AlignedToken], max_chars: int) -> int | None:
 def _split_segment(
     segment: TokenSegment,
     max_chars: int,
-    llm_candidate: BoundaryCandidate | None = None,
+    max_duration: float = 0.0,
     deterministic_candidate: BoundaryCandidate | None = None,
 ) -> list[TokenSegment]:
-    if not _over_limit(segment, max_chars):
+    if not _over_limit(segment, max_chars, max_duration):
         return [segment]
     candidates = []
     if deterministic_candidate is None:
-        deterministic_candidate = _best_boundary_candidate(segment.tokens, max_chars)
+        deterministic_candidate = _best_boundary_candidate(segment.tokens, max_chars, max_duration)
     if deterministic_candidate is not None:
         candidates.append(deterministic_candidate)
-    if llm_candidate is not None:
-        candidates.append(llm_candidate)
-        candidates.sort(key=lambda item: (item.priority, item.distance, item.index))
     candidate = candidates[0] if candidates else None
     if candidate is None:
         hard = _hard_boundary(segment.tokens, max_chars)
@@ -647,8 +841,8 @@ def _split_segment(
         candidate = BoundaryCandidate(
             hard,
             "max_chars_boundary",
-            4,
-            abs(_normalized_len(segment.tokens[:hard]) - max_chars),
+            5,
+            _candidate_distance(segment.tokens, hard, max_chars, max_duration),
         )
     if candidate.index <= 0 or candidate.index >= len(segment.tokens):
         return [segment]
@@ -664,7 +858,29 @@ def _split_segment(
     return [left, right]
 
 
-def _assert_or_repair_connective_heads(segments: list[TokenSegment], max_chars: int) -> list[TokenSegment]:
+def _split_segment_at_candidates(
+    segment: TokenSegment,
+    candidates: list[BoundaryCandidate],
+) -> list[TokenSegment]:
+    indexes = sorted({candidate.index for candidate in candidates if 0 < candidate.index < len(segment.tokens)})
+    if not indexes:
+        return [segment]
+    parts: list[TokenSegment] = []
+    cursor = 0
+    for index in indexes + [len(segment.tokens)]:
+        tokens = segment.tokens[cursor:index]
+        if tokens:
+            source = _source_with(segment.source, "llm_boundary")
+            parts.append(TokenSegment(tokens, source))
+        cursor = index
+    return parts if len(parts) > 1 else [segment]
+
+
+def _assert_or_repair_connective_heads(
+    segments: list[TokenSegment],
+    max_chars: int,
+    max_duration: float = 0.0,
+) -> list[TokenSegment]:
     if len(segments) <= 1:
         return segments
     repaired: list[TokenSegment] = [segments[0]]
@@ -676,7 +892,10 @@ def _assert_or_repair_connective_heads(segments: list[TokenSegment], max_chars: 
             continue
         moved = segment.tokens[:phrase_end]
         remaining = segment.tokens[phrase_end:]
-        if _normalized_len(previous.tokens + moved) <= max_chars:
+        if (
+            _normalized_len(previous.tokens + moved) <= max_chars
+            and (max_duration <= 0 or _token_duration(previous.tokens + moved) <= max_duration)
+        ):
             previous.tokens.extend(moved)
             previous.source = _source_with(previous.source, "boundary_repaired")
             if remaining:
@@ -694,33 +913,35 @@ def split_token_chain(
     fallback: bool = False,
     llm_splitter=None,
     llm_split_callback: Callable[[SplitPlanResult, int, int, int, str], None] | None = None,
-    llm_max_input_chars: int = 240,
-    llm_second_pass_max_input_chars: int = 240,
 ) -> list[Subtitle]:
     attempt_index = 0
     segments = [TokenSegment(tokens[:], "initial")]
 
-    def maybe_llm_candidate(segment: TokenSegment, pass_name: str, input_limit: int) -> BoundaryCandidate | None:
+    def maybe_llm_candidates(segment: TokenSegment, pass_name: str) -> list[BoundaryCandidate]:
         nonlocal attempt_index
-        text = _tokens_to_text(segment.tokens)
-        sentence_break_count = sum(1 for char in text if char in SENTENCE_BREAK_CHARS)
-        connective_break_count = sum(text.count(term) for term in JAPANESE_TRAILING_CONNECTIVE_TERMS)
+        if llm_splitter is None:
+            return []
+        capacity = getattr(
+            llm_splitter,
+            "split_input_capacity",
+            lambda chars: max(96, chars * 4),
+        )(max_chars)
+        planning_tokens: list[AlignedToken] = []
+        chars = 0
+        for token in segment.tokens:
+            token_chars = len(_normalized(token.text))
+            if planning_tokens and chars + token_chars > capacity:
+                break
+            planning_tokens.append(token)
+            chars += token_chars
+        if len(planning_tokens) < 2:
+            return []
+        planning_segment = TokenSegment(planning_tokens, segment.source)
         attempt_index += 1
-        if len(_normalized(text)) > input_limit or llm_splitter is None:
-            result = SplitPlanResult(
-                lines=None,
-                accepted=False,
-                reject_reason="skipped_input_too_large" if llm_splitter is not None else "llm_unavailable",
-                input_text=text,
-                sentence_break_count=sentence_break_count,
-                connective_break_count=connective_break_count,
-            )
-            if llm_split_callback is not None and llm_splitter is not None:
-                llm_split_callback(result, attempt_index, len(_normalized(text)), len(segment.tokens), pass_name)
-            return None
-        return _llm_boundary_candidate(
-            segment,
+        return _llm_boundary_candidates(
+            planning_segment,
             max_chars,
+            max_duration,
             llm_splitter,
             llm_split_callback,
             attempt_index,
@@ -731,26 +952,32 @@ def split_token_chain(
     completed: list[TokenSegment] = []
     while pending:
         segment = pending.pop(0)
-        if not _over_limit(segment, max_chars):
+        if not _over_limit(segment, max_chars, max_duration):
             completed.append(segment)
             continue
-        input_limit = llm_max_input_chars if not completed else llm_second_pass_max_input_chars
         pass_name = "llm_boundary" if not completed else "llm_boundary_retry"
-        deterministic_candidate = _best_boundary_candidate(segment.tokens, max_chars)
-        llm_candidate = None
-        if deterministic_candidate is None or deterministic_candidate.priority >= 4:
-            llm_candidate = maybe_llm_candidate(segment, pass_name, input_limit)
-        split_parts = _split_segment(
-            segment,
+        deterministic_candidate = _best_boundary_candidate(
+            segment.tokens,
             max_chars,
-            llm_candidate,
-            deterministic_candidate,
+            max_duration,
         )
+        llm_candidates: list[BoundaryCandidate] = []
+        if deterministic_candidate is None or deterministic_candidate.priority >= 4:
+            llm_candidates = maybe_llm_candidates(segment, pass_name)
+        if llm_candidates:
+            split_parts = _split_segment_at_candidates(segment, llm_candidates)
+        else:
+            split_parts = _split_segment(
+                segment,
+                max_chars,
+                max_duration,
+                deterministic_candidate=deterministic_candidate,
+            )
         if len(split_parts) == 1 and split_parts[0] is segment:
             completed.append(segment)
             continue
         pending = split_parts + pending
-    segments = _assert_or_repair_connective_heads(completed, max_chars)
+    segments = _assert_or_repair_connective_heads(completed, max_chars, max_duration)
     return _segments_to_subtitles(segments, fallback)
 
 

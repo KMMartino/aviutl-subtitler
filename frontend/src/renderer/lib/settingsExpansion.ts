@@ -5,6 +5,7 @@ export type SettingsExpansion = {
   server: boolean;
   python: boolean;
   ffmpeg: boolean;
+  ytDlp: boolean;
   alignment: boolean;
   env: boolean;
   cutSilence: boolean;
@@ -21,6 +22,7 @@ export function workflowFamily(workflow: WorkflowName): WorkflowFamily {
 export function defaultSettingsExpansion(readiness: {
   pythonReady: boolean;
   ffmpegReady: boolean;
+  ytDlpReady: boolean;
   alignmentInstalled: boolean;
   envExists: boolean;
   serverExists: boolean;
@@ -30,6 +32,7 @@ export function defaultSettingsExpansion(readiness: {
     server: !readiness.serverExists,
     python: !readiness.pythonReady,
     ffmpeg: !readiness.ffmpegReady,
+    ytDlp: !readiness.ytDlpReady,
     alignment: !readiness.alignmentInstalled,
     env: !readiness.envExists,
     cutSilence: false,

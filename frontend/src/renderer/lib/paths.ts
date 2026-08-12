@@ -42,3 +42,8 @@ export function defaultSidecarDir(inputPath: string): string {
   if (!inputPath) return "";
   return joinPath(dirname(inputPath), "subtitle_files");
 }
+
+export function defaultEditorialCheckpointPath(inputPath: string): string {
+  if (!inputPath) return "";
+  return joinPath(dirname(inputPath), `${basenameWithoutExt(inputPath)}-editorial.json`);
+}

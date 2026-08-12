@@ -56,10 +56,8 @@ class AlignmentPool:
             thread.join()
         if self._errors:
             raise self._errors[0]
-        results: list[AlignedChunk] = []
-        for index in sorted(self._results):
-            results.extend(sorted(self._results[index], key=lambda item: (item.chunk.start, item.chunk.end)))
-        return results
+        results = [aligned for group in self._results.values() for aligned in group]
+        return sorted(results, key=lambda item: (item.chunk.start, item.chunk.end, item.chunk.index))
 
     def _worker(self, worker_id: int) -> None:
         try:

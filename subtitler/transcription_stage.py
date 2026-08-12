@@ -13,7 +13,7 @@ from .errors import SubtitlerError
 from .glossary import GlossaryEntry, find_glossary, load_glossary
 from .models import AlignedChunk
 from .profiling import PipelineProfiler
-from .run_artifacts import write_aligned_text
+from .run_artifacts import write_aligned_text, write_aligned_tokens
 from .run_context import RunContext
 from .transcript_normalizer import backend_result_to_aligned_chunks
 from .transcription_backend import BackendTranscriptResult, TranscriptionBackend, TranscriptionRequest
@@ -98,6 +98,8 @@ def run_transcription_stage(
     aligned = backend_result_to_aligned_chunks(backend_result)
     if context.diagnostics_enabled and context.artifacts.aligned_text is not None:
         write_aligned_text(context.artifacts.aligned_text, aligned)
+    if context.sidecars_enabled and context.artifacts.aligned_tokens is not None:
+        write_aligned_tokens(context.artifacts.aligned_tokens, aligned)
     return TranscriptionStageOutcome(
         backend_result=backend_result,
         aligned=aligned,

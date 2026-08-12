@@ -1,7 +1,7 @@
 import unittest
 
-from subtitler.models import AlignedToken
-from subtitler.splitter import TokenSegment, _is_legal_boundary, _llm_boundary_candidate, split_token_chain
+from subtitler.models import AlignedToken, SplitPlanResult
+from subtitler.splitter import _boundary_options, _is_legal_boundary, split_token_chain
 
 
 def _tokens(text: str) -> list[AlignedToken]:
@@ -12,11 +12,16 @@ def _tokens(text: str) -> list[AlignedToken]:
 
 
 class FakeSplitPlanner:
-    def __init__(self, lines: list[str]) -> None:
-        self.lines = lines
+    def supports_multi_split(self) -> bool:
+        return False
 
-    def split_lines(self, text: str, max_chars: int) -> list[str]:
-        return self.lines
+    def split_input_capacity(self, max_chars: int) -> int:
+        return 120
+
+    def select_split_boundaries(
+        self, text: str, annotated_text: str, candidate_ids: list[str], max_chars: int, *, multiple: bool = False
+    ) -> SplitPlanResult:
+        return SplitPlanResult(selected_ids=[candidate_ids[0]], candidate_ids=candidate_ids, accepted=True)
 
 
 class TitleBoundaryTests(unittest.TestCase):
@@ -46,26 +51,16 @@ class TitleBoundaryTests(unittest.TestCase):
         self.assertEqual(subtitles[0].text, "ゴッド・オブ・ウォー、")
 
     def test_llm_split_inside_title_cluster_is_rejected(self) -> None:
-        result = []
-        segment = TokenSegment(_tokens("SummerGameFest、次の話です"), "initial")
-        candidate = _llm_boundary_candidate(
-            segment,
-            max_chars=12,
-            llm_splitter=FakeSplitPlanner(["Summer", "GameFest、次の話です"]),
-            llm_split_callback=lambda item, *_: result.append(item),
-            attempt_index=1,
-            pass_name="llm_boundary",
-        )
+        options = _boundary_options(_tokens("SummerGameFest、次の話です"), 12, 6.0, multiple=False)
 
-        self.assertIsNone(candidate)
-        self.assertEqual(result[0].reject_reason, "title_cluster_split")
+        self.assertNotIn(6, [option.index for option in options])
 
     def test_fallback_deterministic_split_still_returns_valid_subtitles(self) -> None:
         subtitles = split_token_chain(
             _tokens("SummerGameFest、次の話ですさらに続きます"),
             max_chars=12,
             max_duration=6.0,
-            llm_splitter=FakeSplitPlanner(["Summer", "GameFest、次の話ですさらに続きます"]),
+            llm_splitter=FakeSplitPlanner(),
         )
 
         self.assertGreaterEqual(len(subtitles), 2)

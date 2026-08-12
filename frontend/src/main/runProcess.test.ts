@@ -22,7 +22,7 @@ vi.mock("./python", () => ({
   }),
 }));
 
-import { cancelRun, shutdownActiveRun, startRun, submitSilenceReview, terminateProcessTree } from "./runProcess";
+import { cancelRun, shutdownActiveRun, startRun, submitBrollReview, submitSilenceReview, terminateProcessTree } from "./runProcess";
 
 class FixtureChild extends EventEmitter {
   pid = 43210;
@@ -123,6 +123,20 @@ describe("workflow process lifecycle", () => {
     );
   });
 
+  it("forces review cancellation immediately without waiting for a second attempt", () => {
+    const child = new FixtureChild();
+    mocks.spawn.mockReturnValue(child);
+    const { runId } = startRun(fixtureWindow() as never, {} as never, "python.exe", {} as never);
+    cancelRun(runId, true);
+    expect(mocks.spawnSync).toHaveBeenCalledWith(
+      "taskkill",
+      ["/PID", "43210", "/T", "/F"],
+      expect.objectContaining({ timeout: 5000 }),
+    );
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    child.emit("close", 1, null);
+  });
+
   it("app shutdown forces a pending tree even after its Python parent closed", () => {
     const child = new FixtureChild();
     const taskkill = new EventEmitter();
@@ -184,6 +198,45 @@ describe("workflow process lifecycle", () => {
     const write = vi.spyOn(child.stdin, "write");
     submitSilenceReview(runId, "review-1", [{ candidateId: "silence-0001", decision: "mark_and_reject" }]);
     expect(write).toHaveBeenCalledWith(expect.stringContaining('"decision":"mark_and_reject"'));
+    child.emit("close", 0, null);
+  });
+
+  it("persists an approved filename-only description before resuming B-roll planning", async () => {
+    const child = new FixtureChild();
+    mocks.spawn.mockReturnValue(child);
+    const { runId } = startRun(fixtureWindow() as never, {} as never, "python.exe", {} as never);
+    const candidate = {
+      id: "broll-review-0001",
+      assetId: "asset-1",
+      assetPath: "C:/media/battle.mp4",
+      title: "Battle",
+      mediaKind: "video",
+      startLine: 1,
+      endLine: 2,
+      sourceStartSec: 0,
+      sourceEndSec: 10,
+      confidence: 0.75,
+      reason: "Specific title match",
+      transcriptText: "The battle was difficult.",
+      descriptionRequired: true,
+    };
+    child.stdout.emit("data", Buffer.from(`@@SUBUTL_EVENT@@${JSON.stringify({
+      type: "broll-review-required",
+      reviewId: "review-1",
+      candidates: [candidate],
+    })}\n`));
+    const saveDescription = vi.fn().mockResolvedValue(undefined);
+    const write = vi.spyOn(child.stdin, "write");
+
+    await submitBrollReview(
+      runId,
+      "review-1",
+      [{ candidateId: candidate.id, decision: "describe", description: "Battle gameplay from start to finish." }],
+      saveDescription,
+    );
+
+    expect(saveDescription).toHaveBeenCalledWith("asset-1", "Battle gameplay from start to finish.");
+    expect(write).toHaveBeenCalledWith(expect.stringContaining('"type":"broll-review-result"'));
     child.emit("close", 0, null);
   });
 });

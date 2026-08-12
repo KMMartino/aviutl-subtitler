@@ -42,9 +42,15 @@ describe("preload bridge contract", () => {
     ["getWorkflowConfig", "config:get", ["hosted"]],
     ["saveWorkflowConfig", "config:save", ["local", { alignment: { language: "ja" } }]],
     ["analyzeMedia", "media:analyze", ["C:\\media\\sample.mkv"]],
+    ["chooseInputFiles", "dialog:input-files", ["C:\\media"]],
+    ["inspectEditorialCheckpoint", "editorial:inspect-checkpoint", ["C:\\media\\run-editorial.json"]],
+    ["listEditorialCheckpoints", "editorial:list-checkpoints", []],
+    ["listEditorialGames", "editorial:list-games", []],
+    ["rememberEditorialGame", "editorial:remember-game", ["Example Game"]],
+    ["removeEditorialCheckpoint", "editorial:remove-checkpoint", ["C:\\media\\run-editorial.json"]],
     ["getManagedLlamaStatus", "llama:status", ["vulkan", "b1234"]],
     ["startRun", "run:start", [{ workflow: "local", inputPath: "C:\\in.mkv" }]],
-    ["cancelRun", "run:cancel", ["run-1"]],
+    ["cancelRun", "run:cancel", ["run-1", false]],
   ])("maps %s to the expected IPC channel", async (method, channel, args) => {
     electron.invoke.mockResolvedValue("result");
     const call = electron.api?.[method] as (...values: unknown[]) => Promise<unknown>;

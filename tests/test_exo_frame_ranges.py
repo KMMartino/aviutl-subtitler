@@ -20,7 +20,11 @@ class ExoFrameRangeTests(unittest.TestCase):
 
         ranges = [
             (int(start), int(end))
-            for start, end in re.findall(r"start=(\d+)\nend=(\d+)", exo)
+            for start, end in re.findall(
+                r"start=(\d+)\nend=(\d+)\nlayer=\d+\noverlay=1\ncamera=0\n"
+                r"\[\d+\.0\]\n_name=テキスト",
+                exo,
+            )
         ]
         self.assertEqual(len(ranges), 3)
         self.assertTrue(all(end > start for start, end in ranges))

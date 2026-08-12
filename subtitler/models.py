@@ -23,6 +23,7 @@ class AudioChunk:
 class TranscriptChunk:
     chunk: AudioChunk
     text: str
+    error: str = ""
 
 
 @dataclass
@@ -107,21 +108,41 @@ class ExoMediaPlan:
     segments: list[ExoMediaSegment]
 
 
+@dataclass(frozen=True)
+class ExoCompositeMediaClip:
+    video_path: Path
+    audio_path: Path
+    segment: ExoMediaSegment
+
+
+@dataclass(frozen=True)
+class BrollPlacement:
+    id: str
+    asset_id: str
+    asset_path: Path
+    media_kind: Literal["video", "image"]
+    output_start_frame: int
+    output_end_frame: int
+    source_start_frame: int
+    confidence: float
+    reason: str
+    description: str = ""
+    has_audio: bool = False
+    scale_percent: float = 100.0
+    display_mode: Literal["cover", "contain", "overlay"] = "cover"
+
+
 @dataclass
 class SplitPlanResult:
-    lines: list[str] | None
+    selected_ids: list[str] | None
+    candidate_ids: list[str] = field(default_factory=list)
     raw_line_count: int = 0
-    clean_line_count: int = 0
+    valid_id_count: int = 0
     accepted: bool = False
     reject_reason: str = "none"
     input_text: str = ""
     raw_response: str = ""
-    cleaned_lines: list[str] = field(default_factory=list)
+    parsed_ids: list[str] = field(default_factory=list)
     sentence_break_count: int = 0
     connective_break_count: int = 0
-    partial_lines: list[str] = field(default_factory=list)
-    partial_rejected_lines: list[str] = field(default_factory=list)
-    partial_accept_count: int = 0
-    partial_reject_count: int = 0
-    accepted_prefix_chars: int = 0
-    remaining_text_after_partial: str = ""
+    request_attempts: list[dict[str, Any]] = field(default_factory=list)

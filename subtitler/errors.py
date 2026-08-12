@@ -13,6 +13,14 @@ class ModelLoadError(SubtitlerError):
     """A model could not be loaded."""
 
 
+class StructuredOutputIncompleteError(ModelLoadError):
+    """A hosted structured response ended before a complete result was available."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class TranscriptionError(SubtitlerError):
     """Transcription failed."""
 

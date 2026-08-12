@@ -60,7 +60,7 @@ describe("config patching", () => {
         transcriptionProvider: "gemini" as const,
         transcriptionModel: "gemini-3.5-flash",
         fallbackTranscriptionProvider: "openai" as const,
-        fallbackTranscriptionModel: "gpt-4o-mini-transcribe",
+        fallbackTranscriptionModel: "gpt-transcribe",
         cleanupProvider: "openai" as const,
         cleanupModel: "gpt-5.4-mini",
         envFile: ""
@@ -81,18 +81,18 @@ describe("config patching", () => {
         transcriber: "gemini",
         transcription_model: "gemini-3.5-flash",
         fallback_transcriber: "openai",
-        fallback_transcription_model: "gpt-4o-mini-transcribe"
+        fallback_transcription_model: "gpt-transcribe"
       },
       cleanup: { backend: "openai", api_model: "gpt-5.4-mini" },
       diagnostics: { profile: true }
     });
 
     expect(core.hosted?.fallbackTranscriptionProvider).toBe("openai");
-    expect(core.hosted?.fallbackTranscriptionModel).toBe("gpt-4o-mini-transcribe");
+    expect(core.hosted?.fallbackTranscriptionModel).toBe("gpt-transcribe");
 
     const next = applyCoreSettings({}, core, "hosted");
     expect(next.backend!.fallback_transcriber).toBe("openai");
-    expect(next.backend!.fallback_transcription_model).toBe("gpt-4o-mini-transcribe");
+    expect(next.backend!.fallback_transcription_model).toBe("gpt-transcribe");
   });
 
   it("applies Cut silence only to short workflows", () => {
@@ -104,6 +104,21 @@ describe("config patching", () => {
     expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.cut_silence_mode).toBe("off");
     expect(applyCoreSettings({}, core, "local").additional_settings?.render_cut_video).toBe(true);
     expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.render_cut_video).toBe(false);
+  });
+
+  it("defaults long streams to full transcription and preserves the optional high-activity scope", () => {
+    expect(extractCoreSettings({ workflow: {} }).longStream?.transcriptionScope).toBe("full");
+    const highActivity = extractCoreSettings({ workflow: { transcription_scope: "high-activity" } });
+    expect(highActivity.longStream?.transcriptionScope).toBe("high-activity");
+    expect(applyCoreSettings({}, highActivity, "hosted-long-stream").workflow?.transcription_scope).toBe("high-activity");
+    expect(applyCoreSettings({}, highActivity, "hosted").workflow?.transcription_scope).toBe("full");
+  });
+
+  it("round-trips the hosted editorial subtitle mode", () => {
+    const partial = extractCoreSettings({ additional_settings: { editorial_subtitle_mode: "emphasis" } });
+    expect(partial.additionalSettings?.editorialSubtitleMode).toBe("emphasis");
+    expect(applyCoreSettings({}, partial, "hosted-long-stream").additional_settings?.editorial_subtitle_mode).toBe("emphasis");
+    expect(applyCoreSettings({}, partial, "hosted").additional_settings?.editorial_subtitle_mode).toBe("full");
   });
 
   it("defaults hosted fallback transcription to the recommended model pair", () => {
@@ -124,7 +139,7 @@ describe("config patching", () => {
   it.each([
     ["openai", "gpt-5.4-mini", "medium", null],
     ["openai", "gpt-5.6-luna", "low", null],
-    ["gemini", "gemini-3.5-flash", null, "minimal"],
+    ["gemini", "gemini-3.6-flash", null, "minimal"],
   ] as const)("pins the tested cleanup tuning for %s:%s", (provider, model, reasoning, thinking) => {
     const next = applyCoreSettings({}, {
       audioTrack: 1,

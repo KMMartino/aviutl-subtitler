@@ -1,7 +1,14 @@
 import unittest
 
 from subtitler.models import AlignedToken, Subtitle
-from subtitler.subtitle_planner import _cleanup_windows, _left_merge_adjacent_subtitles, _strip_standard_sentence_periods
+from subtitler.subtitle_planner import (
+    _cap_subtitle_durations,
+    _cleanup_window_preserves_content,
+    _cleanup_windows,
+    _left_merge_adjacent_subtitles,
+    _move_leading_commas_to_previous_subtitle,
+    _strip_standard_sentence_periods,
+)
 
 
 def _sub(text: str, start: float, end: float, chain: int, part: int, source: str = "llm") -> Subtitle:
@@ -27,6 +34,29 @@ def _cleanup_sub(text: str, chain: int, cleanup_group: int | None) -> Subtitle:
 
 
 class SubtitleLeftMergeTests(unittest.TestCase):
+    def test_leading_japanese_comma_moves_to_previous_subtitle(self) -> None:
+        subtitles = [
+            _sub("前の発言", 0.0, 1.0, 0, 0),
+            Subtitle(
+                1.0,
+                2.0,
+                "、次の発言",
+                tokens=[
+                    AlignedToken("、", 1.0, 1.05, "char"),
+                    AlignedToken("次の発言", 1.05, 2.0, "char"),
+                ],
+                chain_index=1,
+                chain_part_index=0,
+            ),
+        ]
+
+        moved = _move_leading_commas_to_previous_subtitle(subtitles)
+
+        self.assertEqual(moved, 1)
+        self.assertEqual([subtitle.text for subtitle in subtitles], ["前の発言、", "次の発言"])
+        self.assertEqual([token.text for token in subtitles[0].tokens], ["前の発言", "、"])
+        self.assertEqual([token.text for token in subtitles[1].tokens], ["次の発言"])
+
     def test_left_merge_adjacent_subtitles_under_max_chars(self) -> None:
         subtitles = [
             _sub("短い", 0.0, 0.5, 0, 0),
@@ -106,3 +136,31 @@ class SubtitleLeftMergeTests(unittest.TestCase):
     def test_cleanup_window_can_cover_a_whole_vad_group(self) -> None:
         subtitles = [_cleanup_sub(str(index), 0, 7) for index in range(20)]
         self.assertEqual(_cleanup_windows(subtitles), [(0, 20)])
+
+    def test_cleanup_window_cap_is_honored_inside_a_vad_group(self) -> None:
+        subtitles = [_cleanup_sub(str(index), 0, 7) for index in range(5)]
+        self.assertEqual(_cleanup_windows(subtitles, 2), [(0, 2), (2, 4), (4, 5)])
+
+    def test_cleanup_window_rejects_cross_boundary_content_loss(self) -> None:
+        self.assertFalse(
+            _cleanup_window_preserves_content(
+                ["紹介してもいいかなとか考", "えたりはしております一応"],
+                ["紹介してもいいかなとか考", "一応"],
+            )
+        )
+
+    def test_cleanup_window_allows_punctuation_and_filler_cleanup(self) -> None:
+        self.assertTrue(
+            _cleanup_window_preserves_content(
+                ["えー、これはテストです。"],
+                ["これはテストです"],
+            )
+        )
+
+    def test_final_duration_cap_reapplies_after_boundary_touching(self) -> None:
+        subtitle = _sub("長い字幕", 1.0, 7.6, 0, 0)
+
+        _cap_subtitle_durations([subtitle], 6.0)
+
+        self.assertEqual(subtitle.end_time, 7.0)
+        self.assertIn("max_duration", subtitle.timing_adjustment)

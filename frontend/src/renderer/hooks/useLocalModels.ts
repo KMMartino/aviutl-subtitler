@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import type { AppSettings, CoreWorkflowSettings, HuggingFaceDownloaderStatus, LocalModelProfile, LocalModelStatus } from "../lib/types";
 import { applyLocalProfile, matchesLocalProfile } from "../lib/localProfileSettings";
+import { useI18n } from "../i18n";
 
 type Options = {
   settings: AppSettings | null;
@@ -12,6 +13,7 @@ type Options = {
 };
 
 export function useLocalModels({ settings, coreSettings, setCoreSettings, appendLog, setNotice, setManagedDeleteAction }: Options) {
+  const { t } = useI18n();
   const requestRevision = useRef(0);
   const [localModelStatus, setLocalModelStatus] = useState<LocalModelStatus | null>(null);
   const [localProfileStatuses, setLocalProfileStatuses] = useState<Record<string, LocalModelStatus>>({});
@@ -47,15 +49,15 @@ export function useLocalModels({ settings, coreSettings, setCoreSettings, append
   async function installHfDownloader() {
     if (hfDownloaderStatus?.ready) return;
     if (hfDownloaderStatus?.pythonReady && hfDownloaderStatus.pythonSource !== "managed") {
-      const target = hfDownloaderStatus.pythonPath || "the active Python runtime";
-      if (!window.confirm(`Install Hugging Face downloader packages into this non-managed Python runtime?\n\n${target}`)) return;
+      const target = hfDownloaderStatus.pythonPath || t("notice.activePython");
+      if (!window.confirm(t("notice.hfInstallConfirm", { target }))) return;
     }
     setInstallingHfDownloader(true);
-    appendLog(`\n$ Hugging Face downloader package install\n`);
+    appendLog(`\n$ ${t("notice.hfInstallLog")}\n`);
     try {
       const status = await window.subtitler.installHuggingFaceDownloader();
       setHfDownloaderStatus(status);
-      setNotice("Hugging Face downloader packages installed");
+      setNotice(t("notice.hfInstalled"));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -67,7 +69,7 @@ export function useLocalModels({ settings, coreSettings, setCoreSettings, append
     if (!settings) return;
     const verifyingExisting = Boolean(localModelStatus?.needsVerification);
     setDownloadingModels(true);
-    appendLog(`\n$ ${verifyingExisting ? "Verify existing model files" : "Hugging Face model download"}\n`);
+    appendLog(`\n$ ${verifyingExisting ? t("notice.verifyModelsLog") : t("notice.downloadModelsLog")}\n`);
     try {
       const status = await window.subtitler.downloadLocalProfile(settings.modelsDirectory, settings.localModelProfile, settings.modelDownloadMode ?? "direct");
       setLocalModelStatus(status);
@@ -77,7 +79,7 @@ export function useLocalModels({ settings, coreSettings, setCoreSettings, append
         const next = applyLocalProfile(coreSettings, status, profile);
         setCoreSettings(next);
       }
-      setNotice(verifyingExisting ? "Existing model files verified" : "Local model profile installed");
+      setNotice(verifyingExisting ? t("notice.modelsVerified") : t("notice.profileInstalled"));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -87,14 +89,14 @@ export function useLocalModels({ settings, coreSettings, setCoreSettings, append
 
   async function deleteLocalModels() {
     if (!settings || !localModelStatus?.managed) return;
-    if (!window.confirm("Delete this app-managed model profile from disk? User-selected model folders will not be touched.")) return;
+    if (!window.confirm(t("notice.deleteProfileConfirm"))) return;
     setManagedDeleteAction("models");
     try {
       const status = await window.subtitler.deleteManagedLocalProfile(settings.modelsDirectory, settings.localModelProfile);
       setLocalModelStatus(status);
       setLocalProfileStatuses((current) => ({ ...current, [status.profile]: status }));
       await refreshLocalModels(settings.modelsDirectory, settings.localModelProfile);
-      setNotice("Managed model profile deleted");
+      setNotice(t("notice.profileDeleted"));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {

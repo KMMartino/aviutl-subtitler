@@ -42,6 +42,32 @@ class TranscriptNormalizerTests(unittest.TestCase):
         self.assertTrue(chunks[0].fallback)
         self.assertEqual(chunks[0].tokens, [])
 
+    def test_segment_group_metadata_overrides_same_index_fine_region(self):
+        result = BackendTranscriptResult(
+            backend_name="test",
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    text="grouped",
+                    start=10.0,
+                    end=20.0,
+                    metadata={"vad_group_index": 7},
+                )
+            ],
+            speech_regions=[
+                SpeechRegion(
+                    index=1,
+                    start=1.0,
+                    end=2.0,
+                    metadata={"vad_group_index": 0},
+                )
+            ],
+        )
+
+        chunks = backend_result_to_aligned_chunks(result)
+
+        self.assertEqual(chunks[0].chunk.vad_group_index, 7)
+
     def test_speech_regions_convert_to_markers(self):
         markers = speech_regions_to_markers([SpeechRegion(index=9, start=2.0, end=4.0, activation=0.5)])
 

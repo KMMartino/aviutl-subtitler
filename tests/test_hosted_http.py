@@ -1,3 +1,4 @@
+import contextlib
 import io
 import unittest
 import urllib.error
@@ -33,6 +34,29 @@ def _http_error(code: int, detail: str = "failure", retry_after: str | None = No
 
 
 class HostedHttpTests(unittest.TestCase):
+    @mock.patch("subtitler.hosted_http.random.uniform", return_value=0.0)
+    @mock.patch("subtitler.hosted_http.time.sleep")
+    def test_retry_logs_distinguish_timeout_from_http_failure(self, _sleep, _uniform) -> None:
+        timeout_output = io.StringIO()
+        with mock.patch(
+            "subtitler.hosted_http.urllib.request.urlopen",
+            side_effect=[TimeoutError("timed out"), _Response(b'{"ok": true}')],
+        ), contextlib.redirect_stdout(timeout_output):
+            request_json("GET", "https://example.test", None, ModelLoadError, "failed")
+
+        http_output = io.StringIO()
+        with mock.patch(
+            "subtitler.hosted_http.urllib.request.urlopen",
+            side_effect=[_http_error(500), _Response(b'{"ok": true}')],
+        ), contextlib.redirect_stdout(http_output):
+            request_json("GET", "https://example.test", None, ModelLoadError, "failed")
+
+        self.assertIn("timed out after", timeout_output.getvalue())
+        self.assertNotIn("HTTP 500", timeout_output.getvalue())
+        self.assertIn("received HTTP 500 after", http_output.getvalue())
+        self.assertIn("Timeout limit:", timeout_output.getvalue())
+        self.assertIn("Timeout limit:", http_output.getvalue())
+
     @mock.patch("subtitler.hosted_http.random.uniform", return_value=0.25)
     @mock.patch("subtitler.hosted_http.time.sleep")
     @mock.patch("subtitler.hosted_http.urllib.request.urlopen")

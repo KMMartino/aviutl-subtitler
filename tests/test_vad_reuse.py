@@ -28,6 +28,31 @@ class VadReuseTests(unittest.TestCase):
         self.assertGreaterEqual(len(result), 2)
         self.assertTrue(all(chunk.start <= item.start < item.end <= chunk.end for item in result))
 
+    def test_hosted_recovery_coalesces_many_speech_islands(self) -> None:
+        class ManyIslandsSession:
+            def probabilities(self, samples, sample_rate, progress_callback=None):
+                probabilities = []
+                for _ in range(12):
+                    probabilities.extend([0.9] * 10)
+                    probabilities.extend([0.0] * 20)
+                return probabilities, 512
+
+        samples = np.ones(12 * 30 * 512, dtype=np.float32)
+        duration = len(samples) / 16000
+        chunk = AudioChunk(index=4, start=0.0, end=duration, samples=samples)
+
+        result = split_chunk_with_tighter_vad(
+            chunk,
+            16000,
+            session=ManyIslandsSession(),
+            recovery_min_silence_ms=400,
+            recovery_speech_pad_ms=200,
+            max_pieces=2,
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(item.end > item.start for item in result))
+
 
 if __name__ == "__main__":
     unittest.main()
