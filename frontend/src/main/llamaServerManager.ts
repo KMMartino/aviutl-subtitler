@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import extract from "extract-zip";
 import type { CurrentLlamaServerState, LlamaBackendId, LlamaBackendOption, LlamaReleaseAsset, LlamaReleaseCheck, ManagedLlamaStatus } from "../renderer/lib/types";
 import { downloadVerifiedArtifact, writeArtifactMetadata } from "./artifactIntegrity";
+import { extractZipArchive } from "./archiveExtractor";
 
 type GithubAsset = {
   name: string;
@@ -193,7 +193,7 @@ export async function downloadManagedLlamaServer(
   fs.rmSync(stagingDir, { recursive: true, force: true });
   fs.mkdirSync(stagingDir, { recursive: true });
   onLog(`[llama] extracting to staging directory\n`);
-  await extract(zipPath, { dir: stagingDir });
+  await extractZipArchive(zipPath, stagingDir);
   fs.rmSync(installDir, { recursive: true, force: true });
   fs.renameSync(stagingDir, installDir);
 

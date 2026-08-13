@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import extract from "extract-zip";
 import { runtimePaths, type RuntimePaths } from "./paths";
 import { downloadVerifiedArtifact, writeArtifactMetadata } from "./artifactIntegrity";
+import { extractZipArchive } from "./archiveExtractor";
 
 export type FfmpegStatus = {
   source: "path" | "managed" | "missing";
@@ -68,7 +68,7 @@ export async function downloadManagedFfmpeg(onLog: (text: string) => void = () =
   fs.rmSync(stagingDir, { recursive: true, force: true });
   fs.mkdirSync(stagingDir, { recursive: true });
   onLog(`[ffmpeg] extracting to staging directory\n`);
-  await extract(zipPath, { dir: stagingDir });
+  await extractZipArchive(zipPath, stagingDir);
   fs.rmSync(installDir, { recursive: true, force: true });
   fs.renameSync(stagingDir, installDir);
   writeArtifactMetadata(path.join(installDir, "artifact.json"), {
