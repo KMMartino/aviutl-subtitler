@@ -20,7 +20,7 @@ Implemented and covered by automated tests:
 - `AGENTS.md` requires every future boundary behavior or artifact-contract change to review and increment the earliest affected version.
 - Restart from checkpoint is exposed in the UI. Completed model stages are not repeated.
 - The per-source semantic prompt records continuity, subtraction, selection, and context-dependency evidence separately. Silence is explicitly neutral.
-- The project-wide pass creates continuity-led and selection-led proposals against the upper and lower requested duration bounds.
+- The project-wide pass selects one optimal proposal within the requested duration range, chooses one intended kept duration per edit, and resolves redundant overlapping candidates instead of presenting competing upper- and lower-bound plans.
 - Canonical JSON and a self-contained readable HTML report are written throughout the run, including on interruption.
 - Actual hosted costs are accumulated in the artifact and report, with an initial project safety policy of $10 per source hour. Existing transcription estimates and approval guards remain active.
 
@@ -44,7 +44,7 @@ Build the desktop app and use a small, non-reference project containing two or t
 3. full-transcript default and optional high-activity setting;
 4. interruption during vision or semantic analysis followed by restart from checkpoint;
 5. cross-file continuation in the HTML/JSON result;
-6. whether continuity-led and selection-led recommendations are editorially distinct and useful;
+6. whether the single selected plan lands within the requested duration range without redundant local suggestions;
 7. actual cost and report readability.
 
 Do not use the FF16 example as a required fixture or implementation dependency.

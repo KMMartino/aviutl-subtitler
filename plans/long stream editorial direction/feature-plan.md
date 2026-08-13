@@ -118,7 +118,8 @@ global_threads[]
   connections[]
   conflicts[]
   duration_budget
-  editorial_blend_summary
+  editorial_direction_summary
+  optimal_plan[]
 ```
 
 The cumulative snapshot should be compact enough to pass forward cheaply. Full earlier evidence remains retrievable by stable IDs rather than being inserted into every later model prompt.

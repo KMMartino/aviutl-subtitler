@@ -10,7 +10,6 @@ from typing import Any
 
 from .editorial_presentation import (
     PresentedEditorialItem,
-    backup_suggestion,
     category_label,
     presented_editorial_items,
     primary_suggestion,
@@ -129,7 +128,7 @@ def _recommendation_card(presented: PresentedEditorialItem, screenshot_url: str,
     return f"""<article class="card">
 <div class="recommendation-head"><h3>{_escape(presented.label)}</h3><span class="badge">{_escape(category_label(presented.category, locale))}</span></div>
 <p class="muted">{_escape(presented.source.get('original_name', ''))} · {_timecode(item.get('start_ms', 0))}–{_timecode(item.get('end_ms', 0))}</p>
-<div class="editorial-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Editorial suggestion', '編集提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div><div class="direction"><strong>{_tr(locale, 'Backup option', '代替案')}</strong>{_escape(backup_suggestion(presented, locale))}</div></div></div>
+<div class="editorial-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Editorial suggestion', '編集提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div></div></div>
 </article>"""
 
 
@@ -147,7 +146,7 @@ def _editorial_group_card(
     return f"""<article class="card editorial-pair">
 <div class="editorial-primary"><div class="recommendation-head"><h3>{_escape(recommendation.label)}</h3><span class="badge">{_escape(category_label(recommendation.category, locale))}</span></div>
 <p class="muted">{_escape(recommendation.source.get('original_name', ''))} · {_timecode(item.get('start_ms', 0))}–{_timecode(item.get('end_ms', 0))}</p>
-<div class="editorial-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Editorial suggestion', '編集提案')}</strong>{_escape(primary_suggestion(recommendation, locale))}</div><div class="direction"><strong>{_tr(locale, 'Backup option', '代替案')}</strong>{_escape(backup_suggestion(recommendation, locale))}</div></div></div></div>
+<div class="editorial-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Editorial suggestion', '編集提案')}</strong>{_escape(primary_suggestion(recommendation, locale))}</div></div></div></div>
 <aside class="linked-editorial"><h3>{_tr(locale, 'Linked narration and accents', '関連するナレーション・演出')}</h3><div class="linked-stack">{linked_cards}</div></aside>
 </article>"""
 
@@ -160,7 +159,7 @@ def _linked_item_card(presented: PresentedEditorialItem, screenshot_url: str, lo
         points = item.get("talking_points") if isinstance(item.get("talking_points"), list) else []
         bullets = "".join(f"<li>{_escape(point)}</li>" for point in points)
         return f"""<section class="linked-card narration"><div class="recommendation-head"><h4>{_tr(locale, 'Narration', 'ナレーション')} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{screenshot}<p><strong>{_escape(item.get('purpose') or _tr(locale, 'Narration opportunity', 'ナレーション候補'))}</strong></p><p>{_escape(item.get('memory_jog', ''))}</p>{f'<ul>{bullets}</ul>' if bullets else ''}</section>"""
-    return f"""<section class="linked-card"><div class="recommendation-head"><h4>{_tr(locale, 'Creative accent', '演出案')} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Suggestion', '提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div><div class="direction"><strong>{_tr(locale, 'Backup', '代替')}</strong>{_escape(backup_suggestion(presented, locale))}</div></div></section>"""
+    return f"""<section class="linked-card"><div class="recommendation-head"><h4>{_tr(locale, 'Creative accent', '演出案')} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Suggestion', '提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div></div></section>"""
 
 
 def _standalone_linked_card(
@@ -311,23 +310,23 @@ def _director_section(editorial_map: dict[str, Any], recommendations: list[Any],
 
 
 def _strategy_section(editorial_map: dict[str, Any], recommendations: list[Any], locale: str) -> str:
-    blend = str(editorial_map.get("editorial_blend_summary") or "").strip()
+    direction = str(editorial_map.get("editorial_direction_summary") or "").strip()
     budget = editorial_map.get("duration_budget") if isinstance(editorial_map.get("duration_budget"), dict) else {}
     by_id = {
         str(item.get("id")): item
         for item in recommendations
         if isinstance(item, dict) and item.get("id")
     }
-    continuity = _strategy_plan(editorial_map.get("continuity_led_plan"), by_id)
-    selection = _strategy_plan(editorial_map.get("selection_led_plan"), by_id)
-    if not blend and not continuity and not selection:
-        return f'<section><h2>{_tr(locale, "Duration strategies", "時間配分方針")}</h2><p class="empty">{_tr(locale, "Global reconciliation has not run yet.", "全体調整はまだ実行されていません。")}</p></section>'
+    plan = _strategy_plan(editorial_map.get("optimal_plan"), by_id, locale)
+    if not direction and not plan:
+        return f'<section><h2>{_tr(locale, "Editorial direction", "編集方針")}</h2><p class="empty">{_tr(locale, "Global reconciliation has not run yet.", "全体調整はまだ実行されていません。")}</p></section>'
     warning = str(budget.get("warning") or "").strip()
     no_changes = _tr(locale, "No additional changes proposed.", "追加の変更提案はありません。")
-    return f"""<section><h2>{_tr(locale, 'Overall direction', '全体方針')}</h2><article class="card"><p>{_escape(blend)}</p>{f'<p class="muted">{_escape(warning)}</p>' if warning else ''}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Primary, continuity-preserving plan', '主案：連続性を守る構成')}</strong>{continuity or no_changes}</div><div class="direction"><strong>{_tr(locale, 'Backup, shorter plan', '代替案：短い構成')}</strong>{selection or no_changes}</div></div></article></section>"""
+    estimate = _estimated_duration_note(budget, locale)
+    return f"""<section><h2>{_tr(locale, 'Overall direction', '全体方針')}</h2><article class="card"><p>{_escape(direction)}</p>{estimate}{f'<p class="muted">{_escape(warning)}</p>' if warning else ''}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Selected editorial plan', '選択された編集方針')}</strong>{plan or no_changes}</div></div></article></section>"""
 
 
-def _strategy_plan(value: Any, by_id: dict[str, dict[str, Any]]) -> str:
+def _strategy_plan(value: Any, by_id: dict[str, dict[str, Any]], locale: str) -> str:
     if not isinstance(value, list):
         return ""
     items = []
@@ -338,8 +337,28 @@ def _strategy_plan(value: Any, by_id: dict[str, dict[str, Any]]) -> str:
         if recommendation is None:
             continue
         label = recommendation.get("reason") or decision.get("reason") or decision.get("recommendation_id")
-        items.append(f"<li>{_escape(label)}</li>")
+        kept_ms = _integer(decision.get("selected_kept_ms"))
+        kept = _duration(kept_ms, locale)
+        target = (
+            f' <span class="muted">({_tr(locale, "keep about", "残す長さの目安")} '
+            f"{_escape(kept)})</span>"
+            if kept_ms > 0
+            else ""
+        )
+        items.append(
+            f"<li>{_escape(label)}{target}</li>"
+        )
     return f"<ol>{''.join(items)}</ol>" if items else ""
+
+
+def _estimated_duration_note(budget: dict[str, Any], locale: str) -> str:
+    estimated = _integer(budget.get("estimated_final_ms"))
+    if estimated <= 0:
+        return ""
+    return (
+        f'<p class="muted">{_tr(locale, "Estimated final duration", "完成尺の目安")}: '
+        f"{_escape(_duration(estimated, locale))}</p>"
+    )
 
 
 def _write_editorial_screenshots(
@@ -422,6 +441,13 @@ def _timecode(value: Any) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _integer(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _coverage_summary(artifact: dict[str, Any], locale: str = "en") -> str:

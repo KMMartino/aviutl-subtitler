@@ -54,6 +54,27 @@ class EditorialReportTests(unittest.TestCase):
                 "continuity_case": "Preserves geography",
                 "subtraction_case": "Already established",
                 "selection_case": "Keep the arrival",
+            }, {
+                "id": "recommendation-2",
+                "source_id": project["sources"][0]["source_id"],
+                "start_ms": 21_000,
+                "end_ms": 25_000,
+                "reason": "Unselected detour",
+                "disposition": "condense",
+                "presentation_mode": "live_excerpt",
+                "confidence": 0.7,
+            }]
+            project["editorial_map"]["global_reconciliation"]["status"] = "complete"
+            project["editorial_map"]["editorial_direction_summary"] = "Use one balanced plan."
+            project["editorial_map"]["duration_budget"] = {
+                "estimated_final_ms": 4_200_000,
+                "warning": "",
+            }
+            project["editorial_map"]["optimal_plan"] = [{
+                "recommendation_id": "recommendation-1",
+                "priority": 1,
+                "reason": "Best edit",
+                "selected_kept_ms": 5_000,
             }]
             project["editorial_map"]["narration_briefs"] = [{
                 "id": "narration-1",
@@ -94,7 +115,7 @@ class EditorialReportTests(unittest.TestCase):
 
             rendered = render_editorial_html(project)
             self.assertIn("Editorial suggestion", rendered)
-            self.assertIn("Backup option", rendered)
+            self.assertNotIn("Backup option", rendered)
             self.assertNotIn("Continuity-first case", rendered)
             self.assertNotIn("Selection-first case", rendered)
             self.assertNotIn(project["sources"][0]["source_id"], rendered)
@@ -102,6 +123,8 @@ class EditorialReportTests(unittest.TestCase):
             self.assertIn("1h 00m–1h 30m", rendered)
             self.assertIn("Repeated &lt;route&gt;", rendered)
             self.assertNotIn("Repeated <route>", rendered)
+            self.assertNotIn("Unselected detour", rendered)
+            self.assertIn("Selected editorial plan", rendered)
             self.assertIn('class="card editorial-pair"', rendered)
             self.assertIn("Linked narration and accents", rendered)
             self.assertIn("Bridge the repeated route", rendered)

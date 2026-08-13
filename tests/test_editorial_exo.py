@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,9 +124,14 @@ class EditorialExoTests(unittest.TestCase):
             self.assertIn(f"file={first.resolve()}", exo)
             self.assertIn(f"file={second_video.resolve()}", exo)
             self.assertIn(f"file={second_audio.resolve()}", exo)
+            self.assertEqual(exo.count(f"file={second_audio.resolve()}"), 2)
             self.assertIn("start=601\nend=1320\nlayer=1", exo)
-            self.assertIn("start=661\nend=721\nlayer=3", exo)
-            self.assertIn("start=721\nend=841\nlayer=6", exo)
+            self.assertRegex(
+                exo,
+                rf"(?ms)start=601\nend=1320\nlayer=3\n.*?file={re.escape(str(second_audio.resolve()))}",
+            )
+            self.assertIn("start=661\nend=721\nlayer=4", exo)
+            self.assertIn("start=721\nend=841\nlayer=7", exo)
             self.assertNotIn("_name=カスタムオブジェクト", exo)
             self.assertIn(
                 encode_text_for_exo(
@@ -163,6 +169,52 @@ class EditorialExoTests(unittest.TestCase):
             self.assertNotIn(encode_text_for_exo("Part 1: gameplay.mkv"), exo)
             self.assertNotIn("_name=カスタムオブジェクト", exo)
             self.assertNotIn(encode_text_for_exo(source_id), exo)
+
+    def test_simultaneous_editorial_marker_layers_are_staggered_top_to_bottom(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "gameplay.mkv"
+            source_path.write_bytes(b"media")
+            artifact = create_editorial_project(
+                [EditorialSourceInput(source_path, 10_000, frame_rate=60)],
+                EditorialProjectOptions("Run", "Tell the story", 5_000, 9_000),
+            )
+            source_id = artifact["sources"][0]["source_id"]
+            artifact["editorial_map"]["recommendations"] = [
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "disposition": "omit"},
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "disposition": "condense"},
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "disposition": "keep"},
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "disposition": "connect"},
+            ]
+            artifact["editorial_map"]["narration_briefs"] = [
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "purpose": "Bridge it"}
+            ]
+            artifact["editorial_map"]["creative_suggestions"] = [
+                {"source_id": source_id, "start_ms": 1_000, "end_ms": 2_000, "type": "punch_in", "suggestion": "Punch in"}
+            ]
+
+            output = root / "staggered.exo"
+            write_editorial_exo(output, artifact)
+            exo = output.read_text(encoding="shift_jis")
+
+        positions = [_object_y_for_layer(exo, layer) for layer in range(4, 10)]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(len(set(positions)), 6)
+        self.assertLess(positions[0], 0)
+        self.assertGreater(positions[-1], 0)
+
+
+def _object_y_for_layer(exo: str, layer: int) -> float:
+    match = re.search(
+        rf"(?ms)^\[\d+\]\nstart=61\nend=121\nlayer={layer}\n.*?(?=^\[\d+\]\nstart=|\Z)",
+        exo,
+    )
+    if match is None:
+        raise AssertionError(f"No marker object found on layer {layer}")
+    values = re.findall(r"(?m)^Y=(-?\d+(?:\.\d+)?)$", match.group(0))
+    if not values:
+        raise AssertionError(f"No Y position found on layer {layer}")
+    return float(values[-1])
 
 
 if __name__ == "__main__":

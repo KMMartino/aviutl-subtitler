@@ -179,7 +179,7 @@ class EditorialAnalysisTests(unittest.TestCase):
         self.assertEqual(suggestion["presentation_mode"], "live_excerpt")
         self.assertEqual(suggestion["confidence"], 1.0)
 
-    def test_global_reconciliation_uses_duration_bounds_as_two_editorial_plans(self) -> None:
+    def test_global_reconciliation_selects_one_plan_within_duration_range(self) -> None:
         class GlobalProvider(_FakeProvider):
             def complete_structured(
                 self,
@@ -192,16 +192,17 @@ class EditorialAnalysisTests(unittest.TestCase):
                 self.prompts.append(prompt)
                 return json.dumps({
                     "duration_budget": {
-                        "continuity_led_estimated_ms": 5_000,
-                        "selection_led_estimated_ms": 3_000,
-                        "lower_bound_safe": True,
-                        "upper_bound_safe": True,
+                        "source_total_ms": 10_000,
+                        "target_min_ms": 3_000,
+                        "target_max_ms": 5_000,
+                        "estimated_final_ms": 4_200,
+                        "within_target_range": True,
+                        "warning": "",
                     },
-                    "editorial_blend_summary": "Preserve the encounter and select from repeated setup.",
-                    "continuity_led_plan": [{"recommendation_id": "rec-1", "priority": 1, "reason": "Safe trim"}],
-                    "selection_led_plan": [
-                        {"recommendation_id": "invented", "priority": 0, "reason": "Invalid"},
-                        {"recommendation_id": "rec-1", "priority": 2, "reason": "Representative excerpt"},
+                    "editorial_direction_summary": "Preserve the encounter and trim repeated setup.",
+                    "optimal_plan": [
+                        {"recommendation_id": "invented", "priority": 0, "reason": "Invalid", "selected_kept_ms": 0},
+                        {"recommendation_id": "rec-1", "priority": 1, "reason": "Representative excerpt", "selected_kept_ms": 2_500},
                     ],
                 })
 
@@ -214,14 +215,18 @@ class EditorialAnalysisTests(unittest.TestCase):
             "must_keep_notes": [],
             "de_emphasize_notes": [],
             "sources": [{"source_id": "source-1", "order": 0, "duration_ms": 10_000, "result": {}, "stages": {}}],
-            "editorial_map": {"recommendations": [{"id": "rec-1", "source_id": "source-1", "start_ms": 0, "end_ms": 4_000}]},
+            "editorial_map": {"recommendations": [{
+                "id": "rec-1", "source_id": "source-1", "start_ms": 0, "end_ms": 4_000,
+                "estimated_kept_min_ms": 1_000, "estimated_kept_max_ms": 2_000,
+            }]},
         })
 
         self.assertIn("Requested lower final duration ms: 3000", provider.prompts[0])
-        self.assertIn("continuity-led", provider.prompts[0])
-        self.assertIn("selection-led", provider.prompts[0])
+        self.assertIn("Preferred midpoint final duration ms: 4000", provider.prompts[0])
+        self.assertIn("exactly one editorial plan", provider.prompts[0])
         self.assertEqual(result["duration_budget"]["target_max_ms"], 5_000)
-        self.assertEqual([item["recommendation_id"] for item in result["selection_led_plan"]], ["rec-1"])
+        self.assertEqual([item["recommendation_id"] for item in result["optimal_plan"]], ["rec-1"])
+        self.assertEqual(result["optimal_plan"][0]["selected_kept_ms"], 2_000)
 
     def test_global_reconciliation_respects_checkpoint_output_locale(self) -> None:
         class GlobalProvider(_FakeProvider):
@@ -379,12 +384,16 @@ class EditorialAnalysisTests(unittest.TestCase):
         result = review_editorial_project(
             provider=provider,
             project=project,
-            reconciliation={"editorial_blend_summary": "Keep the payoff"},
+            reconciliation={
+                "editorial_direction_summary": "Keep the payoff",
+                "optimal_plan": [{"recommendation_id": "rec-1"}],
+            },
         )
 
         self.assertEqual(provider.operation, "editorial_director")
         self.assertIsNotNone(provider.response_schema)
         self.assertIn("pacing across the complete arc", provider.prompts[0])
+        self.assertIn("Do not create an alternate shorter or longer plan", provider.prompts[0])
         self.assertEqual(
             [item["recommendation_id"] for item in result["priority_changes"]],
             ["rec-1"],

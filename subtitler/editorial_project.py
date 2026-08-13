@@ -34,7 +34,7 @@ EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
     "visual_learning": 5,
     "semantic_spans": 2,
     "local_reconciliation": 1,
-    "global_reconciliation": 3,
+    "global_reconciliation": 4,
 }
 LEGACY_EDITORIAL_STAGE_VERSIONS = {stage: 1 for stage in EDITORIAL_PIPELINE_STAGES}
 CheckpointStatus = Literal["pending", "in_progress", "complete", "failed"]
@@ -214,7 +214,8 @@ def create_editorial_project(
             "connections": [],
             "conflicts": [],
             "duration_budget": None,
-            "editorial_blend_summary": None,
+            "editorial_direction_summary": None,
+            "optimal_plan": [],
             "director_review": None,
             "director_model": None,
         },
@@ -575,6 +576,8 @@ def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
     editorial_map.setdefault("timeline_coverage", [])
     editorial_map.setdefault("director_review", None)
     editorial_map.setdefault("director_model", None)
+    editorial_map.setdefault("editorial_direction_summary", None)
+    editorial_map.setdefault("optimal_plan", [])
 
 
 def _validate_options(options: EditorialProjectOptions) -> None:

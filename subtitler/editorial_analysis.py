@@ -193,22 +193,20 @@ GLOBAL_EDITORIAL_RESPONSE_SCHEMA = _strict_object(
                 "source_total_ms": _INTEGER,
                 "target_min_ms": _INTEGER,
                 "target_max_ms": _INTEGER,
-                "continuity_led_estimated_ms": _INTEGER,
-                "selection_led_estimated_ms": _INTEGER,
-                "lower_bound_safe": _BOOLEAN,
-                "upper_bound_safe": _BOOLEAN,
+                "estimated_final_ms": _INTEGER,
+                "within_target_range": _BOOLEAN,
                 "warning": _STRING,
             }
         ),
-        "editorial_blend_summary": _STRING,
-        "continuity_led_plan": _array(
+        "editorial_direction_summary": _STRING,
+        "optimal_plan": _array(
             _strict_object(
-                {"recommendation_id": _STRING, "priority": _INTEGER, "reason": _STRING}
-            )
-        ),
-        "selection_led_plan": _array(
-            _strict_object(
-                {"recommendation_id": _STRING, "priority": _INTEGER, "reason": _STRING}
+                {
+                    "recommendation_id": _STRING,
+                    "priority": _INTEGER,
+                    "reason": _STRING,
+                    "selected_kept_ms": _INTEGER,
+                }
             )
         ),
     }
@@ -620,7 +618,7 @@ def reconcile_editorial_project(
     provider: EditorialPlanningProvider,
     project: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build two coherent, non-destructive plans at the requested duration bounds."""
+    """Select one coherent, non-destructive plan within the requested duration range."""
     recommendations = [
         _compact_recommendation(item)
         for item in project.get("editorial_map", {}).get("recommendations", [])
@@ -646,7 +644,10 @@ def reconcile_editorial_project(
             }
         )
     language_rule = output_language_instruction(project.get("output_locale", "en"))
-    prompt = f"""Task: reconcile a completed multi-source editorial analysis into two suggestion-only project plans.
+    target_midpoint_ms = (
+        int(project["target_duration_min_ms"]) + int(project["target_duration_max_ms"])
+    ) // 2
+    prompt = f"""Task: reconcile a completed multi-source editorial analysis into one optimal suggestion-only project plan.
 
 Output language: {language_rule}
 
@@ -655,20 +656,25 @@ Objective: {project['objective']}
 Total source duration ms: {sum(int(item['duration_ms']) for item in project['sources'])}
 Requested lower final duration ms: {project['target_duration_min_ms']}
 Requested upper final duration ms: {project['target_duration_max_ms']}
+Preferred midpoint final duration ms: {target_midpoint_ms}
 Must-keep notes: {json.dumps(project.get('must_keep_notes', []), ensure_ascii=False)}
 Subjects to de-emphasize: {json.dumps(project.get('de_emphasize_notes', []), ensure_ascii=False)}
 
 Rules:
 - This is a plan only. Never claim that media has been cut, moved, or rendered.
-- The upper-bound plan is continuity-led: start intact, protect texture and meaningful silence, and justify removals.
-- The lower-bound plan is selection-led: choose the material that earns inclusion and add required context or narration.
-- Do not apply uniform compression. Blend the priors per scene and thread.
+- Return exactly one editorial plan, not upper-bound/lower-bound variants and not primary/backup alternatives.
+- Treat the complete requested range as acceptable and prefer its midpoint when quality is otherwise equal.
+- For each selected recommendation choose one selected_kept_ms between that candidate's estimated kept minimum and maximum. This is the single intended strength of that edit.
+- Start from the recording intact, but use selection-led judgment where repetition or weak material must earn inclusion. Blend these priors internally; never expose them as competing plans.
+- Select only recommendations that belong in the final plan. Unselected candidate recommendations mean leave that material intact.
+- Resolve redundant or substantially similar overlapping recommendations by selecting only the strongest one. Distinct complementary perspectives may overlap when they prescribe genuinely different work, such as a structural edit plus an earned creative accent.
+- Do not apply uniform compression. Choose the best action independently for each scene and thread, then check the resulting whole-project duration.
 - Silence alone is never evidence for removal.
 - File boundaries have no editorial meaning. Connect related moments across them normally.
 - Protect causality, unique payoffs, explicit must-keeps, and uncertain quiet material.
-- If a requested bound is unsafe, say so rather than inventing a feasible plan.
+- If the requested range is unsafe, say so rather than inventing a feasible plan.
 - Refer only to recommendation IDs supplied below.
-- Timeline coverage is gap-free. Ranges marked leave_as_is have no edit marker and remain intact in both plans unless a future analysis creates a supported recommendation; do not silently count those ranges as removed.
+- Timeline coverage is gap-free. Ranges marked leave_as_is have no edit marker and remain intact unless a future analysis creates a supported recommendation; do not silently count those ranges as removed.
 
 Ordered source summaries:
 {json.dumps(source_summaries, ensure_ascii=False, separators=(',', ':'))}
@@ -683,12 +689,10 @@ Return one JSON object only:
   "conflicts": [{{"recommendation_ids":[], "reason":"", "suggested_resolution":""}}],
   "duration_budget": {{
     "source_total_ms": 0, "target_min_ms": 0, "target_max_ms": 0,
-    "continuity_led_estimated_ms": 0, "selection_led_estimated_ms": 0,
-    "lower_bound_safe": true, "upper_bound_safe": true, "warning": ""
+    "estimated_final_ms": 0, "within_target_range": true, "warning": ""
   }},
-  "editorial_blend_summary": "explain how different scenes use the two priors",
-  "continuity_led_plan": [{{"recommendation_id":"", "priority":0, "reason":""}}],
-  "selection_led_plan": [{{"recommendation_id":"", "priority":0, "reason":""}}]
+  "editorial_direction_summary": "explain the single chosen project-wide direction",
+  "optimal_plan": [{{"recommendation_id":"", "priority":0, "reason":"", "selected_kept_ms":0}}]
 }}
 """
     parsed = _parse_response(
@@ -701,23 +705,23 @@ Return one JSON object only:
     )
     known_ids = {item["id"] for item in recommendations if item.get("id")}
     duration = parsed.get("duration_budget") if isinstance(parsed.get("duration_budget"), dict) else {}
+    estimated_final_ms = _non_negative_int(duration.get("estimated_final_ms"))
+    target_min_ms = int(project["target_duration_min_ms"])
+    target_max_ms = int(project["target_duration_max_ms"])
     return {
         "global_threads": _object_list(parsed.get("global_threads")),
         "connections": _object_list(parsed.get("connections")),
         "conflicts": _object_list(parsed.get("conflicts")),
         "duration_budget": {
             "source_total_ms": sum(int(item["duration_ms"]) for item in project["sources"]),
-            "target_min_ms": int(project["target_duration_min_ms"]),
-            "target_max_ms": int(project["target_duration_max_ms"]),
-            "continuity_led_estimated_ms": _non_negative_int(duration.get("continuity_led_estimated_ms")),
-            "selection_led_estimated_ms": _non_negative_int(duration.get("selection_led_estimated_ms")),
-            "lower_bound_safe": bool(duration.get("lower_bound_safe", False)),
-            "upper_bound_safe": bool(duration.get("upper_bound_safe", False)),
+            "target_min_ms": target_min_ms,
+            "target_max_ms": target_max_ms,
+            "estimated_final_ms": estimated_final_ms,
+            "within_target_range": target_min_ms <= estimated_final_ms <= target_max_ms,
             "warning": _text(duration.get("warning")),
         },
-        "editorial_blend_summary": _text(parsed.get("editorial_blend_summary")),
-        "continuity_led_plan": _normalize_plan(parsed.get("continuity_led_plan"), known_ids),
-        "selection_led_plan": _normalize_plan(parsed.get("selection_led_plan"), known_ids),
+        "editorial_direction_summary": _text(parsed.get("editorial_direction_summary")),
+        "optimal_plan": _normalize_plan(parsed.get("optimal_plan"), known_ids, recommendations),
     }
 
 
@@ -728,10 +732,15 @@ def review_editorial_project(
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
     """Perform a separate project-wide director review without mutating edit suggestions."""
+    selected_ids = {
+        str(item.get("recommendation_id"))
+        for item in reconciliation.get("optimal_plan", [])
+        if isinstance(item, dict) and str(item.get("recommendation_id") or "")
+    }
     recommendations = [
         _compact_recommendation(item)
         for item in project.get("editorial_map", {}).get("recommendations", [])
-        if isinstance(item, dict)
+        if isinstance(item, dict) and str(item.get("id") or "") in selected_ids
     ][:1200]
     source_summaries = []
     for source in sorted(project.get("sources", []), key=lambda item: item.get("order", 0)):
@@ -795,6 +804,8 @@ Rules:
 - Refer only to supplied recommendation IDs in priority_changes and protected_moments.
 - Prioritize no more than 12 changes and protect no more than 12 moments.
 - Treat the existing reconciliation as evidence, not an instruction that must be endorsed.
+- Review the one selected optimal plan. Do not create an alternate shorter or longer plan.
+- Do not restate a sound local recommendation as a second option. Use priority_changes only to correct a concrete flaw in the selected plan.
 
 Source summaries:
 {json.dumps(source_summaries, ensure_ascii=False, separators=(',', ':'))}
@@ -1334,18 +1345,36 @@ def _compact_recommendation(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_plan(value: Any, known_ids: set[str]) -> list[dict[str, Any]]:
+def _normalize_plan(
+    value: Any,
+    known_ids: set[str],
+    recommendations: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
     result = []
     seen: set[str] = set()
+    by_id = {str(item.get("id")): item for item in recommendations}
     for item in _object_list(value):
         recommendation_id = str(item.get("recommendation_id") or "")
         if recommendation_id not in known_ids or recommendation_id in seen:
             continue
+        recommendation = by_id[recommendation_id]
+        lower = _non_negative_int(recommendation.get("estimated_kept_min_ms"))
+        source_length = max(
+            0,
+            _non_negative_int(recommendation.get("end_ms"))
+            - _non_negative_int(recommendation.get("start_ms")),
+        )
+        upper = _non_negative_int(recommendation.get("estimated_kept_max_ms"))
+        if upper <= 0:
+            upper = source_length
+        upper = max(lower, min(source_length, upper))
+        selected = max(lower, min(upper, _non_negative_int(item.get("selected_kept_ms"))))
         result.append(
             {
                 "recommendation_id": recommendation_id,
                 "priority": _non_negative_int(item.get("priority")),
                 "reason": _text(item.get("reason")),
+                "selected_kept_ms": selected,
             }
         )
         seen.add(recommendation_id)

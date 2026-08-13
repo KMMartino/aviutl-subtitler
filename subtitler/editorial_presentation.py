@@ -35,6 +35,7 @@ def presented_editorial_items(artifact: dict[str, Any]) -> list[PresentedEditori
     }
     raw_items: list[tuple[EditorialItemKind, int, dict[str, Any]]] = []
     editorial_map = artifact.get("editorial_map", {})
+    selected_recommendations = _selected_recommendation_plan(editorial_map)
     for kind, field in (
         ("recommendation", "recommendations"),
         ("narration", "narration_briefs"),
@@ -42,8 +43,17 @@ def presented_editorial_items(artifact: dict[str, Any]) -> list[PresentedEditori
     ):
         values = editorial_map.get(field, []) if isinstance(editorial_map, dict) else []
         for index, item in enumerate(values if isinstance(values, list) else []):
-            if isinstance(item, dict) and str(item.get("source_id")) in source_by_id:
-                raw_items.append((kind, index, item))
+            if (
+                isinstance(item, dict)
+                and str(item.get("source_id")) in source_by_id
+                and (kind != "recommendation" or selected_recommendations is None or str(item.get("id")) in selected_recommendations)
+            ):
+                normalized = dict(item)
+                if kind == "recommendation" and selected_recommendations is not None:
+                    normalized["selected_kept_ms"] = selected_recommendations[
+                        str(item.get("id"))
+                    ].get("selected_kept_ms", 0)
+                raw_items.append((kind, index, normalized))
     raw_items.sort(
         key=lambda value: (
             source_order.get(str(value[2].get("source_id")), 0),
@@ -74,6 +84,22 @@ def presented_editorial_items(artifact: dict[str, Any]) -> list[PresentedEditori
             )
         )
     return result
+
+
+def _selected_recommendation_plan(editorial_map: Any) -> dict[str, dict[str, Any]] | None:
+    if not isinstance(editorial_map, dict):
+        return None
+    checkpoint = editorial_map.get("global_reconciliation")
+    if not isinstance(checkpoint, dict) or checkpoint.get("status") != "complete":
+        return None
+    plan = editorial_map.get("optimal_plan")
+    if not isinstance(plan, list):
+        return None
+    return {
+        str(item.get("recommendation_id")): item
+        for item in plan
+        if isinstance(item, dict) and str(item.get("recommendation_id") or "")
+    }
 
 
 def editorial_category(kind: EditorialItemKind, item: dict[str, Any]) -> str:
@@ -121,36 +147,21 @@ def primary_suggestion(presented: PresentedEditorialItem, locale: str = "en") ->
         "connect_review": locale_label(locale, "Connect this section to the related material before making the cut.", "カットを決める前に関連箇所とのつながりを確認します。"),
     }.get(presented.category, locale_label(locale, "Review this section before cutting.", "カット前にこの区間を確認します。"))
     reason = _first_text(item.get("reason"), item.get("viewer_benefit"))
-    return f"{action} {reason}".strip()
+    duration = _selected_duration(item.get("selected_kept_ms"), locale)
+    return f"{action} {reason} {duration}".strip()
 
 
-def backup_suggestion(presented: PresentedEditorialItem, locale: str = "en") -> str:
-    item = presented.item
-    if presented.kind == "creative":
-        return _first_text(
-            item.get("backup_option"),
-            locale_label(locale, "Leave the moment unembellished if the accent distracts from the action.", "演出が本編を邪魔するなら、装飾せずそのまま残します。"),
-        )
-    if presented.kind == "narration":
-        return _first_text(item.get("memory_jog"), locale_label(locale, "Keep a short live excerpt if narration is unnecessary.", "ナレーションが不要なら短い生音声の抜粋を残します。"))
-    if presented.category in {"cut", "condense", "voiceover"}:
-        return _first_text(
-            item.get("continuity_case"),
-            item.get("selection_case"),
-            locale_label(locale, "Keep one short representative excerpt if the transition needs more context.", "つなぎに文脈が必要なら短い代表場面を一つ残します。"),
-        )
-    if presented.category == "keep":
-        return _first_text(
-            item.get("subtraction_case"),
-            item.get("selection_case"),
-            locale_label(locale, "Shorten the least informative portion while preserving the payoff.", "見せ場を守りながら情報量の少ない部分を短縮します。"),
-        )
-    return _first_text(
-        item.get("selection_case"),
-        item.get("continuity_case"),
-        item.get("subtraction_case"),
-        locale_label(locale, "Leave the section in place if the connection is unclear.", "つながりが不明なら区間をそのまま残します。"),
-    )
+def _selected_duration(value: Any, locale: str) -> str:
+    milliseconds = _integer(value)
+    if milliseconds <= 0:
+        return ""
+    total_seconds = max(1, round(milliseconds / 1000))
+    minutes, seconds = divmod(total_seconds, 60)
+    if locale == "ja":
+        duration = f"{minutes}分{seconds}秒" if minutes else f"{seconds}秒"
+        return f"残す長さの目安: {duration}。"
+    duration = f"{minutes}m {seconds}s" if minutes else f"{seconds}s"
+    return f"Keep about {duration}."
 
 
 def _first_text(*values: Any) -> str:

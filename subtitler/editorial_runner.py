@@ -271,9 +271,8 @@ def run_editorial_project(
             "connections",
             "conflicts",
             "duration_budget",
-            "editorial_blend_summary",
-            "continuity_led_plan",
-            "selection_led_plan",
+            "editorial_direction_summary",
+            "optimal_plan",
             "director_review",
             "director_model",
         ):

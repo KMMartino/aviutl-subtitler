@@ -49,9 +49,8 @@ class _RecordingExecutor:
             "connections": [],
             "conflicts": [],
             "duration_budget": {"target_min_ms": project["target_duration_min_ms"]},
-            "editorial_blend_summary": "Continuity-led at the upper bound, selection-led at the lower bound.",
-            "continuity_led_plan": [],
-            "selection_led_plan": [],
+            "editorial_direction_summary": "Use the single strongest edit at each location.",
+            "optimal_plan": [],
         }
 
 

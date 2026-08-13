@@ -192,13 +192,12 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
         "connections",
         "conflicts",
         "duration_budget",
-        "editorial_blend_summary",
-        "continuity_led_plan",
-        "selection_led_plan",
+        "editorial_direction_summary",
+        "optimal_plan",
         "director_review",
         "director_model",
     ):
-        artifact["editorial_map"][field] = [] if field in {"global_threads", "connections", "conflicts", "continuity_led_plan", "selection_led_plan"} else None
+        artifact["editorial_map"][field] = [] if field in {"global_threads", "connections", "conflicts", "optimal_plan"} else None
     global_checkpoint = artifact["editorial_map"][GLOBAL_CHECKPOINT_STAGE]
     artifact["editorial_map"][GLOBAL_CHECKPOINT_STAGE] = _reset_checkpoint(
         global_checkpoint, EDITORIAL_STAGE_VERSIONS[GLOBAL_CHECKPOINT_STAGE]

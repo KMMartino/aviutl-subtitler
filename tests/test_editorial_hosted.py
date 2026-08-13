@@ -62,7 +62,7 @@ class HostedEditorialTests(unittest.TestCase):
                 "editorial_map": {"global_reconciliation": {"output": None}},
                 "sources": [],
             }
-            base = {"global_threads": [], "conflicts": [], "editorial_blend_summary": "Base"}
+            base = {"global_threads": [], "conflicts": [], "editorial_direction_summary": "Base"}
             global_refiner = Mock()
             global_refiner.complete_structured = Mock()
             director_refiner = Mock()

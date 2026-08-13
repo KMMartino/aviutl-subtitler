@@ -40,6 +40,11 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
                 video_path=Path(source["visual_path"]),
                 audio_path=Path(source["audio_path"]),
                 segment=ExoMediaSegment(start_frame, end_frame, 1, index + 1),
+                overlay_video_path=(
+                    Path(source["audio_path"])
+                    if source.get("media_mode") == "paired"
+                    else None
+                ),
             )
         )
         if artifact.get("subtitle_mode", "full") == "full":

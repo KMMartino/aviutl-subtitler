@@ -820,13 +820,20 @@ def generate_exo_file(
         media_source = str(media_plan.source_path.resolve())
         _validate_media_path(media_source)
     clips = composite_media_clips or []
-    clip_paths: list[tuple[str, str]] = []
+    clip_paths: list[tuple[str, str, str | None]] = []
     for clip in clips:
         video_path = str(clip.video_path.resolve())
         audio_path = str(clip.audio_path.resolve())
+        overlay_video_path = (
+            str(clip.overlay_video_path.resolve())
+            if clip.overlay_video_path is not None
+            else None
+        )
         _validate_media_path(video_path)
         _validate_media_path(audio_path)
-        clip_paths.append((video_path, audio_path))
+        if overlay_video_path is not None:
+            _validate_media_path(overlay_video_path)
+        clip_paths.append((video_path, audio_path, overlay_video_path))
     broll = sorted(
         broll_placements or [],
         key=lambda item: (item.output_start_frame, item.output_end_frame, item.id),
@@ -868,14 +875,31 @@ audio_ch={settings.audio_ch}"""
         for segment in media_plan.segments:
             objects.append(generate_exo_audio_object(index, segment, media_source, layer=2))
             index += 1
-    for clip, (video_path, _) in zip(clips, clip_paths):
+    for clip, (video_path, _, _) in zip(clips, clip_paths):
         objects.append(generate_exo_video_object(index, clip.segment, video_path, layer=1))
         index += 1
-    for clip, (_, audio_path) in zip(clips, clip_paths):
+    for clip, (_, audio_path, _) in zip(clips, clip_paths):
         objects.append(generate_exo_audio_object(index, clip.segment, audio_path, layer=2))
         index += 1
+    for clip, (_, _, overlay_video_path) in zip(clips, clip_paths):
+        if overlay_video_path is None:
+            continue
+        objects.append(
+            generate_exo_video_object(
+                index,
+                clip.segment,
+                overlay_video_path,
+                layer=3,
+            )
+        )
+        index += 1
     has_primary_media = media_plan is not None or bool(clips)
-    edit_video_layer = 3 if has_primary_media else 1
+    primary_media_layers = (
+        3
+        if any(clip.overlay_video_path is not None for clip in clips)
+        else (2 if has_primary_media else 0)
+    )
+    edit_video_layer = primary_media_layers + 1
     edit_audio_layer = edit_video_layer + 1
     for placement in broll:
         source_path = str(placement.asset_path.resolve())
@@ -919,7 +943,7 @@ audio_ch={settings.audio_ch}"""
                 )
             )
             index += 1
-    reserved_media_layers = (2 if has_primary_media else 0) + (2 if broll else 0)
+    reserved_media_layers = primary_media_layers + (2 if broll else 0)
     background_layer = reserved_media_layers + 1
     subtitle_layer = background_layer + 1 if subtitle_background else background_layer
     qa_layer = subtitle_layer + 1
@@ -962,6 +986,13 @@ audio_ch={settings.audio_ch}"""
         )
         index += 1
     for layer_offset, markers in enumerate(extra_marker_layers):
+        marker_font_size = _additional_marker_font_size(settings, len(extra_marker_layers))
+        marker_y = _additional_marker_y_position(
+            settings,
+            layer_offset,
+            len(extra_marker_layers),
+            marker_font_size,
+        )
         for start, end, text in _marker_frame_ranges(markers, settings.rate):
             objects.append(
                 generate_exo_object(
@@ -971,13 +1002,43 @@ audio_ch={settings.audio_ch}"""
                     text,
                     settings,
                     layer=qa_layer + layer_offset,
-                    font_size=max(24, int(settings.font_size * 0.55)),
+                    font_size=marker_font_size,
                     text_color=_diagnostic_text_color(text),
-                    y_position=max(40.0, settings.y_position - settings.font_size * 1.25),
+                    y_position=marker_y,
                 )
             )
             index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
+
+
+def _additional_marker_font_size(settings: ExoSettings, layer_count: int) -> int:
+    preferred = max(24, int(settings.font_size * 0.55))
+    if layer_count <= 1:
+        return preferred
+    # Editorial markers contain up to six manually wrapped lines. Keep enough
+    # vertical room for every simultaneous marker layer inside the canvas.
+    maximum_fitting = max(20, int((settings.height - 80) / (layer_count * 8)))
+    return min(preferred, maximum_fitting)
+
+
+def _additional_marker_y_position(
+    settings: ExoSettings,
+    layer_offset: int,
+    layer_count: int,
+    font_size: int,
+) -> float:
+    half_block = font_size * 4.0
+    top = -settings.height / 2.0 + half_block + 20.0
+    if layer_count <= 1:
+        return top
+    bottom = settings.height / 2.0 - half_block - 20.0
+    if bottom < top:
+        return round(
+            -settings.height * 0.35
+            + layer_offset * (settings.height * 0.7 / max(1, layer_count - 1)),
+            1,
+        )
+    return round(top + (bottom - top) * layer_offset / (layer_count - 1), 1)
 def _validate_media_path(value: str) -> None:
     if "\r" in value or "\n" in value:
         raise ExoWriteError("EXO media path cannot contain a line break")

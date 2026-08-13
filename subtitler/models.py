@@ -113,6 +113,7 @@ class ExoCompositeMediaClip:
     video_path: Path
     audio_path: Path
     segment: ExoMediaSegment
+    overlay_video_path: Path | None = None
 
 
 @dataclass(frozen=True)

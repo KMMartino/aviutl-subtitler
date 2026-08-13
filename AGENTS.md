@@ -59,7 +59,7 @@ Increment the earliest affected boundary. Resume automatically invalidates that 
 
 ## EXO Invariants
 
-Normal subtitle objects include the sample reference's two `アニメーション効果` filters. In subtitle-only EXOs, QA/mistranscription markers use timeline `layer=2` above normal subtitles on layer 1. Composite media EXOs reserve layers 1-2 for linked video/audio, use layer 3 for normal subtitles, layer 4 for QA markers, and layer 5 for chapters.
+Normal subtitle objects include the sample reference's two `アニメーション効果` filters. In subtitle-only EXOs, QA/mistranscription markers use timeline `layer=2` above normal subtitles on layer 1. Composite media EXOs reserve layers 1-2 for linked video/audio, use layer 3 for normal subtitles, layer 4 for QA markers, and layer 5 for chapters. Paired editorial media additionally reserves layer 3 for the visible facecam track, shifting subtitles and all marker layers upward by one.
 
 ## Releases
 
@@ -71,3 +71,13 @@ git push origin v0.1.0
 ```
 
 The workflow takes the asset version from the tag rather than `frontend/package.json` and publishes `SubUtlSetup<version>.exe` and portable `SubUtl<version>.exe`. Neither bundles models, llama.cpp, Python, FFmpeg, or secrets.
+
+## GitHub Actions Monitoring
+
+Whenever an agent pushes a commit, tag, release, or performs another operation that triggers GitHub Actions, it must monitor every resulting workflow run until it reaches a terminal state. Do not treat a successful push as completion while its workflows are queued or running.
+
+Use the GitHub CLI to identify runs for the exact pushed commit or tag, watch them through completion, and inspect failed job logs when necessary. Report the final status to the user, including which workflows and jobs passed or failed. For publication runs, also verify that the expected release and downloadable artifacts were actually created; a green build job alone is not sufficient.
+
+If a workflow fails because of a small, well-contained mistake, diagnose it from the logs, implement and verify the correction, push the fix when appropriate, and monitor the replacement run without waiting for additional approval. Examples include formatting, lockfile drift, a narrowly scoped test failure, or a straightforward build configuration error.
+
+If the remedy requires substantial refactoring, architectural changes, meaningful scope expansion, destructive history or tag rewriting, or a new release-version decision, stop and ask the user before proceeding. Transient infrastructure failures may be retried when doing so does not change code, tags, release identity, or external state beyond rerunning the failed workflow.
