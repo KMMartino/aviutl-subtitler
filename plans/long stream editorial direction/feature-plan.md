@@ -196,6 +196,10 @@ Every analyzed span should additionally retain:
 
 These fields are evidence for planning, not four competing user-facing markers. The HTML can summarize them behind the recommended action.
 
+The final director does not expose these candidate labels directly. It converts selected material into one canonical primary operation—preserve, trim, cut, extract highlights, montage, narrated montage, narration bridge, connect ranges, reorder ranges, or manual review—and may attach explicitly linked canonical accents or continuity edits. Natural-language wording may vary, but the operation type does not.
+
+After the director pass, the application resolves conflicting primary ranges into a single non-overlapping plan, inserts preserve actions for every uncovered interval, and joins adjacent preserves. This makes “no edit” explicit without asking the model to manufacture routine keep instructions.
+
 Visually dull but new material defaults to `review`, not `omit`, unless transcript and wider context provide affirmative evidence that it is redundant.
 
 ### Stage F: narration briefs
@@ -227,12 +231,7 @@ The planner responds progressively:
 
 The blend is local rather than global. A single project may preserve a boss fight almost continuously, treat traversal with continuity-first cleanup, turn repeated upgrade visits into a narrated montage, and represent an unimportant side thread with one selected exchange. This produces a more coherent result than applying the same percentage reduction to every scene.
 
-The planner should offer at least two internally consistent proposals within or near the range:
-
-- **continuity-led:** the least structural intervention that approaches the upper end;
-- **selection-led:** a more constructed proposal approaching the lower end while preserving the same protected facts and payoffs.
-
-These are editorial alternatives, not automatic edits. A user may take recommendations from both.
+The planner must offer one internally consistent proposal within or near the range. Continuity-led and selection-led reasoning are internal priors blended independently for each scene; they are not parallel user-facing alternatives. The editor should receive the single best operational action at each location, not an upper-bound and lower-bound instruction for the same material.
 
 Projects already below 12 hours can default to lighter cleanup. Projects over the target should first remove clear redundancy, then condense repeated processes, and only then propose narration-led compression of meaningful content.
 
@@ -249,17 +248,20 @@ Canonical, checkpointable, schema-versioned artifact. It retains provenance, evi
 Primary human-readable output:
 
 - overview and duration budget;
-- continuity-led and selection-led interpretations of the requested range;
-- chronological strip per source;
-- thread view that joins distant related spans;
-- recommendation cards with evidence and alternatives;
-- narration briefs;
+- one authoritative direction list linked to chronological action cards;
+- a timeline rail showing every action's project position and start/end time;
+- action-family colors plus a separate shared color for each distant thread;
+- a primary-action column and an explicitly linked supporting-edits column;
+- narration briefs inside narrated primary actions;
+- verified source-frame crops beside reference-dependent supporting edits;
 - filters by recommendation type, confidence, source, and thread;
 - visible overlaps/conflicts instead of silently resolving them.
 
 The HTML should be self-contained or packaged with a predictable adjacent data file so it can be reopened without the app.
 
 ### EXO
+
+The source video/audio objects are split at the authoritative primary-action boundaries before export. Every action interval, including an explicit preserve, receives a small direction number grouped with the corresponding linked media chunk; that number matches the HTML editorial list and remains synchronized as the editor moves or removes the chunk. Primary prose stays in HTML rather than being duplicated in EXO; EXO text markers are reserved for concrete local accents.
 
 Suggestion markers only. Preserve overlapping ideas on separate layers rather than flattening them prematurely. Proposed semantic layers:
 

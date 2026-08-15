@@ -25,16 +25,26 @@ CHECKPOINT_STAGES = (
     "local_reconciliation",
 )
 GLOBAL_CHECKPOINT_STAGE = "global_reconciliation"
-EDITORIAL_PIPELINE_STAGES = (*CHECKPOINT_STAGES, GLOBAL_CHECKPOINT_STAGE)
+ASSET_CHECKPOINT_STAGE = "editorial_assets"
+PROJECT_CHECKPOINT_STAGES = (GLOBAL_CHECKPOINT_STAGE, ASSET_CHECKPOINT_STAGE)
+EDITORIAL_PIPELINE_STAGES = (*CHECKPOINT_STAGES, *PROJECT_CHECKPOINT_STAGES)
+SOURCE_DERIVED_EDITORIAL_FIELDS = (
+    "recommendations",
+    "narration_briefs",
+    "creative_suggestions",
+    "emphasized_phrases",
+    "timeline_coverage",
+)
 # Increment the matching boundary version whenever its artifact contract or
 # behavior changes. See AGENTS.md for the mandatory maintenance rule.
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
-    "source_probe": 1,
+    "source_probe": 2,
     "transcription": 5,
-    "visual_learning": 5,
-    "semantic_spans": 2,
+    "visual_learning": 6,
+    "semantic_spans": 4,
     "local_reconciliation": 1,
-    "global_reconciliation": 4,
+    "global_reconciliation": 5,
+    "editorial_assets": 1,
 }
 LEGACY_EDITORIAL_STAGE_VERSIONS = {stage: 1 for stage in EDITORIAL_PIPELINE_STAGES}
 CheckpointStatus = Literal["pending", "in_progress", "complete", "failed"]
@@ -57,6 +67,10 @@ class EditorialSourceInput:
     audio_duration_ms: int | None = None
     visual_duration_ms: int | None = None
     frame_rate: float | None = None
+    width: int | None = None
+    height: int | None = None
+    audio_width: int | None = None
+    audio_height: int | None = None
     media_mode: Literal["single", "paired"] = "single"
     pairing_basis: Literal["single", "filename", "resolution", "manual"] = "single"
 
@@ -178,6 +192,10 @@ def create_editorial_project(
                 "audio_duration_ms": audio_duration_ms,
                 "visual_duration_ms": visual_duration_ms,
                 "frame_rate": source.frame_rate,
+                "width": source.width,
+                "height": source.height,
+                "audio_width": source.audio_width,
+                "audio_height": source.audio_height,
                 "audio_fingerprint": asdict(audio_fingerprint),
                 "visual_fingerprint": asdict(visual_fingerprint),
                 "status": "pending",
@@ -205,6 +223,7 @@ def create_editorial_project(
         "editorial_map": {
             "status": "pending",
             "global_reconciliation": _new_stage_checkpoint(GLOBAL_CHECKPOINT_STAGE),
+            "editorial_assets": _new_stage_checkpoint(ASSET_CHECKPOINT_STAGE),
             "global_threads": [],
             "recommendations": [],
             "narration_briefs": [],
@@ -218,6 +237,10 @@ def create_editorial_project(
             "optimal_plan": [],
             "director_review": None,
             "director_model": None,
+            "final_actions": [],
+            "supporting_edits": [],
+            "editorial_threads": [],
+            "assets": [],
         },
         "run_provenance": {
             "runs": [],
@@ -315,6 +338,7 @@ def load_editorial_checkpoint(path: Path) -> dict[str, Any]:
     _upgrade_output_locale(value)
     _upgrade_versionless_boundaries(value)
     _upgrade_editorial_map_fields(value)
+    _repair_source_derived_editorial_fields(value)
     validate_editorial_project(value)
     return value
 
@@ -477,13 +501,12 @@ def validate_editorial_project(artifact: dict[str, Any]) -> None:
         for stage, checkpoint in stages.items():
             _validate_stage_checkpoint(checkpoint, stage, pipeline_versions[stage])
     editorial_map = artifact.get("editorial_map")
-    if not isinstance(editorial_map, dict) or not isinstance(editorial_map.get("global_reconciliation"), dict):
-        raise SubtitlerError("Editorial checkpoint requires a global reconciliation checkpoint")
-    _validate_stage_checkpoint(
-        editorial_map[GLOBAL_CHECKPOINT_STAGE],
-        GLOBAL_CHECKPOINT_STAGE,
-        pipeline_versions[GLOBAL_CHECKPOINT_STAGE],
-    )
+    if not isinstance(editorial_map, dict):
+        raise SubtitlerError("Editorial checkpoint requires an editorial map")
+    for stage in PROJECT_CHECKPOINT_STAGES:
+        if not isinstance(editorial_map.get(stage), dict):
+            raise SubtitlerError(f"Editorial checkpoint requires a {stage} checkpoint")
+        _validate_stage_checkpoint(editorial_map[stage], stage, pipeline_versions[stage])
 
 
 def _sample_offsets(size: int, sample_size: int) -> list[int]:
@@ -552,6 +575,8 @@ def _upgrade_versionless_boundaries(artifact: dict[str, Any]) -> None:
     if not isinstance(versions, dict):
         versions = dict(LEGACY_EDITORIAL_STAGE_VERSIONS)
         artifact["pipeline_versions"] = versions
+    for stage in EDITORIAL_PIPELINE_STAGES:
+        versions.setdefault(stage, EDITORIAL_STAGE_VERSIONS[stage] if stage == ASSET_CHECKPOINT_STAGE else 1)
     for source in artifact.get("sources", []):
         if not isinstance(source, dict) or not isinstance(source.get("stages"), dict):
             continue
@@ -561,9 +586,20 @@ def _upgrade_versionless_boundaries(artifact: dict[str, Any]) -> None:
                 checkpoint["version"] = int(versions.get(stage, 1))
     editorial_map = artifact.get("editorial_map")
     if isinstance(editorial_map, dict):
-        checkpoint = editorial_map.get(GLOBAL_CHECKPOINT_STAGE)
-        if isinstance(checkpoint, dict) and "version" not in checkpoint:
-            checkpoint["version"] = int(versions.get(GLOBAL_CHECKPOINT_STAGE, 1))
+        for stage in PROJECT_CHECKPOINT_STAGES:
+            checkpoint = editorial_map.get(stage)
+            if not isinstance(checkpoint, dict):
+                editorial_map[stage] = {
+                    "version": int(versions.get(stage, EDITORIAL_STAGE_VERSIONS[stage])),
+                    "status": "pending",
+                    "attempts": 0,
+                    "started_at_utc": None,
+                    "completed_at_utc": None,
+                    "error": "",
+                    "output": None,
+                }
+            elif "version" not in checkpoint:
+                checkpoint["version"] = int(versions.get(stage, 1))
 
 
 def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
@@ -578,6 +614,41 @@ def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
     editorial_map.setdefault("director_model", None)
     editorial_map.setdefault("editorial_direction_summary", None)
     editorial_map.setdefault("optimal_plan", [])
+    editorial_map.setdefault("final_actions", [])
+    editorial_map.setdefault("supporting_edits", [])
+    editorial_map.setdefault("editorial_threads", [])
+    editorial_map.setdefault("assets", [])
+
+
+def _repair_source_derived_editorial_fields(artifact: dict[str, Any]) -> None:
+    """Rebuild source aggregates from durable local outputs after older resume bugs."""
+    editorial_map = artifact.get("editorial_map")
+    sources = artifact.get("sources")
+    if not isinstance(editorial_map, dict) or not isinstance(sources, list):
+        return
+    completed_outputs: list[dict[str, Any]] = []
+    for source in sorted(
+        (item for item in sources if isinstance(item, dict)),
+        key=lambda item: int(item.get("order", 0)),
+    ):
+        stages = source.get("stages")
+        checkpoint = stages.get("local_reconciliation") if isinstance(stages, dict) else None
+        output = checkpoint.get("output") if isinstance(checkpoint, dict) else None
+        if (
+            isinstance(checkpoint, dict)
+            and checkpoint.get("status") == "complete"
+            and isinstance(output, dict)
+        ):
+            completed_outputs.append(output)
+    if not completed_outputs:
+        return
+    for field in SOURCE_DERIVED_EDITORIAL_FIELDS:
+        rebuilt: list[Any] = []
+        for output in completed_outputs:
+            values = output.get(field)
+            if isinstance(values, list):
+                rebuilt.extend(values)
+        editorial_map[field] = rebuilt
 
 
 def _validate_options(options: EditorialProjectOptions) -> None:

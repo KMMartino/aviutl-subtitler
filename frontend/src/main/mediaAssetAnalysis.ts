@@ -213,8 +213,8 @@ export async function runMediaAssetAnalysis(
 }
 
 function modelRates(model: string): { input: number; output: number } {
-  if (model === "gpt-5.6-luna") return { input: 1, output: 6 };
-  if (model === "gpt-5.6-terra") return { input: 2.5, output: 15 };
+  if (model === "gpt-5.6-luna") return { input: .2, output: 1.2 };
+  if (model === "gpt-5.6-terra") return { input: 2, output: 12 };
   if (model === "gpt-5.4-mini") return { input: .75, output: 4.5 };
   return { input: 5, output: 30 };
 }

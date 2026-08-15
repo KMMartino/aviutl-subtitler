@@ -14,7 +14,9 @@ describe("media asset analysis estimate", () => {
   });
 
   it("uses one sample for an image", () => {
-    expect(estimateMediaAssetAnalysis(asset({ mediaKind: "image", durationMs: null }), "gpt-5.6-luna", "detailed").sampleCount).toBe(1);
+    const estimate = estimateMediaAssetAnalysis(asset({ mediaKind: "image", durationMs: null }), "gpt-5.6-luna", "detailed");
+    expect(estimate.sampleCount).toBe(1);
+    expect(estimate.estimatedCostUsd).toBeCloseTo(.000275);
   });
 
   it("scales temporal coverage and billed cost with the selected frame count", () => {

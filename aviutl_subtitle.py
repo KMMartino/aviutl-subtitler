@@ -14,7 +14,13 @@ from subtitler.broll import build_broll_provider, plan_broll
 from subtitler.config import WORKFLOWS
 from subtitler.errors import SubtitlerError
 from subtitler.exo import generate_exo_file, write_exo
-from subtitler.models import ExoSettings
+from subtitler.media_layout import (
+    DESIGN_HEIGHT,
+    analyze_wide_recording,
+    probe_video_geometry,
+    wide_recording_placements,
+)
+from subtitler.models import ExoCompositeMediaClip, ExoMediaSegment, ExoSettings
 from subtitler.profiling import PipelineProfiler
 from subtitler.run_artifacts import (
     build_youtube_chapter_markers,
@@ -149,13 +155,33 @@ def main() -> int:
             mistranscription_markers = subtitle_result.mistranscription_markers
 
             exo_cfg = config["exo"]
+            video_geometry = None
+            wide_layout = None
+            try:
+                video_geometry = probe_video_geometry(input_path)
+                wide_layout = analyze_wide_recording(input_path, video_geometry)
+            except SubtitlerError:
+                # Audio-only inputs and unavailable video tooling retain the
+                # explicitly configured EXO canvas.
+                pass
+            output_width = (
+                wide_layout.output_width
+                if wide_layout is not None
+                else video_geometry.width if video_geometry is not None else int(exo_cfg["width"])
+            )
+            output_height = (
+                wide_layout.output_height
+                if wide_layout is not None
+                else video_geometry.height if video_geometry is not None else int(exo_cfg["height"])
+            )
+            layout_scale = output_height / DESIGN_HEIGHT
             settings = ExoSettings(
-                width=int(exo_cfg["width"]),
-                height=int(exo_cfg["height"]),
+                width=output_width,
+                height=output_height,
                 rate=int(exo_cfg["fps"]),
                 font=exo_cfg["font"],
-                font_size=int(exo_cfg["font_size"]),
-                y_position=float(exo_cfg["y_position"]),
+                font_size=max(1, round(int(exo_cfg["font_size"]) * layout_scale)),
+                y_position=float(exo_cfg["y_position"]) * layout_scale,
             )
 
             cut_mode = config["additional_settings"]["cut_silence_mode"]
@@ -304,6 +330,7 @@ def main() -> int:
 
             try:
                 media_plan = cut_outcome.media_plan
+                composite_media_clips = []
                 if broll_placements and media_plan is None:
                     try:
                         if probe_media_streams(input_path).has_video:
@@ -314,6 +341,43 @@ def main() -> int:
                             f"continuing with B-roll assets and subtitles only. {exc}",
                             flush=True,
                         )
+                if wide_layout is not None:
+                    if media_plan is None:
+                        segments = [
+                            ExoMediaSegment(
+                                1,
+                                max(1, round(duration * settings.rate)),
+                                1,
+                                1,
+                            )
+                        ]
+                        media_source_path = input_path
+                    else:
+                        segments = media_plan.segments
+                        media_source_path = media_plan.source_path
+                    primary, overlay = wide_recording_placements(wide_layout)
+                    composite_media_clips = [
+                        ExoCompositeMediaClip(
+                            video_path=media_source_path,
+                            audio_path=media_source_path,
+                            segment=segment,
+                            overlay_video_path=media_source_path,
+                            overlay_audio_path=media_source_path,
+                            video_crop=primary.crop,
+                            video_scale_percent=primary.scale_percent,
+                            video_x=primary.x,
+                            video_y=primary.y,
+                            overlay_crop=overlay.crop,
+                            overlay_scale_percent=overlay.scale_percent,
+                            overlay_x=overlay.x,
+                            overlay_y=overlay.y,
+                            # Preserve layer 4 linkage without playing the
+                            # single recording's audio twice.
+                            overlay_audio_volume=0.0,
+                        )
+                        for segment in segments
+                    ]
+                    media_plan = None
                 content = generate_exo_file(
                     subtitles,
                     settings,
@@ -322,6 +386,7 @@ def main() -> int:
                     chapter_markers=chapter_markers,
                     mistranscription_markers=mistranscription_markers,
                     media_plan=media_plan,
+                    composite_media_clips=composite_media_clips,
                     broll_placements=broll_placements,
                 )
                 write_exo(output_path, content)

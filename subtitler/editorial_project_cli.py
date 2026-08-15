@@ -235,6 +235,9 @@ def _parse_source_spec(raw_spec: str) -> EditorialSourceInput:
     visual_duration_ms = round(get_media_duration(visual_path) * 1000)
     frame_rate_value = spec.get("frameRate")
     frame_rate = float(frame_rate_value) if isinstance(frame_rate_value, (int, float)) and not isinstance(frame_rate_value, bool) else None
+    def optional_dimension(key: str) -> int | None:
+        value = spec.get(key)
+        return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else None
     pairing_basis = spec.get("pairingBasis")
     if pairing_basis not in {"single", "filename", "resolution", "manual"}:
         raise SubtitlerError("Editorial source specification has an invalid pairingBasis")
@@ -248,6 +251,10 @@ def _parse_source_spec(raw_spec: str) -> EditorialSourceInput:
         audio_duration_ms=audio_duration_ms,
         visual_duration_ms=visual_duration_ms,
         frame_rate=frame_rate,
+        width=optional_dimension("width"),
+        height=optional_dimension("height"),
+        audio_width=optional_dimension("audioWidth"),
+        audio_height=optional_dimension("audioHeight"),
         media_mode=cast(Literal["single", "paired"], mode),
         pairing_basis=cast(Literal["single", "filename", "resolution", "manual"], pairing_basis),
     )
@@ -268,6 +275,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser, *, include_checkpoint: b
                 "semantic_spans",
                 "local_reconciliation",
                 "global_reconciliation",
+                "editorial_assets",
             ),
             default="compatible",
         )

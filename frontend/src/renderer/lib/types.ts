@@ -243,9 +243,11 @@ export type HostedModelVerification = {
     keyPresent: boolean;
     error: string;
     transcription: boolean;
+    transcription37?: boolean;
     transcription31Pro: boolean;
     transcription31FlashLite: boolean;
     cleanup: boolean;
+    cleanup37?: boolean;
   };
 };
 
@@ -336,7 +338,8 @@ export type EditorialRestartBoundary =
   | "visual_learning"
   | "semantic_spans"
   | "local_reconciliation"
-  | "global_reconciliation";
+  | "global_reconciliation"
+  | "editorial_assets";
 
 export type EditorialRestartMode = "compatible" | EditorialRestartBoundary;
 

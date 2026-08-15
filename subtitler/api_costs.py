@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 
 GEMINI_AUDIO_TOKENS_PER_SECOND = 32.0
@@ -19,8 +20,12 @@ class TokenPrices:
     estimated_per_minute: float | None = None
 
 
+GEMINI_FLASH_PROMOTIONAL_PRICES = TokenPrices(input_per_1m=0.75, output_per_1m=3.75, audio_input_per_1m=0.75)
+GEMINI_FLASH_STANDARD_PRICES = TokenPrices(input_per_1m=1.50, output_per_1m=7.50, audio_input_per_1m=1.50)
+GEMINI_FLASH_PROMOTION_END = date(2026, 12, 31)
+
+
 GEMINI_PRICES: dict[str, TokenPrices] = {
-    "gemini-3.6-flash": TokenPrices(input_per_1m=1.50, output_per_1m=7.50, audio_input_per_1m=1.50),
     "gemini-3.5-flash": TokenPrices(input_per_1m=1.50, output_per_1m=9.00, audio_input_per_1m=1.50),
     "gemini-3-flash-preview": TokenPrices(input_per_1m=0.50, output_per_1m=3.00, audio_input_per_1m=1.00),
     "gemini-3.1-pro-preview": TokenPrices(input_per_1m=2.00, output_per_1m=12.00, audio_input_per_1m=2.00),
@@ -35,13 +40,19 @@ OPENAI_PRICES: dict[str, TokenPrices] = {
     "gpt-5.5": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
     "gpt-5.4-mini": TokenPrices(input_per_1m=0.75, output_per_1m=4.50),
     "gpt-5.6-sol": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
-    "gpt-5.6-terra": TokenPrices(input_per_1m=2.50, output_per_1m=15.00),
-    "gpt-5.6-luna": TokenPrices(input_per_1m=1.00, output_per_1m=6.00),
+    "gpt-5.6-terra": TokenPrices(input_per_1m=2.00, output_per_1m=12.00),
+    "gpt-5.6-luna": TokenPrices(input_per_1m=0.20, output_per_1m=1.20),
 }
 
 
-def model_prices(provider: str, model: str) -> TokenPrices:
+def model_prices(provider: str, model: str, *, as_of: date | None = None) -> TokenPrices:
     if provider == "gemini":
+        if model in {"gemini-3.6-flash", "gemini-3.7-flash"}:
+            return (
+                GEMINI_FLASH_PROMOTIONAL_PRICES
+                if (as_of or date.today()) <= GEMINI_FLASH_PROMOTION_END
+                else GEMINI_FLASH_STANDARD_PRICES
+            )
         return GEMINI_PRICES.get(model, TokenPrices(input_per_1m=1.50, output_per_1m=9.00, audio_input_per_1m=1.50))
     if provider == "openai":
         return OPENAI_PRICES.get(model, TokenPrices(input_per_1m=5.00, output_per_1m=30.00))
@@ -55,8 +66,9 @@ def token_cost(
     input_tokens: int = 0,
     output_tokens: int = 0,
     audio_input_tokens: int = 0,
+    as_of: date | None = None,
 ) -> float:
-    prices = model_prices(provider, model)
+    prices = model_prices(provider, model, as_of=as_of)
     text_input_tokens = max(0, input_tokens - audio_input_tokens)
     audio_rate = prices.audio_input_per_1m if prices.audio_input_per_1m is not None else prices.input_per_1m
     return (

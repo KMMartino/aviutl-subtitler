@@ -54,12 +54,13 @@ Whenever a change alters a boundary's behavior, input assumptions, output schema
 4. `semantic_spans`
 5. `local_reconciliation`
 6. `global_reconciliation`
+7. `editorial_assets`
 
-Increment the earliest affected boundary. Resume automatically invalidates that boundary and every downstream boundary, so do not increment downstream versions merely because an upstream artifact changed. The `semantic_spans` boundary currently produces interpreted spans, candidate edits, narration briefs, connections, and cumulative context. `local_reconciliation` turns that per-source output into durable project material. `global_reconciliation` produces the project-wide duration and selection plans. Put suggestion changes at the earliest boundary whose stored output would actually differ; use only `global_reconciliation` when all per-source analysis and candidate suggestions remain valid. Never change editorial boundary behavior without reviewing and, when applicable, incrementing this version vector.
+Increment the earliest affected boundary. Resume automatically invalidates that boundary and every downstream boundary, so do not increment downstream versions merely because an upstream artifact changed. The `semantic_spans` boundary currently produces interpreted spans, candidate edits, narration briefs, connections, and cumulative context. `local_reconciliation` turns that per-source output into durable project material. `global_reconciliation` produces the authoritative project-wide action plan. `editorial_assets` resolves and verifies reference-dependent frames for that selected plan. Put suggestion changes at the earliest boundary whose stored output would actually differ; use only `global_reconciliation` when all per-source analysis and candidate suggestions remain valid, and only `editorial_assets` when the action plan remains valid but its selected reference material does not. Never change editorial boundary behavior without reviewing and, when applicable, incrementing this version vector.
 
 ## EXO Invariants
 
-Normal subtitle objects include the sample reference's two `アニメーション効果` filters. In subtitle-only EXOs, QA/mistranscription markers use timeline `layer=2` above normal subtitles on layer 1. Composite media EXOs reserve layers 1-2 for linked video/audio, use layer 3 for normal subtitles, layer 4 for QA markers, and layer 5 for chapters. Paired editorial media additionally reserves layer 3 for the visible facecam track, shifting subtitles and all marker layers upward by one.
+Normal subtitle objects include the sample reference's two `アニメーション効果` filters. In subtitle-only EXOs, QA/mistranscription markers use timeline `layer=2` above normal subtitles on layer 1. Composite media EXOs reserve layers 1-2 for linked video/audio, use layer 3 for normal subtitles, layer 4 for QA markers, and layer 5 for chapters. Paired editorial media reserves layers 1-2 for gameplay video/audio and layers 3-4 for facecam video/audio, shifting subtitles and all marker layers above them.
 
 ## Releases
 

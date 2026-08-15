@@ -8,6 +8,7 @@ from typing import Any, Literal, Sequence, cast
 
 from .editorial_project import (
     CHECKPOINT_STAGES,
+    PROJECT_CHECKPOINT_STAGES,
     EDITORIAL_PIPELINE_STAGES,
     EDITORIAL_STAGE_VERSIONS,
     GLOBAL_CHECKPOINT_STAGE,
@@ -24,6 +25,7 @@ ResumeBoundary = Literal[
     "semantic_spans",
     "local_reconciliation",
     "global_reconciliation",
+    "editorial_assets",
 ]
 ResumeMode = Literal["compatible", *EDITORIAL_PIPELINE_STAGES]
 
@@ -165,7 +167,7 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
     now = datetime.now(timezone.utc).isoformat()
     for stage in EDITORIAL_PIPELINE_STAGES[boundary_index:]:
         artifact["pipeline_versions"][stage] = EDITORIAL_STAGE_VERSIONS[stage]
-    if boundary != GLOBAL_CHECKPOINT_STAGE:
+    if boundary in CHECKPOINT_STAGES:
         source_boundary = CHECKPOINT_STAGES.index(boundary)
         for source in artifact["sources"]:
             for stage in CHECKPOINT_STAGES[source_boundary:]:
@@ -183,25 +185,42 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
                 "recommendations",
                 "narration_briefs",
                 "creative_suggestions",
+                "emphasized_phrases",
+                "timeline_coverage",
                 "connections",
                 "conflicts",
             ):
                 artifact["editorial_map"][field] = []
-    for field in (
-        "global_threads",
-        "connections",
-        "conflicts",
-        "duration_budget",
-        "editorial_direction_summary",
-        "optimal_plan",
-        "director_review",
-        "director_model",
-    ):
-        artifact["editorial_map"][field] = [] if field in {"global_threads", "connections", "conflicts", "optimal_plan"} else None
-    global_checkpoint = artifact["editorial_map"][GLOBAL_CHECKPOINT_STAGE]
-    artifact["editorial_map"][GLOBAL_CHECKPOINT_STAGE] = _reset_checkpoint(
-        global_checkpoint, EDITORIAL_STAGE_VERSIONS[GLOBAL_CHECKPOINT_STAGE]
-    )
+    if boundary != "editorial_assets":
+        for field in (
+            "global_threads",
+            "connections",
+            "conflicts",
+            "duration_budget",
+            "editorial_direction_summary",
+            "optimal_plan",
+            "director_review",
+            "director_model",
+            "final_actions",
+            "supporting_edits",
+            "editorial_threads",
+        ):
+            artifact["editorial_map"][field] = [] if field in {
+                "global_threads", "connections", "conflicts", "optimal_plan",
+                "final_actions", "supporting_edits", "editorial_threads",
+            } else None
+    else:
+        global_output = artifact["editorial_map"].get(GLOBAL_CHECKPOINT_STAGE, {}).get("output")
+        if isinstance(global_output, dict):
+            artifact["editorial_map"]["supporting_edits"] = list(global_output.get("supporting_edits", []))
+    artifact["editorial_map"]["assets"] = []
+    for stage in PROJECT_CHECKPOINT_STAGES:
+        if _stage_index(stage) < boundary_index:
+            continue
+        checkpoint = artifact["editorial_map"][stage]
+        artifact["editorial_map"][stage] = _reset_checkpoint(
+            checkpoint, EDITORIAL_STAGE_VERSIONS[stage]
+        )
     artifact["editorial_map"]["status"] = "pending"
     artifact["updated_at_utc"] = now
     artifact["run_provenance"].setdefault("invalidations", []).append(
@@ -340,14 +359,15 @@ def _next_incomplete_checkpoint(artifact: dict[str, Any]) -> dict[str, Any] | No
                     "stage": stage,
                     "status": checkpoint["status"],
                 }
-    checkpoint = artifact["editorial_map"][GLOBAL_CHECKPOINT_STAGE]
-    if checkpoint["status"] != "complete":
-        return {
-            "source_id": "project",
-            "source_name": artifact["title_or_game"],
-            "stage": GLOBAL_CHECKPOINT_STAGE,
-            "status": checkpoint["status"],
-        }
+    for stage in PROJECT_CHECKPOINT_STAGES:
+        checkpoint = artifact["editorial_map"][stage]
+        if checkpoint["status"] != "complete":
+            return {
+                "source_id": "project",
+                "source_name": artifact["title_or_game"],
+                "stage": stage,
+                "status": checkpoint["status"],
+            }
     return None
 
 

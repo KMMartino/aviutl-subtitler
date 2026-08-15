@@ -53,6 +53,9 @@ class _RecordingExecutor:
             "optimal_plan": [],
         }
 
+    def resolve_assets(self, project):
+        return {"supporting_edits": [], "editorial_assets": []}
+
 
 class EditorialRunnerTests(unittest.TestCase):
     def _project(self, root: Path) -> Path:
@@ -87,8 +90,9 @@ class EditorialRunnerTests(unittest.TestCase):
             self.assertTrue(checkpoint.with_suffix(".html").is_file())
             self.assertTrue(checkpoint.with_suffix(".exo").is_file())
             self.assertEqual(result["outputs"]["exo_path"], str(checkpoint.with_suffix(".exo")))
-            self.assertIn("Editorial stage 1/6", log.getvalue())
+            self.assertIn("Editorial stage 1/7", log.getvalue())
             self.assertIn("Project-wide synthesis", log.getvalue())
+            self.assertEqual(result["editorial_map"]["editorial_assets"]["status"], "complete")
             self.assertIn("Editorial run complete", log.getvalue())
 
     def test_failure_checkpoints_and_retry_skips_completed_expensive_stages(self) -> None:

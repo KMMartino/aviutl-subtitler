@@ -155,11 +155,17 @@ class OpenAIMediaAnalysisProvider:
         *,
         editorial_context: str = "",
         output_locale: str = "en",
+        reasoning_effort: str = "low",
     ) -> None:
         self.model = model
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
         self.editorial_context = editorial_context.strip()[:12000]
         self.output_locale = output_locale
+        self.reasoning_effort = (
+            reasoning_effort
+            if reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}
+            else "low"
+        )
 
     def analyze(
         self,
@@ -220,7 +226,7 @@ class OpenAIMediaAnalysisProvider:
             "https://api.openai.com/v1/responses",
             {
                 "model": self.model,
-                "reasoning": {"effort": "low"},
+                "reasoning": {"effort": self.reasoning_effort},
                 "input": [{"role": "user", "content": content}],
             },
             ModelLoadError,
@@ -289,7 +295,7 @@ class OpenAIMediaAnalysisProvider:
             "https://api.openai.com/v1/responses",
             {
                 "model": self.model,
-                "reasoning": {"effort": "low"},
+                "reasoning": {"effort": self.reasoning_effort},
                 "input": [{"role": "user", "content": content}],
             },
             ModelLoadError,
@@ -342,6 +348,7 @@ def analyze_media(
     provider: MediaAnalysisProvider,
     start_sec: float = 0.0,
     end_sec: float | None = None,
+    sampling_scale: float = 1.0,
 ) -> MediaAnalysisResult:
     if not media_path.is_file():
         raise SubtitlerError(f"Media asset no longer exists: {media_path}")
@@ -349,7 +356,7 @@ def analyze_media(
     analysis_duration = analysis_end - analysis_start if media_kind == "video" else duration_sec
     with tempfile.TemporaryDirectory(prefix="subutl_analysis_") as temp_name:
         output_dir = Path(temp_name)
-        plan = _sampling_plan(analysis_duration, detail)
+        plan = _sampling_plan(analysis_duration, detail, sampling_scale)
         samples = sample_media(
             media_path,
             media_kind=media_kind,
@@ -359,6 +366,7 @@ def analyze_media(
             output_dir=output_dir,
             start_sec=analysis_start,
             end_sec=analysis_end,
+            sampling_scale=sampling_scale,
         )
         description, tags, ranges, input_tokens, output_tokens = provider.analyze(
             samples,
@@ -520,6 +528,7 @@ def sample_media(
     output_dir: Path,
     start_sec: float = 0.0,
     end_sec: float | None = None,
+    sampling_scale: float = 1.0,
 ) -> list[VisualSample]:
     output_dir.mkdir(parents=True, exist_ok=True)
     if media_kind == "image":
@@ -527,7 +536,10 @@ def sample_media(
     else:
         bounded_end = end_sec if end_sec is not None else duration_sec
         window_duration = None if bounded_end is None else bounded_end - start_sec
-        timestamps = [start_sec + timestamp for timestamp in _sample_timestamps(window_duration, detail)]
+        timestamps = [
+            start_sec + timestamp
+            for timestamp in _sample_timestamps(window_duration, detail, sampling_scale)
+        ]
     return _extract_samples(
         media_path,
         media_kind=media_kind,
@@ -604,24 +616,33 @@ def _extract_sample(
     return VisualSample(index, timestamp, output)
 
 
-def _sample_timestamps(duration_sec: float | None, detail: str = "simple") -> list[float]:
+def _sample_timestamps(
+    duration_sec: float | None,
+    detail: str = "simple",
+    sampling_scale: float = 1.0,
+) -> list[float]:
     if duration_sec is None or not math.isfinite(duration_sec) or duration_sec <= 0:
         return [0.0]
-    count = _sampling_plan(duration_sec, detail).coarse_count
+    count = _sampling_plan(duration_sec, detail, sampling_scale).coarse_count
     end = max(0.0, duration_sec - 0.1)
     if count == 1:
         return [0.0]
     return [end * index / (count - 1) for index in range(count)]
 
 
-def _sampling_plan(duration_sec: float | None, detail: str = "simple") -> SamplingPlan:
+def _sampling_plan(
+    duration_sec: float | None,
+    detail: str = "simple",
+    sampling_scale: float = 1.0,
+) -> SamplingPlan:
     if duration_sec is None or not math.isfinite(duration_sec) or duration_sec <= 0:
         return SamplingPlan(1, False, None, 0, 0)
+    scale = max(0.25, min(4.0, float(sampling_scale))) if math.isfinite(sampling_scale) else 1.0
     if detail != "probe":
         multiplier = DETAIL_MULTIPLIERS.get(detail, DETAIL_MULTIPLIERS["simple"])
-        count = math.floor(_base_standard_frame_count(duration_sec) * multiplier + 0.5)
+        count = math.floor(_base_standard_frame_count(duration_sec) * multiplier * scale + 0.5)
         return SamplingPlan(max(1, count), False, None, 0, MIN_TRANSITION_BUDGET)
-    coarse_count = _probe_frame_count(duration_sec)
+    coarse_count = max(2, math.floor(_probe_frame_count(duration_sec) * scale + 0.5))
     precision = min(3.0, max(0.25, duration_sec / 400.0))
     spacing = duration_sec / max(1, coarse_count - 1)
     rounds = max(0, math.ceil(math.log(spacing / precision, 3)))

@@ -150,10 +150,8 @@ def _chapter_background_width(text: str, settings: ExoSettings) -> int:
     measured = _measure_windows_text_width(text, settings.font, settings.font_size)
     text_width = float(measured) if measured is not None else _estimated_text_width(text, settings.font_size)
     padded_width = max(settings.font_size * 2.0, text_width + settings.font_size)
-    return max(
-        _CHAPTER_WIDTH_GRID,
-        int(math.floor(padded_width / _CHAPTER_WIDTH_GRID + 0.5)) * _CHAPTER_WIDTH_GRID,
-    )
+    grid = max(1, round(_CHAPTER_WIDTH_GRID * settings.layout_scale))
+    return max(grid, int(math.floor(padded_width / grid + 0.5)) * grid)
 
 
 def _chapter_layouts(
@@ -161,12 +159,13 @@ def _chapter_layouts(
     settings: ExoSettings,
 ) -> list[_ChapterLayout]:
     marker_height = max(1, round(settings.font_size * 22 / 15))
-    background_y = -settings.height / 2 + 20 + marker_height / 2
+    margin = 20 * settings.layout_scale
+    background_y = -settings.height / 2 + margin + marker_height / 2
     text_y = background_y + settings.font_size * 2 / 3
     layouts: list[_ChapterLayout] = []
     for start, end, text in frame_ranges:
         width = _chapter_background_width(text, settings)
-        x = -settings.width / 2 + 20 + width / 2
+        x = -settings.width / 2 + margin + width / 2
         layouts.append(
             _ChapterLayout(
                 start=start,
@@ -191,13 +190,26 @@ def generate_exo_object(
     layer: int = 1,
     font_size: int | None = None,
     text_color: str | None = None,
+    outline_color: str | None = None,
     y_position: float | None = None,
+    x_position: float | None = None,
+    text_align: int = 7,
+    group_id: int | None = None,
     include_animation: bool = False,
 ) -> str:
     encoded_text = encode_text_for_exo(text)
     size = font_size if font_size is not None else settings.font_size
     color = text_color if text_color is not None else settings.text_color
+    outline = outline_color if outline_color is not None else "000000"
     y = y_position if y_position is not None else settings.y_position
+    x = x_position if x_position is not None else 0.0
+    group = f"\ngroup={group_id}" if group_id is not None else ""
+    fine_outline = max(1, round(settings.layout_scale))
+    heavy_outline = max(1, round(2 * settings.layout_scale))
+    shadow_x = max(1, round(4 * settings.layout_scale))
+    shadow_y = max(1, round(2 * settings.layout_scale))
+    gradient_width = max(1, round(65 * settings.layout_scale))
+    glow_size = max(1, round(10 * settings.layout_scale))
     animation = ""
     standard_index = 6
     if include_animation:
@@ -228,7 +240,7 @@ param=
     return f"""[{index}]
 start={start_frame}
 end={end_frame}
-layer={layer}
+layer={layer}{group}
 overlay=1
 camera=0
 [{index}.0]
@@ -244,7 +256,7 @@ type=0
 autoadjust=0
 soft=1
 monospace=0
-align=7
+align={text_align}
 spacing_x=0
 spacing_y=0
 precision=1
@@ -259,7 +271,7 @@ _disable=1
 中心X=0
 中心Y=0
 角度=0.0
-幅=65
+幅={gradient_width}
 blend=0
 color=ffda44
 no_color=0
@@ -268,20 +280,20 @@ no_color2=0
 type=3
 [{index}.2]
 _name=縁取り
-サイズ=1
+サイズ={fine_outline}
 ぼかし=100
-color=000000
+color={outline}
 file=
 [{index}.3]
 _name=縁取り
-サイズ=2
+サイズ={heavy_outline}
 ぼかし=0
-color=000000
+color={outline}
 file=
 [{index}.4]
 _name=シャドー
-X=4
-Y=2
+X={shadow_x}
+Y={shadow_y}
 濃さ=100.0
 拡散=0
 影を別オブジェクトで描画=0
@@ -290,13 +302,13 @@ file=
 [{index}.5]
 _name=縁取り
 _disable=1
-サイズ=10
+サイズ={glow_size}
 ぼかし=50
 color=ffffff
 file=
 {animation}[{index}.{standard_index}]
 _name=標準描画
-X=0.0
+X={x:.1f}
 Y={y}
 Z=0.0
 拡大率=100.00
@@ -320,6 +332,8 @@ def _chapter_custom_object(
     chained: bool,
     marker_height: int,
     corner_radius: int,
+    gradient_shoulder: int,
+    layout_scale: float,
 ) -> str:
     chain = "\nchain=1" if chained else ""
     moving = start_layout.width != end_layout.width or start_layout.x != end_layout.x
@@ -344,13 +358,13 @@ def _chapter_custom_object(
         filters = f"""
 [{index}.1]
 _name=縁取り
-サイズ=3
+サイズ={max(1, round(3 * layout_scale))}
 ぼかし=100
 color=000000
 file=
 [{index}.2]
 _name=縁取り
-サイズ=3
+サイズ={max(1, round(3 * layout_scale))}
 ぼかし=0
 color=000000
 file=
@@ -360,7 +374,7 @@ _name=グラデーション
 中心X={gradient_start},{gradient_end},1
 中心Y=0
 角度=60.0
-幅={_CHAPTER_GRADIENT_SHOULDER * 2}
+幅={gradient_shoulder * 2}
 blend=0
 color={color}
 no_color=0
@@ -372,7 +386,7 @@ _name=シャドー
 X=0
 Y=0
 濃さ=50.0
-拡散=15
+拡散={max(1, round(15 * layout_scale))}
 影を別オブジェクトで描画=0
 color=000000
 file="""
@@ -421,9 +435,12 @@ def _chapter_background_objects(
     transition_frames = max(1, round(settings.rate * _CHAPTER_BACKGROUND_TRANSITION_SECONDS))
     marker_height = max(1, round(settings.font_size * 22 / 15))
     corner_radius = max(1, round(settings.font_size / 2))
+    gradient_shoulder = max(
+        1, round(_CHAPTER_GRADIENT_SHOULDER * settings.layout_scale)
+    )
 
     for chapter_index, layout in enumerate(layouts):
-        gradient_extent = layout.width // 2 + _CHAPTER_GRADIENT_SHOULDER
+        gradient_extent = layout.width // 2 + gradient_shoulder
         gradient_reversed = chapter_index % 2 == 1
         previous = layouts[chapter_index - 1] if chapter_index else layout
         total_frames = layout.end - layout.start + 1
@@ -445,6 +462,8 @@ def _chapter_background_objects(
                     chained=False,
                     marker_height=marker_height,
                     corner_radius=corner_radius,
+                    gradient_shoulder=gradient_shoulder,
+                    layout_scale=settings.layout_scale,
                 )
             )
             index += 1
@@ -470,6 +489,8 @@ def _chapter_background_objects(
                 chained=chained,
                 marker_height=marker_height,
                 corner_radius=corner_radius,
+                gradient_shoulder=gradient_shoulder,
+                layout_scale=settings.layout_scale,
             )
         )
         index += 1
@@ -491,6 +512,10 @@ def _chapter_text_object(
     chain = "\nchain=1" if chained else ""
     encoded_text = encode_text_for_exo(layout.text)
     clip_track = f"{clip_start},{clip_end},{_CHAPTER_EASING}"
+    fine_outline = max(1, round(settings.layout_scale))
+    heavy_outline = max(1, round(2 * settings.layout_scale))
+    shadow_x = max(1, round(4 * settings.layout_scale))
+    shadow_y = max(1, round(2 * settings.layout_scale))
     return f"""[{index}]
 start={start}
 end={end}
@@ -520,20 +545,20 @@ font={settings.font}
 text={encoded_text}
 [{index}.1]
 _name=縁取り
-サイズ=1
+サイズ={fine_outline}
 ぼかし=100
 color=000000
 file=
 [{index}.2]
 _name=縁取り
-サイズ=2
+サイズ={heavy_outline}
 ぼかし=0
 color=000000
 file=
 [{index}.3]
 _name=シャドー
-X=4
-Y=2
+X={shadow_x}
+Y={shadow_y}
 濃さ=100.0
 拡散=0
 影を別オブジェクトで描画=0
@@ -544,7 +569,7 @@ _name=斜めクリッピング
 中心X={clip_track}
 中心Y=0
 角度=-90.0
-ぼかし={_CHAPTER_GRADIENT_SHOULDER}
+ぼかし={max(1, round(_CHAPTER_GRADIENT_SHOULDER * settings.layout_scale))}
 幅=0
 [{index}.5]
 _name=標準描画
@@ -677,7 +702,23 @@ def generate_exo_video_object(
     *,
     layer: int = 1,
     scale_percent: float = 100.0,
+    x_position: float = 0.0,
+    y_position: float = 0.0,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> str:
+    crop_filter = ""
+    standard_index = 1
+    if crop is not None and any(crop):
+        top, bottom, left, right = crop
+        crop_filter = f"""[{index}.1]
+_name=クリッピング
+上={top}
+下={bottom}
+左={left}
+右={right}
+中心の位置を変更=1
+"""
+        standard_index = 2
     return f"""[{index}]
 start={segment.output_start_frame}
 end={segment.output_end_frame}
@@ -692,10 +733,10 @@ _name=動画ファイル
 ループ再生=0
 アルファチャンネルを読み込む=0
 file={source_path}
-[{index}.1]
+{crop_filter}[{index}.{standard_index}]
 _name=標準描画
-X=0.0
-Y=0.0
+X={x_position:.1f}
+Y={y_position:.1f}
 Z=0.0
 拡大率={scale_percent:.2f}
 透明度=0.0
@@ -767,8 +808,12 @@ def generate_subtitle_background_object(
     *,
     layer: int,
 ) -> str:
-    size = settings.width + _SUBTITLE_BACKGROUND_EXTRA_WIDTH
-    y = settings.y_position + size / 2 - _SUBTITLE_BACKGROUND_TOP_OFFSET
+    size = settings.width + round(_SUBTITLE_BACKGROUND_EXTRA_WIDTH * settings.layout_scale)
+    y = (
+        settings.y_position
+        + size / 2
+        - _SUBTITLE_BACKGROUND_TOP_OFFSET * settings.layout_scale
+    )
     return f"""[{index}]
 start={start_frame}
 end={end_frame}
@@ -785,7 +830,7 @@ color=000000
 name=
 [{index}.1]
 _name=境界ぼかし
-範囲=40
+範囲={max(1, round(40 * settings.layout_scale))}
 縦横比=-100.0
 透明度の境界をぼかす=0
 [{index}.2]
@@ -811,6 +856,8 @@ def generate_exo_file(
     broll_placements: list[BrollPlacement] | None = None,
     subtitle_background: bool = True,
     additional_marker_layers: list[list[ExoMarker]] | None = None,
+    segment_number_markers: list[ExoMarker] | None = None,
+    additional_marker_font_scale: float = 1.0,
 ) -> str:
     _validate_shift_jis_literal("exo.font", settings.font)
     if media_plan is not None and composite_media_clips:
@@ -820,7 +867,7 @@ def generate_exo_file(
         media_source = str(media_plan.source_path.resolve())
         _validate_media_path(media_source)
     clips = composite_media_clips or []
-    clip_paths: list[tuple[str, str, str | None]] = []
+    clip_paths: list[tuple[str, str, str | None, str | None]] = []
     for clip in clips:
         video_path = str(clip.video_path.resolve())
         audio_path = str(clip.audio_path.resolve())
@@ -829,11 +876,18 @@ def generate_exo_file(
             if clip.overlay_video_path is not None
             else None
         )
+        overlay_audio_path = (
+            str(clip.overlay_audio_path.resolve())
+            if clip.overlay_audio_path is not None
+            else None
+        )
         _validate_media_path(video_path)
         _validate_media_path(audio_path)
         if overlay_video_path is not None:
             _validate_media_path(overlay_video_path)
-        clip_paths.append((video_path, audio_path, overlay_video_path))
+        if overlay_audio_path is not None:
+            _validate_media_path(overlay_audio_path)
+        clip_paths.append((video_path, audio_path, overlay_video_path, overlay_audio_path))
     broll = sorted(
         broll_placements or [],
         key=lambda item: (item.output_start_frame, item.output_end_frame, item.id),
@@ -849,22 +903,27 @@ scale={settings.scale}
 length={total_frames}
 audio_rate={settings.audio_rate}
 audio_ch={settings.audio_ch}"""
-    frame_ranges: list[tuple[int, int, str]] = []
+    frame_ranges: list[tuple[int, int, str, str | None]] = []
     for sub in sorted(subtitles, key=lambda s: (s.start_time, s.end_time)):
         start = time_to_frame(sub.start_time, settings.rate)
         end = time_to_frame(sub.end_time, settings.rate)
         if end <= start:
             end = start + 1
-        frame_ranges.append((start, end, sub.text))
+        frame_ranges.append((start, end, sub.text, sub.outline_color))
 
     for i in range(len(frame_ranges) - 1):
-        start, end, text = frame_ranges[i]
+        start, end, text, outline_color = frame_ranges[i]
         next_start = frame_ranges[i + 1][0]
         if end >= next_start:
-            frame_ranges[i] = (start, max(start + 1, next_start - 1), text)
+            frame_ranges[i] = (
+                start,
+                max(start + 1, next_start - 1),
+                text,
+                outline_color,
+            )
 
     if insert_initial_empty and frame_ranges and frame_ranges[0][0] > 1:
-        frame_ranges.insert(0, (1, frame_ranges[0][0] - 1, ""))
+        frame_ranges.insert(0, (1, frame_ranges[0][0] - 1, "", None))
 
     objects = []
     index = 0
@@ -875,13 +934,24 @@ audio_ch={settings.audio_ch}"""
         for segment in media_plan.segments:
             objects.append(generate_exo_audio_object(index, segment, media_source, layer=2))
             index += 1
-    for clip, (video_path, _, _) in zip(clips, clip_paths):
-        objects.append(generate_exo_video_object(index, clip.segment, video_path, layer=1))
+    for clip, (video_path, _, _, _) in zip(clips, clip_paths):
+        objects.append(
+            generate_exo_video_object(
+                index,
+                clip.segment,
+                video_path,
+                layer=1,
+                scale_percent=clip.video_scale_percent,
+                x_position=clip.video_x,
+                y_position=clip.video_y,
+                crop=clip.video_crop,
+            )
+        )
         index += 1
-    for clip, (_, audio_path, _) in zip(clips, clip_paths):
+    for clip, (_, audio_path, _, _) in zip(clips, clip_paths):
         objects.append(generate_exo_audio_object(index, clip.segment, audio_path, layer=2))
         index += 1
-    for clip, (_, _, overlay_video_path) in zip(clips, clip_paths):
+    for clip, (_, _, overlay_video_path, _) in zip(clips, clip_paths):
         if overlay_video_path is None:
             continue
         objects.append(
@@ -890,13 +960,33 @@ audio_ch={settings.audio_ch}"""
                 clip.segment,
                 overlay_video_path,
                 layer=3,
+                scale_percent=clip.overlay_scale_percent,
+                x_position=clip.overlay_x,
+                y_position=clip.overlay_y,
+                crop=clip.overlay_crop,
+            )
+        )
+        index += 1
+    for clip, (_, _, _, overlay_audio_path) in zip(clips, clip_paths):
+        if overlay_audio_path is None:
+            continue
+        objects.append(
+            generate_exo_audio_object(
+                index,
+                clip.segment,
+                overlay_audio_path,
+                layer=4,
+                volume=clip.overlay_audio_volume,
             )
         )
         index += 1
     has_primary_media = media_plan is not None or bool(clips)
     primary_media_layers = (
-        3
-        if any(clip.overlay_video_path is not None for clip in clips)
+        4
+        if any(
+            clip.overlay_video_path is not None or clip.overlay_audio_path is not None
+            for clip in clips
+        )
         else (2 if has_primary_media else 0)
     )
     edit_video_layer = primary_media_layers + 1
@@ -948,7 +1038,9 @@ audio_ch={settings.audio_ch}"""
     subtitle_layer = background_layer + 1 if subtitle_background else background_layer
     qa_layer = subtitle_layer + 1
     extra_marker_layers = additional_marker_layers or []
-    chapter_layer = qa_layer + max(1, len(extra_marker_layers))
+    number_markers = segment_number_markers or []
+    segment_number_layer = qa_layer + len(extra_marker_layers)
+    chapter_layer = segment_number_layer + 1 if number_markers else qa_layer + max(1, len(extra_marker_layers))
     if frame_ranges and subtitle_background:
         objects.append(
             generate_subtitle_background_object(
@@ -960,8 +1052,19 @@ audio_ch={settings.audio_ch}"""
             )
         )
         index += 1
-    for start, end, text in frame_ranges:
-        objects.append(generate_exo_object(index, start, end, text, settings, layer=subtitle_layer, include_animation=True))
+    for start, end, text, outline_color in frame_ranges:
+        objects.append(
+            generate_exo_object(
+                index,
+                start,
+                end,
+                text,
+                settings,
+                layer=subtitle_layer,
+                outline_color=outline_color,
+                include_animation=True,
+            )
+        )
         index += 1
     chapter_objects, index = generate_chapter_exo_objects(
         index,
@@ -979,14 +1082,19 @@ audio_ch={settings.audio_ch}"""
                 text,
                 settings,
                 layer=qa_layer,
-                font_size=max(24, int(settings.font_size * 0.55)),
+                font_size=max(round(24 * settings.layout_scale), int(settings.font_size * 0.55)),
                 text_color=_diagnostic_text_color(text),
-                y_position=max(40.0, settings.y_position - settings.font_size * 1.25),
+                y_position=max(
+                    40.0 * settings.layout_scale,
+                    settings.y_position - settings.font_size * 1.25,
+                ),
             )
         )
         index += 1
     for layer_offset, markers in enumerate(extra_marker_layers):
-        marker_font_size = _additional_marker_font_size(settings, len(extra_marker_layers))
+        marker_font_size = _additional_marker_font_size(
+            settings, len(extra_marker_layers), additional_marker_font_scale
+        )
         marker_y = _additional_marker_y_position(
             settings,
             layer_offset,
@@ -1008,16 +1116,49 @@ audio_ch={settings.audio_ch}"""
                 )
             )
             index += 1
+    number_font_size = max(
+        round(30 * settings.layout_scale), round(settings.font_size * 0.8)
+    )
+    for marker in sorted(number_markers, key=lambda item: (item.start_time, item.end_time)):
+        start = time_to_frame(marker.start_time, settings.rate)
+        # These markers are grouped with pre-split source clips, so their
+        # inclusive frame range must exactly match the clip's exclusive end.
+        end = max(start, time_to_frame(marker.end_time, settings.rate) - 1)
+        objects.append(
+            generate_exo_object(
+                index,
+                start,
+                end,
+                marker.text,
+                settings,
+                layer=segment_number_layer,
+                font_size=number_font_size,
+                text_color="ffffff",
+                x_position=-settings.width / 2 + 12 * settings.layout_scale,
+                y_position=-settings.height / 2 - 2 * settings.layout_scale,
+                text_align=0,
+                group_id=marker.group_id,
+            )
+        )
+        index += 1
     return header + "\n" + "\n".join(objects) + ("\n" if objects else "\n")
 
 
-def _additional_marker_font_size(settings: ExoSettings, layer_count: int) -> int:
-    preferred = max(24, int(settings.font_size * 0.55))
+def _additional_marker_font_size(
+    settings: ExoSettings, layer_count: int, scale: float = 1.0
+) -> int:
+    preferred = max(
+        round(24 * settings.layout_scale),
+        round(settings.font_size * 0.55 * max(0.1, scale)),
+    )
     if layer_count <= 1:
         return preferred
     # Editorial markers contain up to six manually wrapped lines. Keep enough
     # vertical room for every simultaneous marker layer inside the canvas.
-    maximum_fitting = max(20, int((settings.height - 80) / (layer_count * 8)))
+    maximum_fitting = max(
+        round(20 * settings.layout_scale),
+        int((settings.height - 80 * settings.layout_scale) / (layer_count * 5)),
+    )
     return min(preferred, maximum_fitting)
 
 
@@ -1028,10 +1169,11 @@ def _additional_marker_y_position(
     font_size: int,
 ) -> float:
     half_block = font_size * 4.0
-    top = -settings.height / 2.0 + half_block + 20.0
+    margin = 20.0 * settings.layout_scale
+    top = -settings.height / 2.0 + half_block + margin
     if layer_count <= 1:
         return top
-    bottom = settings.height / 2.0 - half_block - 20.0
+    bottom = settings.height / 2.0 - half_block - margin
     if bottom < top:
         return round(
             -settings.height * 0.35
@@ -1047,15 +1189,15 @@ def _validate_media_path(value: str) -> None:
 
 def _diagnostic_text_color(text: str) -> str:
     lowered = text.lower()
-    if "montage + voiceover" in lowered:
+    if any(value in lowered for value in ("narrated montage", "narration bridge", "montage + voiceover")):
         return "cc88ff"
     if "cut" in lowered:
         return "ff5555"
-    if "condense" in lowered:
+    if any(value in lowered for value in ("trim", "select highlights", "montage", "condense")):
         return "ff9900"
-    if "keep" in lowered:
+    if any(value in lowered for value in ("keep", "preserve")):
         return "66dd88"
-    if "connect / review" in lowered:
+    if any(value in lowered for value in ("connect", "reorder", "foreshadow", "callback", "compare", "intercut")):
         return "55ccff"
     if "high" in lowered:
         return "ff0000"

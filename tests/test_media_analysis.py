@@ -210,6 +210,11 @@ class MediaAnalysisTests(unittest.TestCase):
         self.assertEqual(_transition_budget(10_800.0), 72)
         self.assertEqual(_transition_budget(20_000.0), 96)
 
+    def test_editorial_sampling_scale_adds_bounded_coarse_evidence(self) -> None:
+        self.assertEqual(len(_sample_timestamps(3600.0, "simple")), 120)
+        self.assertEqual(len(_sample_timestamps(3600.0, "simple", 1.5)), 180)
+        self.assertEqual(_sampling_plan(6000.0, "probe", 1.5).coarse_count, 134)
+
     def test_analysis_builds_content_bounded_semantic_ranges(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             media = Path(temp_name) / "gameplay.mp4"

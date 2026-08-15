@@ -54,6 +54,7 @@ class Subtitle:
     cleanup_group_index: int | None = None
     split_source: str = ""
     timing_adjustment: str = "none"
+    outline_color: str | None = None
 
 
 @dataclass
@@ -61,6 +62,7 @@ class ExoMarker:
     start_time: float
     end_time: float
     text: str = ""
+    group_id: int | None = None
 
 
 @dataclass
@@ -93,6 +95,11 @@ class ExoSettings:
     text_color: str = "ffffff"
     y_position: float = 717.0
 
+    @property
+    def layout_scale(self) -> float:
+        """Scale design pixels from the original 2560x1440 layout."""
+        return self.height / 1440.0
+
 
 @dataclass(frozen=True)
 class ExoMediaSegment:
@@ -114,6 +121,16 @@ class ExoCompositeMediaClip:
     audio_path: Path
     segment: ExoMediaSegment
     overlay_video_path: Path | None = None
+    overlay_audio_path: Path | None = None
+    video_crop: tuple[int, int, int, int] | None = None
+    video_scale_percent: float = 100.0
+    video_x: float = 0.0
+    video_y: float = 0.0
+    overlay_crop: tuple[int, int, int, int] | None = None
+    overlay_scale_percent: float = 100.0
+    overlay_x: float = 0.0
+    overlay_y: float = 0.0
+    overlay_audio_volume: float = 100.0
 
 
 @dataclass(frozen=True)

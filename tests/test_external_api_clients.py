@@ -142,6 +142,21 @@ class ExternalApiClientTests(unittest.TestCase):
         payload = request.call_args.args[2]
         self.assertNotIn("generationConfig", payload)
 
+    def test_gemini_37_transcription_pins_low_thinking(self) -> None:
+        response = {
+            "candidates": [{"content": {"parts": [{"text": "どうも"}]}}],
+            "usageMetadata": {},
+        }
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch("subtitler.external_transcribers.verify_gemini_model_available"), mock.patch(
+                "subtitler.external_transcribers._request_json", return_value=response
+            ) as request:
+                GeminiTranscriber(
+                    "gemini-3.7-flash", Path(temp_name), ApiUsageLedger(), api_key="secret-key"
+                ).transcribe(self._chunk())
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["generationConfig"], {"thinkingConfig": {"thinkingLevel": "low"}})
+
     def test_gemini_model_verification_uses_api_key_header_not_query(self) -> None:
         with mock.patch("subtitler.external_transcribers._request_json", return_value={"models": []}) as request:
             with self.assertRaises(Exception):
@@ -640,6 +655,9 @@ class ExternalApiClientTests(unittest.TestCase):
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 2.0, [])), 5.0)
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 5.0, []), "gemini-3.1-flash-lite"), 5.0)
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gemini-3.5-flash"), 30.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 2.0, []), "gemini-3.7-flash"), 20.0)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 7.82, []), "gemini-3.7-flash"), 36.28)
+        self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gemini-3.7-flash"), 125.0)
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gemini-3.1-pro-preview"), 60.0)
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "gpt-transcribe"), 60.0)
         self.assertEqual(_hosted_transcription_timeout(AudioChunk(1, 0.0, 30.0, []), "test-transcription-model", 2.0), 60.0)

@@ -242,7 +242,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     if is_hosted:
         approved_transcription = {
             "openai": OPENAI_TRANSCRIPTION_MODELS,
-            "gemini": {"gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"},
+            "gemini": {"gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"},
         }
         approved_cleanup = {
             "openai": {
@@ -253,6 +253,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
                 "gpt-5.6-luna",
             },
             "gemini": {
+                "gemini-3.7-flash",
                 "gemini-3.6-flash",
                 "gemini-3.5-flash",
                 "gemini-3.1-pro-preview",

@@ -205,7 +205,7 @@ describe("config store runtime paths", () => {
     expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-transcribe");
   });
 
-  it("keeps a user-selected fallback while migrating Gemini 3.5 cleanup to 3.6", () => {
+  it("migrates an unsupported fallback to Gemini 3.7 while migrating Gemini 3.5 cleanup to 3.6", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -226,7 +226,7 @@ describe("config store runtime paths", () => {
     const state = loadAppState(paths);
 
     expect(state.configs.hosted.backend.fallback_transcriber).toBe("gemini");
-    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.5-flash");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.7-flash");
     expect(state.configs.hosted.cleanup.backend).toBe("gemini");
     expect(state.configs.hosted.cleanup.api_model).toBe("gemini-3.6-flash");
     expect(state.configs.hosted.cleanup.thinking_level).toBe("minimal");

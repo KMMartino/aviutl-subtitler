@@ -44,14 +44,20 @@ export function selectVerifiedHostedSettings(settings: CoreWorkflowSettings, ver
   const recommendedFallback = selectedTranscription
     ? recommendedFallbackTranscription(selectedTranscription.provider, selectedTranscription.model)
     : recommendedFallbackTranscription(hosted.transcriptionProvider, hosted.transcriptionModel);
+  const distinctFallbackOptions = transcriptionOptions.filter((option) => (
+    !selectedTranscription
+    || option.provider !== selectedTranscription.provider
+    || option.model !== selectedTranscription.model
+  ));
   const selectedFallbackTranscription = matchingHostedOption(
-    transcriptionOptions,
+    distinctFallbackOptions,
     hosted.fallbackTranscriptionProvider,
     hosted.fallbackTranscriptionModel
-  ) ?? matchingHostedOption(transcriptionOptions, recommendedFallback.provider, recommendedFallback.model)
-    ?? transcriptionOptions.find((option) => option.provider === recommendedFallback.provider)
-    ?? transcriptionOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider)
-    ?? transcriptionOptions[0];
+  ) ?? matchingHostedOption(distinctFallbackOptions, recommendedFallback.provider, recommendedFallback.model)
+    ?? distinctFallbackOptions.find((option) => option.provider === recommendedFallback.provider)
+    ?? distinctFallbackOptions.find((option) => option.provider === hosted.fallbackTranscriptionProvider)
+    ?? distinctFallbackOptions[0]
+    ?? selectedTranscription;
   const selectedCleanup = matchingHostedOption(cleanupOptions, hosted.cleanupProvider, hosted.cleanupModel)
     ?? cleanupOptions.find((option) => option.provider === hosted.cleanupProvider)
     ?? cleanupOptions[0];

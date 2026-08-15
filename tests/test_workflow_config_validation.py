@@ -82,6 +82,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("openai", "gpt-5.6-terra"),
             ("openai", "gpt-5.6-luna"),
             ("gemini", "gemini-3.6-flash"),
+            ("gemini", "gemini-3.7-flash"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -94,6 +95,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_new_approved_transcription_models_are_allowed(self):
         for backend, model in (
             ("openai", "gpt-transcribe"),
+            ("gemini", "gemini-3.7-flash"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),
         ):
@@ -102,6 +104,14 @@ class WorkflowConfigValidationTests(unittest.TestCase):
                 config["backend"]["transcriber"] = backend
                 config["backend"]["transcription_model"] = model
                 validate_workflow_config(config, workflow="hosted", check_paths=False)
+
+    def test_gemini_36_flash_is_not_approved_for_transcription(self):
+        config = load_workflow_config("hosted")
+        config["backend"]["transcriber"] = "gemini"
+        config["backend"]["transcription_model"] = "gemini-3.6-flash"
+
+        with self.assertRaises(SubtitlerError):
+            validate_workflow_config(config, workflow="hosted", check_paths=False)
 
     def test_approved_fallback_transcription_models_are_allowed(self):
         config = load_workflow_config("hosted")

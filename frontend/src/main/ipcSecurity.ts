@@ -180,7 +180,7 @@ function validateRunRequest(value: unknown): void {
   }
   if (request.editorialRestartFrom !== undefined) {
     if (request.editorialCheckpoint === undefined) fail();
-    assertEnum(request.editorialRestartFrom, new Set(["compatible", "source_probe", "transcription", "visual_learning", "semantic_spans", "local_reconciliation", "global_reconciliation"]));
+    assertEnum(request.editorialRestartFrom, new Set(["compatible", "source_probe", "transcription", "visual_learning", "semantic_spans", "local_reconciliation", "global_reconciliation", "editorial_assets"]));
   }
   if (request.editorialCheckpointSources !== undefined) {
     if (request.editorialCheckpoint === undefined) fail();

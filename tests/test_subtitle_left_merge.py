@@ -157,6 +157,29 @@ class SubtitleLeftMergeTests(unittest.TestCase):
             )
         )
 
+    def test_cleanup_window_allows_bounded_duplicate_overlap_repairs(self) -> None:
+        self.assertTrue(
+            _cleanup_window_preserves_content(
+                ["番組の番組の幕開けです"],
+                ["番組の幕開けです"],
+            )
+        )
+        self.assertTrue(
+            _cleanup_window_preserves_content(
+                [
+                    "ぜひお越しくださいっていうところのでの告知でした",
+                    "ではではここまでご視聴のありがではここまでご視聴ありがとうございましたバイバイ",
+                ],
+                [
+                    "ぜひお越しくださいっていうところでの告知でした",
+                    "ではではここまでご視聴ありがとうございましたバイバイ",
+                ],
+            )
+        )
+
+    def test_cleanup_window_preserves_intentional_short_repetition(self) -> None:
+        self.assertFalse(_cleanup_window_preserves_content(["すごいすごい"], ["すごい"]))
+
     def test_final_duration_cap_reapplies_after_boundary_touching(self) -> None:
         subtitle = _sub("長い字幕", 1.0, 7.6, 0, 0)
 

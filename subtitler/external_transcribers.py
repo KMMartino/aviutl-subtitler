@@ -35,6 +35,8 @@ def require_api_key(name: str) -> str:
 
 def _hosted_transcription_timeout(chunk: AudioChunk, model: str = "", timeout_scale: float = 1.0) -> float:
     duration = max(0.0, chunk.end - chunk.start)
+    if model.lower() == "gemini-3.7-flash":
+        return max(20.0, duration * 4.0 * max(1.0, timeout_scale) + 5.0)
     model_scale = 2.0 if _is_heavy_transcription_model(model) else 1.0
     return max(5.0, duration * model_scale * max(1.0, timeout_scale))
 
@@ -108,6 +110,8 @@ class GeminiTranscriber:
                 }
             ],
         }
+        if self.model == "gemini-3.7-flash":
+            payload["generationConfig"] = {"thinkingConfig": {"thinkingLevel": "low"}}
         if not self.model.startswith("gemini-3"):
             payload["generationConfig"] = {"temperature": 0.0}
         data = _request_json(

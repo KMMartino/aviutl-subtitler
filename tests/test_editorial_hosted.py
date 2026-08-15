@@ -1,6 +1,9 @@
+import io
 import tempfile
 import json
+import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -40,6 +43,15 @@ class HostedEditorialTests(unittest.TestCase):
         self.assertEqual(cleanup["cleanup"]["api_model"], "gpt-5.4-mini")
         self.assertEqual(cleanup["cleanup"]["reasoning_effort"], "medium")
         self.assertEqual(executor.config["cleanup"]["api_model"], "user-cleanup")
+
+    def test_editorial_analysis_defaults_to_medium_reasoning(self) -> None:
+        executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
+        executor.config = {"editorial": {}}
+
+        self.assertEqual(
+            executor._editorial_model_config()["cleanup"]["reasoning_effort"],
+            "medium",
+        )
 
     def test_failed_director_retry_reuses_completed_global_synthesis(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -94,6 +106,52 @@ class HostedEditorialTests(unittest.TestCase):
             self.assertEqual(result["director_review"], director_review)
             self.assertEqual(result["director_model"], "gpt-5.6-terra")
 
+    def test_global_model_calls_report_progress_while_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
+            executor.options = HostedEditorialExecutorOptions(
+                config_path=root / "config.json",
+                env_file=root / ".env",
+                workspace=root / "workspace",
+                pipeline_script=root / "pipeline.py",
+            )
+            executor.config = {"cleanup": {}, "editorial": {}}
+            project = {
+                "output_locale": "en",
+                "editorial_map": {"global_reconciliation": {"output": None}},
+                "sources": [],
+            }
+            base = {"global_threads": [], "conflicts": []}
+            director_review = {"final_actions": [], "supporting_edits": [], "threads": []}
+            refiner = Mock()
+
+            def slow_result(value: dict[str, object]) -> dict[str, object]:
+                time.sleep(0.035)
+                return value
+
+            output = io.StringIO()
+            with (
+                patch.object(executor, "_build_editorial_refiner", return_value=refiner),
+                patch.object(executor, "_build_director_refiner", return_value=refiner),
+                patch(
+                    "subtitler.editorial_hosted.reconcile_editorial_project",
+                    side_effect=lambda **_kwargs: slow_result(base),
+                ),
+                patch(
+                    "subtitler.editorial_hosted.review_editorial_project",
+                    side_effect=lambda **_kwargs: slow_result(director_review),
+                ),
+                patch("subtitler.editorial_hosted.EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS", 0.01),
+                patch("subtitler.editorial_hosted.EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS", 0.02),
+                redirect_stdout(output),
+            ):
+                executor.finalize_project(project)
+
+            logs = output.getvalue()
+            self.assertIn("Editorial synthesis: the hosted model is still processing", logs)
+            self.assertIn("Editorial director: the hosted model is still processing", logs)
+
     def test_emphasized_phrase_uses_verified_token_timing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tokens.csv"
@@ -109,6 +167,61 @@ class HostedEditorialTests(unittest.TestCase):
             )
         self.assertEqual((result[0]["start_ms"], result[0]["end_ms"]), (1000, 1500))
         self.assertTrue(result[0]["timing_verified"])
+
+    def test_emphasized_phrase_clamps_silence_stretched_boundary_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tokens.csv"
+            path.write_text(
+                "chunk_index,token_index,start,end,text,kind\n"
+                "0,0,1.0,2.5,A,char\n"
+                "0,1,2.5,5.0,B,char\n"
+                "0,2,5.0,5.0,!,char\n",
+                encoding="utf-8",
+            )
+            result = _align_emphasized_phrases(
+                [{"id": "e", "source_text": "AB!", "start_ms": 900, "end_ms": 6000}],
+                path,
+            )
+
+        self.assertEqual((result[0]["start_ms"], result[0]["end_ms"]), (1750, 3250))
+
+    def test_emphasized_phrase_rejects_internal_silence_stretch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tokens.csv"
+            path.write_text(
+                "chunk_index,token_index,start,end,text,kind\n"
+                "0,0,1.0,1.2,A,char\n"
+                "0,1,1.2,4.0,B,char\n"
+                "0,2,4.0,4.2,C,char\n",
+                encoding="utf-8",
+            )
+            result = _align_emphasized_phrases(
+                [{"id": "e", "source_text": "ABC", "start_ms": 900, "end_ms": 5000}],
+                path,
+            )
+
+        self.assertEqual(result, [])
+
+    def test_emphasized_phrase_deduplicates_punctuation_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tokens.csv"
+            path.write_text(
+                "chunk_index,token_index,start,end,text,kind\n"
+                "0,0,1.0,1.2,Good,word\n"
+                "0,1,1.2,1.5,news,word\n"
+                "0,2,1.5,1.5,!,char\n",
+                encoding="utf-8",
+            )
+            result = _align_emphasized_phrases(
+                [
+                    {"id": "short", "source_text": "Good news", "start_ms": 900, "end_ms": 2000, "confidence": 0.9},
+                    {"id": "punctuated", "source_text": "Good news!", "start_ms": 900, "end_ms": 2000, "confidence": 0.9},
+                ],
+                path,
+            )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["id"], "punctuated")
 
     def test_loads_cleaned_text_with_matching_timing_as_semantic_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -222,6 +335,7 @@ class HostedEditorialTests(unittest.TestCase):
                     {"source_probe": {"duration_ms": 60_000}},
                 )
             self.assertEqual(analyze.call_args.kwargs["media_path"], Path(source["visual_path"]))
+            self.assertEqual(analyze.call_args.kwargs["sampling_scale"], 1.5)
 
     def test_rejects_transcription_artifacts_with_unresolved_audio_groups(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

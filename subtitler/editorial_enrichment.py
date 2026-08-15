@@ -21,8 +21,15 @@ from .hosted_http import request_json
 from .media_analysis import VisualSample, _extract_samples, compare_visual_samples
 
 
-BURST_PROMPT_VERSION = "editorial-temporal-bursts-v3"
-REVIEW_PROMPT_VERSION = "editorial-targeted-review-v2"
+BURST_PROMPT_VERSION = "editorial-temporal-bursts-v4"
+REVIEW_PROMPT_VERSION = "editorial-targeted-review-v3"
+BURST_POSITIONS = (
+    ("before", -1.0),
+    ("approaching", -0.5),
+    ("at", 0.0),
+    ("leaving", 0.5),
+    ("after", 1.0),
+)
 
 
 class AcousticEvents(list[dict[str, Any]]):
@@ -118,10 +125,11 @@ def analyze_temporal_bursts(
     acoustic_events: Sequence[dict[str, Any]],
     frame_differences: Sequence[dict[str, Any]] = (),
     model: str,
+    reasoning_effort: str = "medium",
     ffmpeg: str = "ffmpeg",
     output_locale: str = "en",
 ) -> dict[str, Any]:
-    """Inspect three-frame bursts near a bounded set of likely transitions."""
+    """Inspect five-frame bursts near a bounded set of likely transitions."""
     centers = _transition_centers(duration_ms, segments, acoustic_events, frame_differences)
     if not centers:
         return _empty_usage(BURST_PROMPT_VERSION, "bursts")
@@ -132,7 +140,7 @@ def analyze_temporal_bursts(
         )
         samples = _burst_samples(media_path, centers, duration_ms, output_dir, ffmpeg)
         prompt = (
-            "Review short ordered three-frame bursts from a long recording. Determine whether each burst "
+            "Review short ordered five-frame bursts from a long recording. Determine whether each burst "
             "shows a meaningful gameplay/state/scene transition, a continuation, or an ambiguous change. "
             "Focus on stable HUD cues, location/state changes, progress, retries/resets, menus/upgrades, "
             "encounters, reactions, and continuity. Do not invent events between frames. Return strict JSON: "
@@ -144,7 +152,13 @@ def analyze_temporal_bursts(
         prompt += "\nDeterministic selection evidence: " + json.dumps(
             centers, ensure_ascii=False, separators=(",", ":")
         )
-        parsed, input_tokens, output_tokens = _vision_request(model, prompt, samples, _sample_labels(centers))
+        parsed, input_tokens, output_tokens = _vision_request(
+            model,
+            prompt,
+            samples,
+            _sample_labels(centers),
+            reasoning_effort=reasoning_effort,
+        )
     results = []
     by_index = {item["index"]: item for item in centers}
     for item in _objects(parsed.get("bursts")):
@@ -180,6 +194,7 @@ def review_editorial_candidates(
     acoustic_events: Sequence[dict[str, Any]],
     game_knowledge: str,
     model: str,
+    reasoning_effort: str = "medium",
     ffmpeg: str = "ffmpeg",
     output_locale: str = "en",
 ) -> dict[str, Any]:
@@ -203,7 +218,7 @@ def review_editorial_candidates(
             "bursts": [row for row in temporal_bursts if start - 5000 <= int(row.get("timestamp_ms", 0)) <= end + 5000][:8],
             "acoustic_events": [row for row in acoustic_events if int(row.get("end_ms", 0)) > start and int(row.get("start_ms", 0)) < end][:12],
         })
-    prompt = f"""Perform a targeted second editorial review. Each numbered candidate has three nearby frames plus transcript, coarse visual, transition-burst, and local acoustic evidence. Acoustic energy is only a prompt to inspect; it is not proof of emotion. Silence is never grounds for cutting.
+    prompt = f"""Perform a targeted second editorial review. Each numbered candidate has five nearby frames plus transcript, coarse visual, transition-burst, and local acoustic evidence. Acoustic energy is only a prompt to inspect; it is not proof of emotion. Silence is never grounds for cutting.
 
 Output language: {output_language_instruction(output_locale)}
 
@@ -217,7 +232,13 @@ Return strict JSON:
 """
     with tempfile.TemporaryDirectory(prefix="subutl_review_") as temp_name:
         samples = _burst_samples(media_path, centers, duration_ms, Path(temp_name), ffmpeg)
-        parsed, input_tokens, output_tokens = _vision_request(model, prompt, samples, _sample_labels(centers, "candidate"))
+        parsed, input_tokens, output_tokens = _vision_request(
+            model,
+            prompt,
+            samples,
+            _sample_labels(centers, "candidate"),
+            reasoning_effort=reasoning_effort,
+        )
     reviews = []
     for item in _objects(parsed.get("reviews")):
         index = _integer(item.get("index"), -1)
@@ -407,7 +428,10 @@ def _burst_samples(media_path: Path, centers: Sequence[dict[str, Any]], duration
     for center in centers:
         seconds = int(center["timestamp_ms"]) / 1000.0
         radius = max(0.7, float(center.get("burst_radius_ms", 700)) / 1000.0)
-        timestamps.extend(max(0.0, min(end_sec, seconds + offset)) for offset in (-radius, 0.0, radius))
+        timestamps.extend(
+            max(0.0, min(end_sec, seconds + radius * multiplier))
+            for _, multiplier in BURST_POSITIONS
+        )
     return _extract_samples(media_path, media_kind="video", timestamps=timestamps, ffmpeg=ffmpeg, output_dir=output_dir, prefix="burst")
 
 
@@ -415,12 +439,19 @@ def _sample_labels(centers: Sequence[dict[str, Any]], noun: str = "burst") -> li
     result = []
     for center in centers:
         timestamp = int(center["timestamp_ms"])
-        for position in ("before", "at", "after"):
+        for position, _ in BURST_POSITIONS:
             result.append(f"{noun} {center['index']} {position}, centered at {timestamp} ms")
     return result
 
 
-def _vision_request(model: str, prompt: str, samples: Sequence[VisualSample], labels: Sequence[str]) -> tuple[dict[str, Any], int, int]:
+def _vision_request(
+    model: str,
+    prompt: str,
+    samples: Sequence[VisualSample],
+    labels: Sequence[str],
+    *,
+    reasoning_effort: str,
+) -> tuple[dict[str, Any], int, int]:
     content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
     for sample, label in zip(samples, labels):
         encoded = base64.b64encode(sample.jpeg_path.read_bytes()).decode("ascii")
@@ -430,7 +461,15 @@ def _vision_request(model: str, prompt: str, samples: Sequence[VisualSample], la
         ))
     data = request_json(
         "POST", "https://api.openai.com/v1/responses",
-        {"model": model, "reasoning": {"effort": "low"}, "input": [{"role": "user", "content": content}]},
+        {
+            "model": model,
+            "reasoning": {
+                "effort": reasoning_effort
+                if reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}
+                else "medium"
+            },
+            "input": [{"role": "user", "content": content}],
+        },
         ModelLoadError, "OpenAI editorial visual review failed",
         headers={"Authorization": f"Bearer {require_api_key('OPENAI_API_KEY')}", "Content-Type": "application/json"},
         timeout_sec=600.0,

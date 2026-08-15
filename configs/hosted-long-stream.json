@@ -31,7 +31,8 @@
   },
   "editorial": {
     "analysis_model": "gpt-5.6-luna",
-    "reasoning_effort": "low",
+    "reasoning_effort": "medium",
+    "visual_sampling_scale": 1.5,
     "director_model": "gpt-5.6-terra",
     "director_reasoning_effort": "low",
     "subtitle_cleanup_model": "gpt-5.4-mini",

@@ -215,6 +215,53 @@ class EditorialProjectTests(unittest.TestCase):
             self.assertEqual(persisted["schema_version"], 3)
             self.assertEqual(persisted["output_locale"], "en")
 
+    def test_load_repairs_duplicated_source_aggregates_from_local_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"media")
+            project = create_editorial_project(
+                [EditorialSourceInput(source, 60_000)],
+                EditorialProjectOptions(
+                    "A game", "Finish the run", 30_000, 45_000, subtitle_mode="emphasis"
+                ),
+            )
+            source_id = project["sources"][0]["source_id"]
+            local_output = {
+                "recommendations": [{"id": "recommendation-1"}],
+                "narration_briefs": [],
+                "creative_suggestions": [],
+                "emphasized_phrases": [{"id": "phrase-1"}],
+                "timeline_coverage": [{"start_ms": 0, "end_ms": 60_000}],
+            }
+            for stage in project["sources"][0]["stages"]:
+                update_source_stage(project, source_id, stage, "in_progress")
+                update_source_stage(
+                    project,
+                    source_id,
+                    stage,
+                    "complete",
+                    output=local_output if stage == "local_reconciliation" else {"stage": stage},
+                )
+            project["editorial_map"]["emphasized_phrases"] = [
+                {"id": "phrase-1"},
+                {"id": "phrase-1"},
+            ]
+            project["editorial_map"]["timeline_coverage"] = [
+                {"start_ms": 0, "end_ms": 60_000},
+                {"start_ms": 0, "end_ms": 60_000},
+            ]
+            checkpoint = root / "duplicated.editorial.json"
+            write_editorial_checkpoint(checkpoint, project)
+
+            loaded = load_editorial_checkpoint(checkpoint)
+
+            self.assertEqual(loaded["editorial_map"]["emphasized_phrases"], [{"id": "phrase-1"}])
+            self.assertEqual(
+                loaded["editorial_map"]["timeline_coverage"],
+                [{"start_ms": 0, "end_ms": 60_000}],
+            )
+
     def test_followup_extension_preserves_completed_source_results(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -49,7 +49,10 @@ class EditorialResumeTests(unittest.TestCase):
     def test_first_boundary_mismatch_requires_a_full_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = _completed_project(Path(directory))
-            with patch.dict(EDITORIAL_STAGE_VERSIONS, {"source_probe": 2}):
+            with patch.dict(
+                EDITORIAL_STAGE_VERSIONS,
+                {"source_probe": EDITORIAL_STAGE_VERSIONS["source_probe"] + 1},
+            ):
                 selected = prepare_editorial_resume(project, "compatible")
 
             self.assertEqual(selected, "source_probe")
@@ -89,6 +92,35 @@ class EditorialResumeTests(unittest.TestCase):
                 )
             )
             self.assertEqual(project["editorial_map"]["global_reconciliation"]["status"], "pending")
+
+    def test_successful_checkpoint_can_rerun_only_reference_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = _completed_project(Path(directory))
+            project["editorial_map"]["assets"] = [{"asset_id": "asset-001"}]
+
+            selected = prepare_editorial_resume(project, "editorial_assets")
+
+            self.assertEqual(selected, "editorial_assets")
+            self.assertEqual(project["editorial_map"]["global_reconciliation"]["status"], "complete")
+            self.assertEqual(project["editorial_map"]["editorial_assets"]["status"], "pending")
+            self.assertEqual(project["editorial_map"]["assets"], [])
+            self.assertTrue(
+                all(
+                    checkpoint["status"] == "complete"
+                    for checkpoint in project["sources"][0]["stages"].values()
+                )
+            )
+
+    def test_local_restart_clears_emphasis_and_coverage_aggregates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = _completed_project(Path(directory))
+            project["editorial_map"]["emphasized_phrases"] = [{"id": "stale-phrase"}]
+            project["editorial_map"]["timeline_coverage"] = [{"status": "stale"}]
+
+            prepare_editorial_resume(project, "local_reconciliation")
+
+            self.assertEqual(project["editorial_map"]["emphasized_phrases"], [])
+            self.assertEqual(project["editorial_map"]["timeline_coverage"], [])
 
     def test_inspection_matches_selected_media_by_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -176,6 +208,15 @@ def _completed_project(root: Path) -> dict:
             "attempts": 1,
             "completed_at_utc": "2026-01-01T00:00:00+00:00",
             "output": {"plan": True},
+        }
+    )
+    asset_checkpoint = project["editorial_map"]["editorial_assets"]
+    asset_checkpoint.update(
+        {
+            "status": "complete",
+            "attempts": 1,
+            "completed_at_utc": "2026-01-01T00:00:00+00:00",
+            "output": {"editorial_assets": []},
         }
     )
     project["editorial_map"]["status"] = "complete"

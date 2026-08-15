@@ -8,6 +8,55 @@ from subtitler.editorial_report import render_editorial_html, write_editorial_ht
 
 
 class EditorialReportTests(unittest.TestCase):
+    def test_final_plan_uses_explicit_links_numbered_directions_and_thread_colors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "game.mp4"
+            source.write_bytes(b"media")
+            project = create_editorial_project(
+                [EditorialSourceInput(source, 120_000)],
+                EditorialProjectOptions("Game", "Finish", 60_000, 90_000),
+            )
+            source_id = project["sources"][0]["source_id"]
+            project["editorial_map"]["editorial_direction_summary"] = "Protect the live payoff."
+            project["editorial_map"]["final_actions"] = [{
+                "action_id": "action-001",
+                "action_type": "preserve",
+                "source_id": source_id,
+                "start_ms": 10_000,
+                "end_ms": 20_000,
+                "instruction": "Keep the successful attempt intact.",
+                "rationale": "The live reaction is the payoff.",
+                "narration_brief_ids": [],
+                "supporting_edit_ids": ["edit-001"],
+                "thread_ids": ["thread-001"],
+            }]
+            project["editorial_map"]["supporting_edits"] = [{
+                "edit_id": "edit-001",
+                "parent_action_id": "action-001",
+                "action_type": "callback",
+                "source_id": source_id,
+                "start_ms": 18_000,
+                "end_ms": 19_000,
+                "instruction": "Briefly recall the failed opening attempt.",
+                "rationale": "It makes the improvement legible.",
+                "thread_ids": ["thread-001"],
+            }]
+            project["editorial_map"]["editorial_threads"] = [{
+                "thread_id": "thread-001",
+                "title": "Failure to payoff",
+                "editorial_use": "Connect the opening failure to the win.",
+            }]
+
+            rendered = render_editorial_html(project)
+
+            self.assertIn('href="#direction-1"', rendered)
+            self.assertIn("1. game-001", rendered)
+            self.assertEqual(rendered.count("Failure to payoff"), 2)
+            self.assertIn("Keep the successful attempt intact.", rendered)
+            self.assertIn("Briefly recall the failed opening attempt.", rendered)
+            self.assertNotIn("Standalone narration", rendered)
+
     def test_japanese_report_localizes_report_chrome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -29,7 +78,7 @@ class EditorialReportTests(unittest.TestCase):
             self.assertIn('<html lang="ja">', rendered)
             self.assertIn("目標時間", rendered)
             self.assertIn("編集提案", rendered)
-            self.assertIn("編集マーカーのないタイムライン区間", rendered)
+            self.assertIn("最終プランはタイムライン全体を対象", rendered)
             self.assertNotIn("No editorial recommendations have been generated yet.", rendered)
 
     def test_report_shows_one_suggestion_and_backup_without_machine_ids(self) -> None:
@@ -126,15 +175,32 @@ class EditorialReportTests(unittest.TestCase):
             self.assertNotIn("Unselected detour", rendered)
             self.assertIn("Selected editorial plan", rendered)
             self.assertIn('class="card editorial-pair"', rendered)
-            self.assertIn("Linked narration and accents", rendered)
+            self.assertIn(
+                "grid-template-columns: 36px minmax(0, 1fr) minmax(0, 1fr)",
+                rendered,
+            )
+            self.assertIn(".timeline-rail { position: relative; z-index: 2; width: 108px;", rendered)
+            self.assertIn('class="timeline-rail"', rendered)
+            self.assertIn(
+                ".editorial-primary .editorial-card-body { grid-template-columns: minmax(0, 1fr);",
+                rendered,
+            )
+            self.assertIn(".editorial-primary { min-width: 0; padding-bottom: 72px;", rendered)
+            self.assertIn(
+                ".editorial-primary > .recommendation-head { margin-left: 16px;",
+                rendered,
+            )
+            self.assertIn(".linked-card .editorial-frame { max-width: 480px;", rendered)
+            self.assertIn("font-size: 18px;", rendered)
+            self.assertIn("Suggested edits", rendered)
             self.assertIn("Bridge the repeated route", rendered)
             self.assertIn("Standalone narration and creative notes", rendered)
             self.assertNotIn("<h2>Narration briefs</h2>", rendered)
             self.assertNotIn("<h2>Creative editorial accents</h2>", rendered)
             self.assertIn("Director’s review", rendered)
             self.assertIn("Protect the payoff", rendered)
-            self.assertIn("Moments to protect", rendered)
-            self.assertIn("The arrival is the payoff", rendered)
+            self.assertNotIn("Highest-priority changes", rendered)
+            self.assertNotIn("Moments to protect", rendered)
             self.assertNotIn("recommendation-1", rendered)
 
             output = root / "report.html"

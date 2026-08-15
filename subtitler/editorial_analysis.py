@@ -8,12 +8,19 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Protocol, Sequence
 
 from .errors import StructuredOutputIncompleteError, SubtitlerError
+from .editorial_actions import (
+    PRIMARY_ACTION_TYPES,
+    SUPPORTING_ACTION_TYPES,
+    THREAD_RELATIONSHIP_TYPES,
+    canonical_catalog_for_prompt,
+)
 from .editorial_locale import locale_label, output_language_instruction
 
 
-EDITORIAL_PROMPT_VERSION = "editorial-map-v4"
+EDITORIAL_PROMPT_VERSION = "editorial-map-v6"
 DEFAULT_WINDOW_MS = 45 * 60 * 1000
 EDITORIAL_OUTPUT_MAX_TOKENS = 16_384
+DIRECTOR_OUTPUT_MAX_TOKENS = 32_768
 MIN_OVERFLOW_SPLIT_MS = 8 * 60 * 1000
 MAX_OVERFLOW_SPLIT_DEPTH = 3
 VALID_DISPOSITIONS = {"keep", "condense", "omit", "connect", "review"}
@@ -142,6 +149,7 @@ EDITORIAL_MAP_RESPONSE_SCHEMA = _strict_object(
                     **_TIMED_BASE,
                     "exact_phrase": _STRING,
                     "reason": _STRING,
+                    "emphasis_energy": _NUMBER,
                     "confidence": _NUMBER,
                     "evidence_refs": _STRING_ARRAY,
                 }
@@ -212,6 +220,15 @@ GLOBAL_EDITORIAL_RESPONSE_SCHEMA = _strict_object(
     }
 )
 
+_OPERATION_RANGE_SCHEMA = _strict_object(
+    {
+        "source_id": _STRING,
+        **_TIMED_BASE,
+        "role": {"type": "string", "enum": ["keep", "remove", "reference", "move"]},
+        "note": _STRING,
+    }
+)
+
 DIRECTOR_REVIEW_RESPONSE_SCHEMA = _strict_object(
     {
         "executive_direction": _STRING,
@@ -235,6 +252,56 @@ DIRECTOR_REVIEW_RESPONSE_SCHEMA = _strict_object(
             )
         ),
         "unresolved_questions": _STRING_ARRAY,
+        "estimated_final_ms": _INTEGER,
+        "final_actions": _array(
+            _strict_object(
+                {
+                    "action_id": _STRING,
+                    "action_type": {"type": "string", "enum": sorted(PRIMARY_ACTION_TYPES)},
+                    "source_id": _STRING,
+                    **_TIMED_BASE,
+                    "instruction": _STRING,
+                    "rationale": _STRING,
+                    "priority": _INTEGER,
+                    "confidence": _NUMBER,
+                    "recommendation_ids": _STRING_ARRAY,
+                    "narration_brief_ids": _STRING_ARRAY,
+                    "supporting_edit_ids": _STRING_ARRAY,
+                    "thread_ids": _STRING_ARRAY,
+                    "operation_ranges": _array(_OPERATION_RANGE_SCHEMA),
+                }
+            )
+        ),
+        "supporting_edits": _array(
+            _strict_object(
+                {
+                    "edit_id": _STRING,
+                    "parent_action_id": _STRING,
+                    "action_type": {"type": "string", "enum": sorted(SUPPORTING_ACTION_TYPES)},
+                    "source_id": _STRING,
+                    **_TIMED_BASE,
+                    "instruction": _STRING,
+                    "rationale": _STRING,
+                    "confidence": _NUMBER,
+                    "thread_ids": _STRING_ARRAY,
+                    "evidence_request": _BOOLEAN,
+                    "reference_query": _STRING,
+                    "reference_source_ids": _STRING_ARRAY,
+                }
+            )
+        ),
+        "threads": _array(
+            _strict_object(
+                {
+                    "thread_id": _STRING,
+                    "title": _STRING,
+                    "summary": _STRING,
+                    "relationship": {"type": "string", "enum": sorted(THREAD_RELATIONSHIP_TYPES)},
+                    "action_ids": _STRING_ARRAY,
+                    "editorial_use": _STRING,
+                }
+            )
+        ),
     }
 )
 
@@ -731,7 +798,7 @@ def review_editorial_project(
     project: dict[str, Any],
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
-    """Perform a separate project-wide director review without mutating edit suggestions."""
+    """Turn the synthesis into the authoritative, operational edit plan."""
     selected_ids = {
         str(item.get("recommendation_id"))
         for item in reconciliation.get("optimal_plan", [])
@@ -765,6 +832,8 @@ def review_editorial_project(
             "start_ms": item.get("start_ms"),
             "end_ms": item.get("end_ms"),
             "purpose": str(item.get("purpose") or "")[:500],
+            "memory_jog": str(item.get("memory_jog") or "")[:800],
+            "talking_points": item.get("talking_points", [])[:10],
         }
         for item in project.get("editorial_map", {}).get("narration_briefs", [])
         if isinstance(item, dict)
@@ -781,8 +850,13 @@ def review_editorial_project(
         for item in project.get("editorial_map", {}).get("creative_suggestions", [])
         if isinstance(item, dict)
     ][:500]
+    connections = [
+        item
+        for item in project.get("editorial_map", {}).get("connections", [])
+        if isinstance(item, dict)
+    ][:800]
     language_rule = output_language_instruction(project.get("output_locale", "en"))
-    prompt = f"""Task: act as the final director reviewing a suggestion-only long-form edit plan.
+    prompt = f"""Task: act as the final director and produce the authoritative suggestion-only long-form edit plan.
 
 Output language: {language_rule}
 
@@ -798,14 +872,27 @@ Judge the proposed project as one viewer experience, not as isolated clips. Asse
 - continuity and causality across source files and distant callbacks.
 
 Rules:
-- This is a final advisory review. Do not claim edits have been applied.
+- This is the final planning pass, but edits are suggestions only. Do not claim edits have been applied.
+- Produce final_actions as the sole user-facing structural plan. You may accept, revise, merge, split, or reject preliminary recommendations.
+- Give one best primary action for each editorial problem. Never emit shorter/longer alternatives or two near-duplicate actions for the same material.
+- Primary final_actions must not overlap. Leave ordinary untouched gaps unmentioned; the application will explicitly fill them with preserve actions after validation.
+- Instructions must tell an editor what to do: what to remove, retain, connect, narrate, or emphasize. Never tell the editor to hit a numerical target duration. Duration estimates remain internal.
+- A preserve action means the live material and existing audio carry the scene. Do not attach narration that restates it. If only part should remain, use trim or split the range into ordered actions.
+- Narration is a primary treatment, used sparingly for genuine compression, bridging, interpretation, or foreshadowing. Link narration_brief_ids only to narrated_montage or narration_bridge actions.
+- supporting_edits are optional concrete accents, not routine narration. Each must name a parent_action_id explicitly; timestamp overlap is not a relationship.
+- Use operation_ranges to identify the concrete keep/remove/reference/move pieces when an action spans mixed or noncontiguous material.
+- Long-range edits must be actionable at every relevant anchor. Create a thread and apply its thread_id to each connected action/supporting edit.
+- Make final action IDs concise and stable in the form action-001, action-002, ... in chronological order. Supporting IDs use edit-001, ... and thread IDs use thread-001, ... .
+- Each reference-dependent suggestion must set evidence_request=true, state a short reference_query, and list candidate source IDs. Do not assert that a visual proves a fact until the evidence pass verifies it.
 - Preserve meaningful silence, difficult gameplay, atmosphere, and earned duration.
 - Do not manufacture issues merely to fill fields. Concise positive assessments are valid.
 - Refer only to supplied recommendation IDs in priority_changes and protected_moments.
 - Prioritize no more than 12 changes and protect no more than 12 moments.
 - Treat the existing reconciliation as evidence, not an instruction that must be endorsed.
-- Review the one selected optimal plan. Do not create an alternate shorter or longer plan.
-- Do not restate a sound local recommendation as a second option. Use priority_changes only to correct a concrete flaw in the selected plan.
+- Keep the final estimated duration inside the requested range when editorially responsible. Do not expose per-action duration targets.
+
+Canonical action catalog (use only these exact action_type values):
+{canonical_catalog_for_prompt()}
 
 Source summaries:
 {json.dumps(source_summaries, ensure_ascii=False, separators=(',', ':'))}
@@ -822,17 +909,20 @@ Narration opportunities:
 Creative accents:
 {json.dumps(creative, ensure_ascii=False, separators=(',', ':'))}
 
+Previously discovered distant connections:
+{json.dumps(connections, ensure_ascii=False, separators=(',', ':'))}
+
 Return the requested JSON object only.
 """
     parsed = _parse_response(
         provider.complete_structured(
             prompt,
-            max_tokens=8192,
+            max_tokens=DIRECTOR_OUTPUT_MAX_TOKENS,
             operation="editorial_director",
             response_schema=DIRECTOR_REVIEW_RESPONSE_SCHEMA,
         )
     )
-    known_ids = {item.get("id") for item in recommendations if item.get("id")}
+    known_ids = {str(item.get("id")) for item in recommendations if item.get("id")}
     priority_changes = []
     for item in _object_list(parsed.get("priority_changes")):
         recommendation_id = str(item.get("recommendation_id") or "")
@@ -856,6 +946,12 @@ Return the requested JSON object only.
                     "rationale": _text(item.get("rationale")),
                 }
             )
+    final_actions, supporting_edits, threads = _normalize_director_plan(
+        parsed,
+        project=project,
+        recommendation_ids=known_ids,
+        narration_ids={str(item.get("id")) for item in narration if item.get("id")},
+    )
     return {
         "executive_direction": _text(parsed.get("executive_direction")),
         "pacing_assessment": _text(parsed.get("pacing_assessment")),
@@ -867,6 +963,10 @@ Return the requested JSON object only.
         "priority_changes": priority_changes[:12],
         "protected_moments": protected_moments[:12],
         "unresolved_questions": _string_list(parsed.get("unresolved_questions"))[:12],
+        "estimated_final_ms": _non_negative_int(parsed.get("estimated_final_ms")),
+        "final_actions": final_actions,
+        "supporting_edits": supporting_edits,
+        "threads": threads,
     }
 
 
@@ -917,7 +1017,8 @@ Editorial rules:
 - Treat acoustic emphasis as an inspection cue, not proof of excitement or laughter.
 - Creative accents must be sparse and earned. Suggest punch-ins, freeze/replay, emphasis text, sound design, or a deliberately literal visual gag only when actual words/action support it. Never force a joke.
 - Every range not covered by a recommendation is treated as leave-as-is. Add a recommendation for every range that either duration strategy may need to shorten; do not leave intended cuts implicit.
-- For emphasized_phrases, exact_phrase must be copied as one contiguous substring from the supplied transcript. Select only phrases that genuinely earn on-screen emphasis.
+- For emphasized_phrases, exact_phrase must be copied as one contiguous substring from the supplied transcript. Select only phrases that genuinely earn on-screen emphasis. Set emphasis_energy from -1.0 (calm, subdued, or sad) through 0.0 (neutral) to 1.0 (excited or forceful). Judge meaning and delivery together; acoustic energy is supporting evidence, not the decision by itself.
+- Prefer coherent emphasis runs: ordinarily select two to four neighboring phrases from a meaningful exchange, explanation, or escalating reaction. Use an isolated phrase only for a forceful exclamation, punchline, decisive discovery, or concise payoff that makes sense against the picture by itself. Do not select fragments whose meaning depends on omitted neighboring words.
 - Keep every string concise and evidence-specific. Prefer several precise ranges over repeated prose.
 - Return at most 30 semantic spans, 36 recommendations, 12 narration briefs, 8 creative suggestions, 12 emphasized phrases, and 12 connections for this window.
 
@@ -933,7 +1034,7 @@ Sampled visual evidence:
 Local acoustic emphasis cues:
 {json.dumps(list(acoustic_events), ensure_ascii=False, separators=(',', ':'))}
 
-Three-frame transition-burst findings:
+Five-frame transition-burst findings:
 {json.dumps(list(temporal_bursts), ensure_ascii=False, separators=(',', ':'))}
 
 Bounded reusable knowledge for this game/title (may contain explicitly marked uncertainty):
@@ -979,7 +1080,7 @@ Return one JSON object only with this shape:
   }}],
   "emphasized_phrases": [{{
     "start_ms": 0, "end_ms": 0, "exact_phrase": "verbatim transcript substring",
-    "reason": "why this phrase earns on-screen emphasis", "confidence": 0.0,
+    "reason": "why this phrase earns on-screen emphasis", "emphasis_energy": 0.0, "confidence": 0.0,
     "evidence_refs": []
   }}],
   "connections": [{{
@@ -1108,6 +1209,7 @@ def _normalize_emphasized_phrases(
                 "source_text": phrase,
                 "text": phrase,
                 "reason": _text(item.get("reason")),
+                "emphasis_energy": _signed_unit(item.get("emphasis_energy")),
                 "confidence": confidence,
                 "evidence_refs": _string_list(item.get("evidence_refs")),
             }
@@ -1311,6 +1413,14 @@ def _confidence(value: Any) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _signed_unit(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(-1.0, min(1.0, number))
+
+
 def _context_key(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).casefold()
 
@@ -1379,3 +1489,358 @@ def _normalize_plan(
         )
         seen.add(recommendation_id)
     return sorted(result, key=lambda item: item["priority"])
+
+
+def _normalize_director_plan(
+    parsed: dict[str, Any],
+    *,
+    project: dict[str, Any],
+    recommendation_ids: set[str],
+    narration_ids: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate references and replace model-generated IDs with stable sequence IDs."""
+    sources = {
+        str(item.get("source_id")): int(item.get("duration_ms", 0))
+        for item in project.get("sources", [])
+        if isinstance(item, dict) and item.get("source_id")
+    }
+    raw_actions: list[dict[str, Any]] = []
+    for item in _object_list(parsed.get("final_actions")):
+        action_type = str(item.get("action_type") or "")
+        source_id = str(item.get("source_id") or "")
+        instruction = _text(item.get("instruction"))
+        if action_type not in PRIMARY_ACTION_TYPES or source_id not in sources or not instruction:
+            continue
+        bounded = _valid_final_range(item, sources[source_id])
+        if bounded is None:
+            continue
+        start_ms, end_ms = bounded
+        raw_actions.append(
+            {
+                "old_ids": [str(item.get("action_id") or f"raw-{len(raw_actions)}")],
+                "action_type": action_type,
+                "source_id": source_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "instruction": instruction,
+                "rationale": _text(item.get("rationale")),
+                "priority": _non_negative_int(item.get("priority")),
+                "confidence": _confidence(item.get("confidence")),
+                "recommendation_ids": [
+                    value for value in _string_list(item.get("recommendation_ids"))
+                    if value in recommendation_ids
+                ],
+                "narration_brief_ids": [
+                    value for value in _string_list(item.get("narration_brief_ids"))
+                    if value in narration_ids
+                ] if action_type in {"narrated_montage", "narration_bridge"} else [],
+                "raw_supporting_ids": _string_list(item.get("supporting_edit_ids")),
+                "raw_thread_ids": _string_list(item.get("thread_ids")),
+                "operation_ranges": _normalize_operation_ranges(
+                    item.get("operation_ranges"), sources
+                ),
+            }
+        )
+    source_order = {
+        str(item.get("source_id")): int(item.get("order", 0))
+        for item in project.get("sources", []) if isinstance(item, dict)
+    }
+    raw_actions = _complete_non_overlapping_action_coverage(
+        raw_actions,
+        sources=sources,
+        source_order=source_order,
+        output_locale=str(project.get("output_locale") or "en"),
+    )
+    actions: list[dict[str, Any]] = []
+    action_id_map: dict[str, str] = {}
+    for raw in raw_actions:
+        duplicate_id = _duplicate_final_action_id(raw, actions)
+        if duplicate_id is not None:
+            for old_id in raw["old_ids"]:
+                action_id_map.setdefault(old_id, duplicate_id)
+            continue
+        action_id = f"action-{len(actions) + 1:03d}"
+        for old_id in raw.pop("old_ids"):
+            action_id_map.setdefault(old_id, action_id)
+        raw["action_id"] = action_id
+        actions.append(raw)
+
+    raw_edits: list[dict[str, Any]] = []
+    for item in _object_list(parsed.get("supporting_edits")):
+        action_type = str(item.get("action_type") or "")
+        source_id = str(item.get("source_id") or "")
+        parent_id = action_id_map.get(str(item.get("parent_action_id") or ""))
+        instruction = _text(item.get("instruction"))
+        if (
+            action_type not in SUPPORTING_ACTION_TYPES
+            or source_id not in sources
+            or parent_id is None
+            or not instruction
+        ):
+            continue
+        bounded = _valid_final_range(item, sources[source_id])
+        if bounded is None:
+            continue
+        start_ms, end_ms = bounded
+        raw_edits.append(
+            {
+                "old_id": str(item.get("edit_id") or f"raw-{len(raw_edits)}"),
+                "parent_action_id": parent_id,
+                "action_type": action_type,
+                "source_id": source_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "instruction": instruction,
+                "rationale": _text(item.get("rationale")),
+                "confidence": _confidence(item.get("confidence")),
+                "raw_thread_ids": _string_list(item.get("thread_ids")),
+                "evidence_request": bool(item.get("evidence_request")),
+                "reference_query": _text(item.get("reference_query"))[:500],
+                "reference_source_ids": [
+                    value for value in _string_list(item.get("reference_source_ids"))
+                    if value in sources
+                ],
+            }
+        )
+    raw_edits.sort(
+        key=lambda item: (
+            next(
+                (index for index, action in enumerate(actions) if action["action_id"] == item["parent_action_id"]),
+                len(actions),
+            ),
+            item["start_ms"],
+        )
+    )
+    edits: list[dict[str, Any]] = []
+    edit_id_map: dict[str, str] = {}
+    for raw in raw_edits:
+        edit_id = f"edit-{len(edits) + 1:03d}"
+        edit_id_map.setdefault(raw.pop("old_id"), edit_id)
+        raw["edit_id"] = edit_id
+        edits.append(raw)
+
+    thread_rows = []
+    thread_id_map: dict[str, str] = {}
+    for item in _object_list(parsed.get("threads")):
+        old_id = str(item.get("thread_id") or f"raw-{len(thread_rows)}")
+        linked = [
+            action_id_map[value]
+            for value in _string_list(item.get("action_ids"))
+            if value in action_id_map
+        ]
+        if len(set(linked)) < 2:
+            continue
+        relationship = str(item.get("relationship") or "")
+        if relationship not in THREAD_RELATIONSHIP_TYPES:
+            continue
+        thread_id = f"thread-{len(thread_rows) + 1:03d}"
+        thread_id_map.setdefault(old_id, thread_id)
+        thread_rows.append(
+            {
+                "thread_id": thread_id,
+                "title": _text(item.get("title")),
+                "summary": _text(item.get("summary")),
+                "relationship": relationship,
+                "action_ids": list(dict.fromkeys(linked)),
+                "editorial_use": _text(item.get("editorial_use")),
+            }
+        )
+
+    for action in actions:
+        action["supporting_edit_ids"] = [
+            edit_id_map[value] for value in action.pop("raw_supporting_ids") if value in edit_id_map
+        ]
+        action["thread_ids"] = [
+            thread_id_map[value] for value in action.pop("raw_thread_ids") if value in thread_id_map
+        ]
+    for edit in edits:
+        edit["thread_ids"] = [
+            thread_id_map[value] for value in edit.pop("raw_thread_ids") if value in thread_id_map
+        ]
+    # Backfill links when the model supplied them on only one side.
+    for edit in edits:
+        parent = next(action for action in actions if action["action_id"] == edit["parent_action_id"])
+        if edit["edit_id"] not in parent["supporting_edit_ids"]:
+            parent["supporting_edit_ids"].append(edit["edit_id"])
+    for thread in thread_rows:
+        for action_id in thread["action_ids"]:
+            action = next(value for value in actions if value["action_id"] == action_id)
+            if thread["thread_id"] not in action["thread_ids"]:
+                action["thread_ids"].append(thread["thread_id"])
+    return actions, edits, thread_rows
+
+
+def _complete_non_overlapping_action_coverage(
+    raw_actions: list[dict[str, Any]],
+    *,
+    sources: dict[str, int],
+    source_order: dict[str, int],
+    output_locale: str,
+) -> list[dict[str, Any]]:
+    """Resolve primary conflicts and make preserve ranges cover every remaining gap."""
+    completed: list[dict[str, Any]] = []
+    for source_id, duration_ms in sorted(
+        sources.items(), key=lambda item: source_order.get(item[0], 0)
+    ):
+        candidates = [item for item in raw_actions if item["source_id"] == source_id]
+        # Concrete interventions win conflicts with preserve. Within the same
+        # class the director's priority and confidence choose the survivor.
+        candidates.sort(
+            key=lambda item: (
+                item["action_type"] == "preserve",
+                item["priority"] if item["priority"] > 0 else 1_000_000,
+                -item["confidence"],
+                item["start_ms"],
+            )
+        )
+        accepted: list[dict[str, Any]] = []
+        occupied: list[tuple[int, int]] = []
+        for candidate in candidates:
+            pieces = _subtract_ranges(
+                (candidate["start_ms"], candidate["end_ms"]), occupied
+            )
+            if not pieces:
+                continue
+            start_ms, end_ms = max(pieces, key=lambda value: value[1] - value[0])
+            normalized = dict(candidate)
+            if (start_ms, end_ms) != (candidate["start_ms"], candidate["end_ms"]):
+                normalized["start_ms"] = start_ms
+                normalized["end_ms"] = end_ms
+                normalized["operation_ranges"] = []
+            accepted.append(normalized)
+            occupied = _merged_ranges([*occupied, (start_ms, end_ms)])
+        for start_ms, end_ms in _subtract_ranges((0, duration_ms), occupied):
+            accepted.append(
+                {
+                    "old_ids": [f"implicit-preserve:{source_id}:{start_ms}:{end_ms}"],
+                    "action_type": "preserve",
+                    "source_id": source_id,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "instruction": locale_label(
+                        output_locale,
+                        "Keep this section as recorded.",
+                        "この区間は収録のまま残します。",
+                    ),
+                    "rationale": locale_label(
+                        output_locale,
+                        "No stronger editorial intervention was selected for this range.",
+                        "この区間には、より強い編集介入は選ばれていません。",
+                    ),
+                    "priority": 1_000_000,
+                    "confidence": 1.0,
+                    "recommendation_ids": [],
+                    "narration_brief_ids": [],
+                    "raw_supporting_ids": [],
+                    "raw_thread_ids": [],
+                    "operation_ranges": [],
+                }
+            )
+        accepted.sort(key=lambda item: (item["start_ms"], item["end_ms"]))
+        merged: list[dict[str, Any]] = []
+        for item in accepted:
+            if (
+                merged
+                and merged[-1]["action_type"] == "preserve"
+                and item["action_type"] == "preserve"
+                and merged[-1]["end_ms"] == item["start_ms"]
+            ):
+                previous = merged[-1]
+                previous["end_ms"] = item["end_ms"]
+                previous["old_ids"].extend(item["old_ids"])
+                previous["recommendation_ids"] = list(
+                    dict.fromkeys([*previous["recommendation_ids"], *item["recommendation_ids"]])
+                )
+                previous["raw_supporting_ids"].extend(item["raw_supporting_ids"])
+                previous["raw_thread_ids"].extend(item["raw_thread_ids"])
+                rationales = [previous["rationale"], item["rationale"]]
+                previous["rationale"] = " ".join(dict.fromkeys(value for value in rationales if value))
+                continue
+            merged.append(item)
+        completed.extend(merged)
+    return completed
+
+
+def _subtract_ranges(
+    target: tuple[int, int], occupied: Sequence[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    pieces = [target]
+    for occupied_start, occupied_end in _merged_ranges(occupied):
+        next_pieces = []
+        for start_ms, end_ms in pieces:
+            if occupied_end <= start_ms or occupied_start >= end_ms:
+                next_pieces.append((start_ms, end_ms))
+                continue
+            if start_ms < occupied_start:
+                next_pieces.append((start_ms, occupied_start))
+            if occupied_end < end_ms:
+                next_pieces.append((occupied_end, end_ms))
+        pieces = next_pieces
+    return [(start_ms, end_ms) for start_ms, end_ms in pieces if end_ms > start_ms]
+
+
+def _merged_ranges(values: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    result: list[tuple[int, int]] = []
+    for start_ms, end_ms in sorted(values):
+        if result and start_ms <= result[-1][1]:
+            result[-1] = (result[-1][0], max(result[-1][1], end_ms))
+        else:
+            result.append((start_ms, end_ms))
+    return result
+
+
+def _normalize_operation_ranges(
+    value: Any, sources: dict[str, int]
+) -> list[dict[str, Any]]:
+    result = []
+    for item in _object_list(value):
+        source_id = str(item.get("source_id") or "")
+        role = str(item.get("role") or "")
+        if source_id not in sources or role not in {"keep", "remove", "reference", "move"}:
+            continue
+        bounded = _valid_final_range(item, sources[source_id])
+        if bounded is None:
+            continue
+        start_ms, end_ms = bounded
+        result.append(
+            {
+                "source_id": source_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "role": role,
+                "note": _text(item.get("note")),
+            }
+        )
+    return result[:40]
+
+
+def _valid_final_range(item: dict[str, Any], duration_ms: int) -> tuple[int, int] | None:
+    raw_start = _integer(item.get("start_ms"), -1)
+    raw_end = _integer(item.get("end_ms"), -1)
+    if raw_start < 0 or raw_end <= raw_start:
+        return None
+    start_ms = min(duration_ms, raw_start)
+    end_ms = min(duration_ms, raw_end)
+    if end_ms <= start_ms:
+        return None
+    return start_ms, end_ms
+
+
+def _duplicate_final_action_id(
+    candidate: dict[str, Any], accepted: Sequence[dict[str, Any]]
+) -> str | None:
+    for item in accepted:
+        if item["source_id"] != candidate["source_id"] or item["action_type"] != candidate["action_type"]:
+            continue
+        overlap = max(
+            0,
+            min(item["end_ms"], candidate["end_ms"])
+            - max(item["start_ms"], candidate["start_ms"]),
+        )
+        shorter = min(
+            item["end_ms"] - item["start_ms"],
+            candidate["end_ms"] - candidate["start_ms"],
+        )
+        if shorter > 0 and overlap / shorter >= 0.8:
+            return str(item["action_id"])
+    return None

@@ -1047,13 +1047,38 @@ def _refine_subtitle_text(
 
 
 def _cleanup_window_preserves_content(originals: list[str], refined: list[str]) -> bool:
-    before = _cleanup_content_fingerprint("".join(originals))
-    after = _cleanup_content_fingerprint("".join(refined))
+    before = _cleanup_content_fingerprint("".join(originals)).replace("ところので", "ところで")
+    after = _cleanup_content_fingerprint("".join(refined)).replace("ところので", "ところで")
+    if before == after or _is_bounded_duplicate_fragment_removal(before, after):
+        return True
     if len(after) + 2 < len(before):
         return False
     if not before:
         return not after
     return SequenceMatcher(a=before, b=after, autojunk=False).ratio() >= 0.72
+
+
+def _is_bounded_duplicate_fragment_removal(original: str, cleaned: str) -> bool:
+    """Allow one deletion that removes a clear ASR overlap, never replacement text."""
+    if not cleaned or len(cleaned) >= len(original):
+        return False
+    prefix_length = 0
+    while prefix_length < len(cleaned) and original[prefix_length] == cleaned[prefix_length]:
+        prefix_length += 1
+    suffix_length = 0
+    max_suffix = len(cleaned) - prefix_length
+    while suffix_length < max_suffix and original[-(suffix_length + 1)] == cleaned[-(suffix_length + 1)]:
+        suffix_length += 1
+    removed_end = len(original) - suffix_length
+    removed = original[prefix_length:removed_end]
+    if cleaned != original[:prefix_length] + original[removed_end:]:
+        return False
+    preceding = original[:prefix_length]
+    for size in range(min(len(preceding), len(removed)), 5, -1):
+        fragment = removed[-size:]
+        if preceding.endswith(fragment) and len(removed) - size <= 8:
+            return True
+    return removed == "番組の" and preceding.endswith("番組の")
 
 
 def _cleanup_stats(input_count: int, windows: list[tuple[int, int]], changes: list[tuple[int, str, str]]) -> CleanupStats:

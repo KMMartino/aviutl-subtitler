@@ -360,6 +360,54 @@ class EditorialAnalysisTests(unittest.TestCase):
                         {"recommendation_id": "rec-1", "rationale": "Contains the payoff"}
                     ],
                     "unresolved_questions": ["Is the callback visually clear?"],
+                    "estimated_final_ms": 4_000,
+                    "final_actions": [{
+                        "action_id": "draft-a",
+                        "action_type": "preserve",
+                        "source_id": "source-1",
+                        "start_ms": 0,
+                        "end_ms": 4_000,
+                        "instruction": "Keep the successful attempt intact.",
+                        "rationale": "The live reaction carries the payoff.",
+                        "priority": 1,
+                        "confidence": 0.9,
+                        "recommendation_ids": ["rec-1"],
+                        "narration_brief_ids": ["nar-1"],
+                        "supporting_edit_ids": ["draft-edit"],
+                        "thread_ids": [],
+                        "operation_ranges": [],
+                    }, {
+                        "action_id": "draft-invalid",
+                        "action_type": "trim",
+                        "source_id": "source-1",
+                        "start_ms": 8_000,
+                        "end_ms": 7_000,
+                        "instruction": "Invalid reversed range.",
+                        "rationale": "Should be rejected.",
+                        "priority": 2,
+                        "confidence": 0.4,
+                        "recommendation_ids": [],
+                        "narration_brief_ids": [],
+                        "supporting_edit_ids": [],
+                        "thread_ids": [],
+                        "operation_ranges": [],
+                    }],
+                    "supporting_edits": [{
+                        "edit_id": "draft-edit",
+                        "parent_action_id": "draft-a",
+                        "action_type": "punch_in",
+                        "source_id": "source-1",
+                        "start_ms": 2_000,
+                        "end_ms": 2_500,
+                        "instruction": "Punch in on the reaction.",
+                        "rationale": "The expression lands the payoff.",
+                        "confidence": 0.8,
+                        "thread_ids": [],
+                        "evidence_request": False,
+                        "reference_query": "",
+                        "reference_source_ids": [],
+                    }],
+                    "threads": [],
                 })
 
         provider = DirectorProvider()
@@ -376,7 +424,7 @@ class EditorialAnalysisTests(unittest.TestCase):
             }],
             "editorial_map": {
                 "recommendations": [{"id": "rec-1", "source_id": "source-1", "start_ms": 0, "end_ms": 4_000}],
-                "narration_briefs": [],
+                "narration_briefs": [{"id": "nar-1", "source_id": "source-1"}],
                 "creative_suggestions": [],
             },
         }
@@ -393,12 +441,88 @@ class EditorialAnalysisTests(unittest.TestCase):
         self.assertEqual(provider.operation, "editorial_director")
         self.assertIsNotNone(provider.response_schema)
         self.assertIn("pacing across the complete arc", provider.prompts[0])
-        self.assertIn("Do not create an alternate shorter or longer plan", provider.prompts[0])
+        self.assertIn("Never emit shorter/longer alternatives", provider.prompts[0])
         self.assertEqual(
             [item["recommendation_id"] for item in result["priority_changes"]],
             ["rec-1"],
         )
         self.assertEqual(result["protected_moments"][0]["recommendation_id"], "rec-1")
+        self.assertEqual(result["final_actions"][0]["action_type"], "preserve")
+        self.assertEqual(len(result["final_actions"]), 1)
+        self.assertEqual(result["final_actions"][0]["narration_brief_ids"], [])
+        self.assertEqual(result["supporting_edits"][0]["parent_action_id"], "action-001")
+
+    def test_final_director_resolves_overlaps_and_fills_gaps_with_preserve(self) -> None:
+        class CoverageProvider(_FakeProvider):
+            def complete_structured(
+                self,
+                prompt: str,
+                *,
+                max_tokens: int,
+                operation: str,
+                response_schema: dict[str, Any] | None = None,
+            ) -> str:
+                self.prompts.append(prompt)
+                return json.dumps({
+                    "final_actions": [{
+                        "action_id": "trim",
+                        "action_type": "trim",
+                        "source_id": "source-1",
+                        "start_ms": 1_000,
+                        "end_ms": 4_000,
+                        "instruction": "Remove the repeated route.",
+                        "rationale": "The destination is already established.",
+                        "priority": 1,
+                        "confidence": 0.9,
+                    }, {
+                        "action_id": "keep",
+                        "action_type": "preserve",
+                        "source_id": "source-1",
+                        "start_ms": 3_000,
+                        "end_ms": 6_000,
+                        "instruction": "Keep the live reaction.",
+                        "rationale": "The reaction carries the moment.",
+                        "priority": 2,
+                        "confidence": 0.8,
+                    }],
+                })
+
+        provider = CoverageProvider()
+        result = review_editorial_project(
+            provider=provider,
+            project={
+                "title_or_game": "Recording",
+                "objective": "Find the story",
+                "target_duration_min_ms": 5_000,
+                "target_duration_max_ms": 9_000,
+                "output_locale": "en",
+                "sources": [{
+                    "source_id": "source-1",
+                    "order": 0,
+                    "duration_ms": 10_000,
+                    "stages": {},
+                }],
+                "editorial_map": {
+                    "recommendations": [],
+                    "narration_briefs": [],
+                    "creative_suggestions": [],
+                },
+            },
+            reconciliation={},
+        )
+
+        self.assertEqual(
+            [
+                (item["action_type"], item["start_ms"], item["end_ms"])
+                for item in result["final_actions"]
+            ],
+            [
+                ("preserve", 0, 1_000),
+                ("trim", 1_000, 4_000),
+                ("preserve", 4_000, 10_000),
+            ],
+        )
+        self.assertIn("must not overlap", provider.prompts[0])
 
 
 if __name__ == "__main__":

@@ -6,10 +6,14 @@ import csv
 import json
 import subprocess
 import sys
+import threading
+import time
+import unicodedata
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .api_usage import ApiUsageLedger
 from .audio import get_media_duration
@@ -22,6 +26,10 @@ from .editorial_analysis import (
     deduplicate_creative_suggestions,
     reconcile_editorial_project,
     review_editorial_project,
+)
+from .editorial_assets import (
+    OpenAIEditorialEvidenceProvider,
+    resolve_editorial_assets,
 )
 from .editorial_project import EDITORIAL_STAGE_VERSIONS
 from .editorial_enrichment import (
@@ -38,9 +46,14 @@ from .game_knowledge import (
     load_game_profile,
     update_game_profile,
 )
+from .media_layout import analyze_wide_recording, probe_video_geometry
 from .game_wiki import lookup_game_wiki
 from .media_analysis import OpenAIMediaAnalysisProvider, analyze_media
 from .subtitle_stage import build_refiner
+
+
+EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS = 20.0
+EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -115,9 +128,14 @@ class HostedEditorialStageExecutor:
                     flush=True,
                 )
                 try:
-                    base_reconciliation = reconcile_editorial_project(
-                        provider=refiner, project=project
-                    )
+                    with _hosted_progress_updates(
+                        project,
+                        english_label="Editorial synthesis",
+                        japanese_label="編集統合",
+                    ):
+                        base_reconciliation = reconcile_editorial_project(
+                            provider=refiner, project=project
+                        )
                 finally:
                     refiner.close()
             else:
@@ -143,11 +161,16 @@ class HostedEditorialStageExecutor:
                 flush=True,
             )
             try:
-                director_review = review_editorial_project(
-                    provider=director,
-                    project=project,
-                    reconciliation=base_reconciliation,
-                )
+                with _hosted_progress_updates(
+                    project,
+                    english_label="Editorial director",
+                    japanese_label="編集ディレクター",
+                ):
+                    director_review = review_editorial_project(
+                        provider=director,
+                        project=project,
+                        reconciliation=base_reconciliation,
+                    )
             finally:
                 director.close()
         except Exception as exc:
@@ -174,6 +197,17 @@ class HostedEditorialStageExecutor:
         result = dict(base_reconciliation)
         result["director_review"] = director_review
         result["director_model"] = self._director_model()
+        result["final_actions"] = director_review.get("final_actions", [])
+        result["supporting_edits"] = director_review.get("supporting_edits", [])
+        result["editorial_threads"] = director_review.get("threads", [])
+        estimated_final_ms = int(director_review.get("estimated_final_ms") or 0)
+        if estimated_final_ms > 0 and isinstance(result.get("duration_budget"), dict):
+            result["duration_budget"]["estimated_final_ms"] = estimated_final_ms
+            result["duration_budget"]["within_target_range"] = (
+                int(project["target_duration_min_ms"])
+                <= estimated_final_ms
+                <= int(project["target_duration_max_ms"])
+            )
         result["api_cost_usd"] = usage.total_cost_usd
         result["api_usage"] = [row.__dict__ for row in usage.rows]
         print(
@@ -188,6 +222,38 @@ class HostedEditorialStageExecutor:
         )
         return result
 
+    def resolve_assets(self, project: dict[str, Any]) -> dict[str, Any]:
+        requests = [
+            item
+            for item in project.get("editorial_map", {}).get("supporting_edits", [])
+            if isinstance(item, dict) and item.get("evidence_request")
+        ]
+        if not requests:
+            print(
+                _message(
+                    project,
+                    "Editorial evidence lookup: no selected suggestion needs a reference asset.",
+                    "編集用の根拠画像検索: 参照素材が必要な提案はありません。",
+                ),
+                flush=True,
+            )
+        else:
+            print(
+                _message(
+                    project,
+                    f"Editorial evidence lookup: checking {min(len(requests), 16)} selected reference request(s)...",
+                    f"編集用の根拠画像検索: 選択された参照候補 {min(len(requests), 16)} 件を確認中…",
+                ),
+                flush=True,
+            )
+        provider = OpenAIEditorialEvidenceProvider.from_environment(self._editorial_model())
+        return resolve_editorial_assets(
+            project,
+            workspace=self.options.workspace / "editorial-assets",
+            provider=provider,
+            output_locale=str(project.get("output_locale", "en")),
+        )
+
     def _editorial_model_config(self) -> dict[str, Any]:
         """Keep editorial intelligence independent from subtitle cleanup tuning."""
         config = json.loads(json.dumps(getattr(self, "config", {})))
@@ -197,13 +263,17 @@ class HostedEditorialStageExecutor:
         cleanup = config.setdefault("cleanup", {})
         cleanup["backend"] = "openai"
         cleanup["api_model"] = str(editorial.get("analysis_model") or "gpt-5.6-luna")
-        cleanup["reasoning_effort"] = str(editorial.get("reasoning_effort") or "low")
+        cleanup["reasoning_effort"] = str(editorial.get("reasoning_effort") or "medium")
         cleanup["thinking_level"] = None
         return config
 
     def _editorial_model(self) -> str:
         cleanup = self._editorial_model_config()["cleanup"]
         return str(cleanup["api_model"])
+
+    def _editorial_reasoning_effort(self) -> str:
+        cleanup = self._editorial_model_config()["cleanup"]
+        return str(cleanup["reasoning_effort"])
 
     def _director_model_config(self) -> dict[str, Any]:
         """Use the next hosted model tier for the bounded final director pass."""
@@ -265,6 +335,20 @@ class HostedEditorialStageExecutor:
                 f"Source duration changed after project creation: {source['original_name']}"
             )
         frame_rate = _probe_frame_rate(visual_path)
+        visual_geometry = None
+        audio_geometry = None
+        wide_layout = None
+        try:
+            visual_geometry = probe_video_geometry(visual_path)
+            if source["media_mode"] == "single":
+                wide_layout = analyze_wide_recording(visual_path, visual_geometry)
+        except SubtitlerError:
+            pass
+        if source["media_mode"] == "paired":
+            try:
+                audio_geometry = probe_video_geometry(audio_path)
+            except SubtitlerError:
+                pass
         if source["media_mode"] == "paired":
             if frame_rate <= 0:
                 raise SubtitlerError(f"Could not determine gameplay frame rate for {source['visual_original_name']}")
@@ -281,6 +365,19 @@ class HostedEditorialStageExecutor:
             "media_mode": source["media_mode"],
             "audio_path": str(audio_path),
             "visual_path": str(visual_path),
+            "visual_width": (
+                visual_geometry.width if visual_geometry is not None else source.get("width")
+            ),
+            "visual_height": (
+                visual_geometry.height if visual_geometry is not None else source.get("height")
+            ),
+            "audio_width": (
+                audio_geometry.width if audio_geometry is not None else source.get("audio_width")
+            ),
+            "audio_height": (
+                audio_geometry.height if audio_geometry is not None else source.get("audio_height")
+            ),
+            "wide_layout": wide_layout.to_dict() if wide_layout is not None else None,
         }
 
     def _transcribe(
@@ -420,6 +517,7 @@ class HostedEditorialStageExecutor:
                 f"Game/title: {project['title_or_game']}. Objective: {project['objective']}. "
                 f"Known reusable game cues: {game_profile_context(contextual_profile)}"
             ),
+            reasoning_effort=self._editorial_reasoning_effort(),
         )
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="editorial-evidence") as pool:
             visual_future = pool.submit(
@@ -430,6 +528,7 @@ class HostedEditorialStageExecutor:
                 detail=detail,
                 ffmpeg="ffmpeg",
                 provider=provider,
+                sampling_scale=float(editorial_config.get("visual_sampling_scale") or 1.5),
             )
             acoustic_future = pool.submit(
                 analyze_acoustic_emphasis,
@@ -458,6 +557,7 @@ class HostedEditorialStageExecutor:
                 acoustic_events=acoustic_events,
                 frame_differences=output.get("frame_differences", []),
                 model=model,
+                reasoning_effort=self._editorial_reasoning_effort(),
                 output_locale=str(project.get("output_locale", "en")),
             )
         except Exception as exc:
@@ -663,6 +763,7 @@ class HostedEditorialStageExecutor:
                         else {}
                     ),
                     model=self._editorial_model(),
+                    reasoning_effort=self._editorial_reasoning_effort(),
                     output_locale=str(project.get("output_locale", "en")),
                 )
             except Exception as exc:
@@ -846,13 +947,12 @@ def _align_emphasized_phrases(
             except (KeyError, TypeError, ValueError):
                 return float("inf")
         match = min(candidates, key=distance)
-        first = rows[char_tokens[match]]
-        last = rows[char_tokens[match + len(needle) - 1]]
-        try:
-            start_ms = round(float(first["start"]) * 1000)
-            end_ms = round(float(last["end"]) * 1000)
-        except (KeyError, TypeError, ValueError):
+        first_index = char_tokens[match]
+        last_index = char_tokens[match + len(needle) - 1]
+        timing = _bounded_emphasis_timing(rows, first_index, last_index)
+        if timing is None:
             continue
+        start_ms, end_ms = timing
         if end_ms <= start_ms:
             continue
         normalized = dict(item)
@@ -865,7 +965,116 @@ def _align_emphasized_phrases(
             }
         )
         result.append(normalized)
-    return result
+    return _deduplicate_emphasized_phrases(result)
+
+
+def _bounded_emphasis_timing(
+    rows: list[dict[str, str]], first_index: int, last_index: int
+) -> tuple[int, int] | None:
+    """Keep trustworthy token timing while rejecting silence-stretched phrases."""
+    selected = rows[first_index:last_index + 1]
+    parsed: list[tuple[float, float, str]] = []
+    try:
+        for row in selected:
+            start = float(row["start"])
+            end = float(row["end"])
+            text = str(row.get("text") or "")
+            if end < start:
+                return None
+            parsed.append((start, end, text))
+    except (KeyError, TypeError, ValueError):
+        return None
+    spoken = [
+        index
+        for index, (_, _, text) in enumerate(parsed)
+        if any(not _is_punctuation(character) for character in text if not character.isspace())
+    ]
+    if not spoken:
+        return None
+    first_spoken = spoken[0]
+    last_spoken = spoken[-1]
+    for index in spoken[1:-1]:
+        start, end, text = parsed[index]
+        if end - start > _emphasis_token_limit(text, internal=True):
+            return None
+    for left, right in zip(spoken, spoken[1:]):
+        if parsed[right][0] - parsed[left][1] > 1.25:
+            return None
+    first_start, first_end, first_text = parsed[first_spoken]
+    last_start, last_end, last_text = parsed[last_spoken]
+    start = max(first_start, first_end - _emphasis_token_limit(first_text, internal=False))
+    end = min(last_end, last_start + _emphasis_token_limit(last_text, internal=False))
+    if end <= start:
+        return None
+    return round(start * 1000), round(end * 1000)
+
+
+def _emphasis_token_limit(text: str, *, internal: bool) -> float:
+    visible = sum(not character.isspace() and not _is_punctuation(character) for character in text)
+    per_character = 0.45 if internal else 0.22
+    floor = 1.5 if internal else 0.75
+    return max(floor, visible * per_character)
+
+
+def _is_punctuation(character: str) -> bool:
+    return unicodedata.category(character).startswith(("P", "S"))
+
+
+def _deduplicate_emphasized_phrases(
+    phrases: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for item in sorted(
+        phrases,
+        key=lambda value: (
+            int(value.get("start_ms", 0)),
+            int(value.get("end_ms", 0)),
+            -len(str(value.get("text") or "")),
+        ),
+    ):
+        key = _emphasis_text_key(item.get("text"))
+        if not key:
+            continue
+        duplicate_index = next(
+            (
+                index
+                for index, existing in enumerate(selected)
+                if abs(int(existing.get("start_ms", 0)) - int(item.get("start_ms", 0))) <= 1500
+                and _emphasis_texts_overlap(key, _emphasis_text_key(existing.get("text")))
+            ),
+            None,
+        )
+        if duplicate_index is None:
+            selected.append(item)
+            continue
+        existing = selected[duplicate_index]
+        if _emphasis_preference(item) > _emphasis_preference(existing):
+            selected[duplicate_index] = item
+    return sorted(selected, key=lambda value: (int(value["start_ms"]), int(value["end_ms"])))
+
+
+def _emphasis_text_key(value: Any) -> str:
+    return "".join(
+        character.casefold()
+        for character in str(value or "")
+        if not character.isspace() and not _is_punctuation(character)
+    )
+
+
+def _emphasis_texts_overlap(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    shorter, longer = sorted((left, right), key=len)
+    return shorter == longer or (len(shorter) >= 6 and shorter in longer)
+
+
+def _emphasis_preference(item: dict[str, Any]) -> tuple[int, float, int]:
+    text = str(item.get("text") or "")
+    return (
+        len(_emphasis_text_key(text)),
+        float(item.get("confidence") or 0.0),
+        len(text),
+    )
 
 
 def _representative_transcript(
@@ -997,3 +1206,57 @@ def _sum_api_usage_cost(path: Path) -> float:
             return sum(float(row.get("cost_usd") or 0.0) for row in csv.DictReader(handle))
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         raise SubtitlerError(f"Could not read hosted API cost artifact {path}: {exc}") from exc
+
+
+@contextmanager
+def _hosted_progress_updates(
+    project: dict[str, Any],
+    *,
+    english_label: str,
+    japanese_label: str,
+) -> Iterator[None]:
+    """Print honest heartbeats while a non-streaming hosted request is in flight."""
+    stopped = threading.Event()
+    started = time.monotonic()
+
+    def report() -> None:
+        delay = EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS
+        update_index = 0
+        while not stopped.wait(delay):
+            elapsed = round(time.monotonic() - started)
+            if update_index == 0:
+                english = (
+                    f"{english_label}: the hosted model is still processing "
+                    f"({elapsed}s elapsed)..."
+                )
+                japanese = (
+                    f"{japanese_label}: ホストモデルで処理を続けています"
+                    f"（{elapsed} 秒経過）…"
+                )
+            elif update_index == 1:
+                english = (
+                    f"{english_label}: continuing to review the full project context "
+                    f"({elapsed}s elapsed)..."
+                )
+                japanese = (
+                    f"{japanese_label}: プロジェクト全体の情報を引き続き確認中"
+                    f"（{elapsed} 秒経過）…"
+                )
+            else:
+                english = f"{english_label}: still processing ({elapsed}s elapsed)..."
+                japanese = f"{japanese_label}: 処理を継続中（{elapsed} 秒経過）…"
+            print(_message(project, english, japanese), flush=True)
+            update_index += 1
+            delay = EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS
+
+    reporter = threading.Thread(
+        target=report,
+        name="editorial-hosted-progress",
+        daemon=True,
+    )
+    reporter.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        reporter.join()

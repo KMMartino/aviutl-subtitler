@@ -7,6 +7,7 @@ export const APPROVED_MODELS = {
   openaiCleanup: "gpt-5.4-mini",
   openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
+  gemini37Flash: "gemini-3.7-flash",
   gemini36Flash: "gemini-3.6-flash",
   gemini31Pro: "gemini-3.1-pro-preview",
   gemini31FlashLite: "gemini-3.1-flash-lite"
@@ -14,7 +15,7 @@ export const APPROVED_MODELS = {
 
 export type HostedCleanupTuning = {
   reasoningEffort: "low" | "medium" | null;
-  thinkingLevel: "minimal" | null;
+  thinkingLevel: "minimal" | "low" | null;
 };
 
 export function hostedCleanupTuning(provider: HostedProvider, model: string): HostedCleanupTuning | null {
@@ -26,6 +27,9 @@ export function hostedCleanupTuning(provider: HostedProvider, model: string): Ho
   }
   if (provider === "gemini" && model === APPROVED_MODELS.gemini36Flash) {
     return { reasoningEffort: null, thinkingLevel: "minimal" };
+  }
+  if (provider === "gemini" && model === APPROVED_MODELS.gemini37Flash) {
+    return { reasoningEffort: null, thinkingLevel: "low" };
   }
   return null;
 }
@@ -69,19 +73,27 @@ export const HOSTED_MODELS: HostedModel[] = [
   },
   {
     provider: "gemini",
-    model: APPROVED_MODELS.gemini,
-    label: "Gemini 3.5 Flash",
-    emphasis: "balanced",
-    blurb: "Best tested transcription profile. The default medium thinking produced the strongest price-to-performance result on the audio benchmark.",
-    verification: { transcription: "transcription" }
-  },
-  {
-    provider: "gemini",
     model: APPROVED_MODELS.gemini36Flash,
     label: "Gemini 3.6 Flash · Minimal",
     emphasis: "balanced",
-    blurb: "Best-value tested cleanup profile. Minimal thinking preserved the benchmark content while running much faster and cheaper than the quality-oriented Luna option.",
+    blurb: "Economy Gemini cleanup profile. Minimal thinking preserved the benchmark content with fewer billed tokens and much lower latency than the quality-oriented Luna option.",
     verification: { cleanup: "cleanup" }
+  },
+  {
+    provider: "gemini",
+    model: APPROVED_MODELS.gemini37Flash,
+    label: "Gemini 3.7 Flash · Low",
+    emphasis: "balanced",
+    blurb: "New default Gemini transcription profile and higher-quality Gemini cleanup option. Low thinking gave the best 3.7 price-to-performance result and repaired duplicate ASR fragments.",
+    verification: { transcription: "transcription37", cleanup: "cleanup37" }
+  },
+  {
+    provider: "gemini",
+    model: APPROVED_MODELS.gemini,
+    label: "Gemini 3.5 Flash",
+    emphasis: "balanced",
+    blurb: "Previous Gemini transcription baseline. Retained as a proven alternative and distinct fallback for 3.7 Flash.",
+    verification: { transcription: "transcription" }
   },
   {
     provider: "gemini",
@@ -114,13 +126,10 @@ export function recommendedFallbackTranscription(
   model: string,
 ): { provider: HostedProvider; model: string } {
   if (provider === "gemini") {
-    if (model === APPROVED_MODELS.gemini31Pro) {
+    if (model === APPROVED_MODELS.gemini37Flash) {
       return { provider: "gemini", model: APPROVED_MODELS.gemini };
     }
-    if (model === APPROVED_MODELS.gemini31FlashLite) {
-      return { provider: "gemini", model: APPROVED_MODELS.gemini };
-    }
-    return { provider: "gemini", model: APPROVED_MODELS.gemini31Pro };
+    return { provider: "gemini", model: APPROVED_MODELS.gemini37Flash };
   }
   return { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionGpt };
 }

@@ -8,6 +8,7 @@ from typing import Any, Protocol, Sequence
 
 from .editorial_locale import editorial_locale, locale_label
 from .editorial_project import (
+    ASSET_CHECKPOINT_STAGE,
     CHECKPOINT_STAGES,
     load_editorial_checkpoint,
     next_incomplete_source,
@@ -32,6 +33,8 @@ class EditorialStageExecutor(Protocol):
 
     def finalize_project(self, project: dict[str, Any]) -> dict[str, Any]: ...
 
+    def resolve_assets(self, project: dict[str, Any]) -> dict[str, Any]: ...
+
 
 class EditorialRunInterrupted(SubtitlerError):
     """A durable project stopped after recording its failed stage."""
@@ -44,6 +47,7 @@ STAGE_LABELS = {
     "semantic_spans": "Editorial mapping",
     "local_reconciliation": "Per-recording synthesis",
     "global_reconciliation": "Project-wide synthesis",
+    "editorial_assets": "Editorial evidence lookup",
 }
 
 STAGE_LABELS_JA = {
@@ -53,6 +57,7 @@ STAGE_LABELS_JA = {
     "semantic_spans": "編集マッピング",
     "local_reconciliation": "録画別の統合",
     "global_reconciliation": "プロジェクト全体の統合",
+    "editorial_assets": "編集用の根拠画像検索",
 }
 
 
@@ -126,10 +131,10 @@ def run_editorial_project(
             print(
                 locale_label(
                     locale,
-                    f"Editorial stage {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 1} - "
+                    f"Editorial stage {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 2} - "
                     f"{stage_label} started for {source['original_name']} "
                     f"(recording {source_number}/{len(project['sources'])}).",
-                    f"編集段階 {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 1} - "
+                    f"編集段階 {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 2} - "
                     f"{source['original_name']} の{stage_label}を開始 "
                     f"(録画 {source_number}/{len(project['sources'])})。",
                 ),
@@ -208,8 +213,8 @@ def run_editorial_project(
         print(
             locale_label(
                 locale,
-                f"Editorial stage 6/6 - {global_label} started.",
-                f"編集段階 6/6 - {global_label}を開始。",
+                f"Editorial stage 6/7 - {global_label} started.",
+                f"編集段階 6/7 - {global_label}を開始。",
             ),
             flush=True,
         )
@@ -275,6 +280,9 @@ def run_editorial_project(
             "optimal_plan",
             "director_review",
             "director_model",
+            "final_actions",
+            "supporting_edits",
+            "editorial_threads",
         ):
             if field in final_map:
                 project["editorial_map"][field] = final_map[field]
@@ -286,6 +294,59 @@ def run_editorial_project(
                 f"Editorial stage complete in {time.monotonic() - global_started:.1f}s: "
                 f"{global_label}.",
                 f"編集段階が {time.monotonic() - global_started:.1f} 秒で完了: {global_label}。",
+            ),
+            flush=True,
+        )
+    asset_checkpoint = project["editorial_map"][ASSET_CHECKPOINT_STAGE]
+    if asset_checkpoint["status"] != "complete":
+        asset_label = _stage_label(ASSET_CHECKPOINT_STAGE, locale)
+        print(
+            locale_label(
+                locale,
+                f"Editorial stage 7/7 - {asset_label} started.",
+                f"編集段階 7/7 - {asset_label}を開始。",
+            ),
+            flush=True,
+        )
+        asset_started = time.monotonic()
+        _ensure_cost_ceiling(project)
+        _update_global_checkpoint(asset_checkpoint, "in_progress")
+        write_editorial_checkpoint(checkpoint_path, project)
+        write_editorial_html(resolved_report, project)
+        try:
+            asset_output = executor.resolve_assets(project)
+        except Exception as exc:
+            failure_output = getattr(exc, "editorial_failure_output", None)
+            _update_global_checkpoint(
+                asset_checkpoint, "failed", output=failure_output, error=str(exc)
+            )
+            if isinstance(failure_output, dict):
+                _record_stage_cost(project, "project", ASSET_CHECKPOINT_STAGE, failure_output)
+            project["editorial_map"]["status"] = "failed"
+            write_editorial_checkpoint(checkpoint_path, project)
+            write_editorial_html(resolved_report, project)
+            raise EditorialRunInterrupted(
+                locale_label(
+                    locale,
+                    "The editorial plan is complete, but evidence lookup stopped. "
+                    f"Checkpoint: {checkpoint_path}. Resume to retry only evidence lookup: {exc}",
+                    "編集プランは完了しましたが、根拠画像の検索中に停止しました。"
+                    f"チェックポイント: {checkpoint_path}。根拠画像検索だけを再試行できます: {exc}",
+                )
+            ) from exc
+        if not isinstance(asset_output, dict):
+            raise EditorialRunInterrupted("Editorial evidence lookup returned no usable artifact")
+        if isinstance(asset_output.get("supporting_edits"), list):
+            project["editorial_map"]["supporting_edits"] = asset_output["supporting_edits"]
+        if isinstance(asset_output.get("editorial_assets"), list):
+            project["editorial_map"]["assets"] = asset_output["editorial_assets"]
+        _record_stage_cost(project, "project", ASSET_CHECKPOINT_STAGE, asset_output)
+        _update_global_checkpoint(asset_checkpoint, "complete", output=asset_output)
+        print(
+            locale_label(
+                locale,
+                f"Editorial stage complete in {time.monotonic() - asset_started:.1f}s: {asset_label}.",
+                f"編集段階が {time.monotonic() - asset_started:.1f} 秒で完了: {asset_label}。",
             ),
             flush=True,
         )
