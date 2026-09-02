@@ -45,8 +45,7 @@ class EditorialReviewTests(unittest.TestCase):
             reviewed.write_bytes(original.read_bytes())
 
             result = apply_reviewed_editorial_cuts(reviewed)
-
-        self.assertEqual(Path(result["checkpoint"]), checkpoint)
+            self.assertTrue(checkpoint.samefile(Path(result["checkpoint"])))
 
     def test_empty_or_generated_narration_text_does_not_become_user_direction(self) -> None:
         self.assertTrue(_is_narration_text("[ナレーション]"))

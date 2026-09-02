@@ -989,7 +989,7 @@ def _analyze_editorial_visual_windows(
             if split_depth >= MAX_EDITORIAL_VISUAL_SPLIT_DEPTH or end - start < 4 * 60.0:
                 raise
             midpoint = start + (end - start) / 2.0
-            print(
+            _print_console_safe(
                 locale_label(
                     output_locale,
                     f"Visual learning: retrying {_visual_clock(start)}-{_visual_clock(end)} "
@@ -997,7 +997,6 @@ def _analyze_editorial_visual_windows(
                     f"映像学習: {_visual_clock(start)}-{_visual_clock(end)} を、"
                     "2 件の小さな構造化リクエストに分けて再試行します…",
                 ),
-                flush=True,
             )
             result = _merge_visual_results(
                 [
@@ -1751,6 +1750,14 @@ def _sum_api_usage_cost(path: Path) -> float:
             return sum(float(row.get("cost_usd") or 0.0) for row in csv.DictReader(handle))
     except (OSError, UnicodeError, csv.Error, ValueError) as exc:
         raise SubtitlerError(f"Could not read hosted API cost artifact {path}: {exc}") from exc
+
+
+def _print_console_safe(message: str) -> None:
+    """Log progress without letting a legacy console encoding stop the run."""
+    try:
+        print(message, flush=True)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
 
 
 @contextmanager
