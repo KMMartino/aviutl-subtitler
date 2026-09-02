@@ -47,7 +47,7 @@ class ExoMarkerTests(unittest.TestCase):
         self.assertIn("音量=0.0", content)
         self.assertRegex(content, r"(?s)start=1\nend=181\nlayer=5.*?_name=図形")
         self.assertRegex(content, r"(?s)start=61\nend=121\nlayer=6.*?_name=テキスト")
-        self.assertRegex(content, r"(?s)start=13\nend=25\nlayer=7.*?_name=テキスト")
+        self.assertRegex(content, r"(?s)start=13\nend=24\nlayer=7.*?_name=テキスト")
         self.assertRegex(content, r"(?s)start=1\nend=181\nlayer=8.*?_name=カスタムオブジェクト")
         self.assertRegex(content, r"(?s)start=1\nend=181\nlayer=9.*?_name=カスタムオブジェクト")
         self.assertRegex(content, r"(?s)start=1\nend=181\nlayer=10.*?_name=テキスト")

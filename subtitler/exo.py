@@ -856,6 +856,8 @@ def generate_exo_file(
     broll_placements: list[BrollPlacement] | None = None,
     subtitle_background: bool = True,
     additional_marker_layers: list[list[ExoMarker]] | None = None,
+    reference_marker_layers: list[list[ExoMarker]] | None = None,
+    event_marker_layers: list[list[ExoMarker]] | None = None,
     segment_number_markers: list[ExoMarker] | None = None,
     additional_marker_font_scale: float = 1.0,
 ) -> str:
@@ -1038,9 +1040,23 @@ audio_ch={settings.audio_ch}"""
     subtitle_layer = background_layer + 1 if subtitle_background else background_layer
     qa_layer = subtitle_layer + 1
     extra_marker_layers = additional_marker_layers or []
+    utterance_reference_layers = reference_marker_layers or []
+    story_event_layers = event_marker_layers or []
     number_markers = segment_number_markers or []
-    segment_number_layer = qa_layer + len(extra_marker_layers)
-    chapter_layer = segment_number_layer + 1 if number_markers else qa_layer + max(1, len(extra_marker_layers))
+    reference_layer = qa_layer + len(extra_marker_layers)
+    event_layer = reference_layer + len(utterance_reference_layers)
+    segment_number_layer = event_layer + len(story_event_layers)
+    chapter_layer = (
+        segment_number_layer + 1
+        if number_markers
+        else qa_layer
+        + max(
+            1,
+            len(extra_marker_layers)
+            + len(utterance_reference_layers)
+            + len(story_event_layers),
+        )
+    )
     if frame_ranges and subtitle_background:
         objects.append(
             generate_subtitle_background_object(
@@ -1113,6 +1129,47 @@ audio_ch={settings.audio_ch}"""
                     font_size=marker_font_size,
                     text_color=_diagnostic_text_color(text),
                     y_position=marker_y,
+                )
+            )
+            index += 1
+    reference_font_size = max(1, round(settings.font_size * 0.5))
+    reference_y = settings.y_position - settings.font_size * 1.65
+    for layer_offset, markers in enumerate(utterance_reference_layers):
+        for start, end, text in _marker_frame_ranges(markers, settings.rate):
+            objects.append(
+                generate_exo_object(
+                    index,
+                    start,
+                    end,
+                    text,
+                    settings,
+                    layer=reference_layer + layer_offset,
+                    font_size=reference_font_size,
+                    text_color="d7e5f5",
+                    outline_color="000000",
+                    y_position=reference_y - layer_offset * reference_font_size * 1.3,
+                )
+            )
+            index += 1
+    event_font_size = max(round(18 * settings.layout_scale), round(settings.font_size * 0.42))
+    event_x = -settings.width / 2 + 80 * settings.layout_scale
+    event_y = -settings.height / 2 + 70 * settings.layout_scale
+    for layer_offset, markers in enumerate(story_event_layers):
+        for start, end, text in _marker_frame_ranges(markers, settings.rate):
+            objects.append(
+                generate_exo_object(
+                    index,
+                    start,
+                    end,
+                    text,
+                    settings,
+                    layer=event_layer + layer_offset,
+                    font_size=event_font_size,
+                    text_color=_event_marker_color(text),
+                    outline_color="000000",
+                    x_position=event_x,
+                    y_position=event_y + layer_offset * event_font_size * 2.5,
+                    text_align=0,
                 )
             )
             index += 1
@@ -1206,11 +1263,31 @@ def _diagnostic_text_color(text: str) -> str:
     return "ffff00"
 
 
+def _event_marker_color(text: str) -> str:
+    lowered = text.casefold()
+    if lowered.startswith(("[thread 1", "[thread 6", "[thread 11")):
+        return "55ccff"
+    if lowered.startswith(("[thread 2", "[thread 7", "[thread 12")):
+        return "bf83ff"
+    if lowered.startswith(("[thread 3", "[thread 8", "[thread 13")):
+        return "66dd88"
+    if lowered.startswith(("[thread 4", "[thread 9", "[thread 14")):
+        return "ffb84d"
+    if lowered.startswith("[thread"):
+        return "ff7f9f"
+    if lowered.startswith(("[phase", "[展開")):
+        return "65b5ff"
+    if lowered.startswith(("[episode", "[activity", "[活動")):
+        return "65d6a6"
+    return "e6cf65"
+
+
 def _marker_frame_ranges(markers: list[ExoMarker], fps: int) -> list[tuple[int, int, str]]:
     ranges: list[tuple[int, int, str]] = []
     for marker in sorted(markers, key=lambda item: (item.start_time, item.end_time)):
         start = time_to_frame(marker.start_time, fps)
-        end = time_to_frame(marker.end_time, fps)
+        # EXO object ends are inclusive while editorial ranges are half-open.
+        end = time_to_frame(marker.end_time, fps) - 1
         if end < start:
             end = start
         ranges.append((start, end, marker.text))

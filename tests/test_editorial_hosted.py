@@ -7,17 +7,249 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from subtitler.editorial_analysis import EDITORIAL_PROMPT_VERSION, TranscriptEvidence
 from subtitler.editorial_hosted import (
     HostedEditorialExecutorOptions,
     HostedEditorialStageExecutor,
+    _analyze_editorial_visual_windows,
     _load_transcript_evidence,
     _align_emphasized_phrases,
+    _clean_selected_editorial_subtitles,
+    _load_semantic_progress,
+    _load_vad_speech_activity,
+    _tighten_transcript_to_speech_activity,
 )
+from subtitler.editorial_project import EDITORIAL_STAGE_VERSIONS
 from subtitler.errors import SubtitlerError
-from subtitler.media_analysis import MediaAnalysisResult
+from subtitler.media_analysis import MediaAnalysisResponseError, MediaAnalysisResult
 
 
 class HostedEditorialTests(unittest.TestCase):
+    def test_editorial_transcript_edges_are_tightened_to_fine_vad(self) -> None:
+        transcript = [TranscriptEvidence(190_024, 195_144, "いや、お前も悪いやつだろ。")]
+
+        tightened = _tighten_transcript_to_speech_activity(
+            transcript,
+            [(187_704, 189_224), (191_128, 193_192)],
+        )
+
+        self.assertEqual(
+            [(item.start_ms, item.end_ms, item.text) for item in tightened],
+            [(191_128, 193_192, "いや、お前も悪いやつだろ。")],
+        )
+
+    def test_editorial_transcript_inside_continuous_vad_keeps_its_alignment(self) -> None:
+        transcript = [TranscriptEvidence(10_000, 12_000, "continuous speech")]
+
+        tightened = _tighten_transcript_to_speech_activity(
+            transcript,
+            [(9_000, 13_000)],
+        )
+
+        self.assertEqual(tightened, transcript)
+
+    def test_cached_late_punctuation_is_attached_without_extending_utterance(self) -> None:
+        transcript = [
+            TranscriptEvidence(7_060_600, 7_061_384, "ナイス"),
+            TranscriptEvidence(7_064_618, 7_064_698, "。"),
+        ]
+
+        tightened = _tighten_transcript_to_speech_activity(
+            transcript,
+            [(7_060_600, 7_061_384)],
+        )
+
+        self.assertEqual(
+            tightened,
+            [TranscriptEvidence(7_060_600, 7_061_384, "ナイス。")],
+        )
+
+    def test_spoken_continuation_after_thinking_pause_is_not_collapsed(self) -> None:
+        transcript = [
+            TranscriptEvidence(1_000, 2_000, "どうしようかな、"),
+            TranscriptEvidence(7_000, 8_000, "こっちにしよう。"),
+        ]
+
+        tightened = _tighten_transcript_to_speech_activity(
+            transcript,
+            [(1_000, 2_000), (7_000, 8_000)],
+        )
+
+        self.assertEqual(tightened, transcript)
+
+    def test_vad_speech_activity_loader_uses_selected_fine_regions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "vad.csv"
+            path.write_text(
+                "start,end,selected_for_transcription\n"
+                "1.128,3.192,true\n"
+                "4.000,5.000,false\n",
+                encoding="utf-8",
+            )
+
+            activity = _load_vad_speech_activity(path)
+
+        self.assertEqual(activity, [(1_128, 3_192)])
+
+    def test_semantic_progress_is_invalidated_when_transcription_version_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "semantic-progress.json"
+            path.write_text(
+                json.dumps({
+                    "semantic_stage_version": EDITORIAL_STAGE_VERSIONS["semantic_spans"],
+                    "visual_stage_version": EDITORIAL_STAGE_VERSIONS["visual_learning"],
+                    "prompt_version": EDITORIAL_PROMPT_VERSION,
+                    "source_id": "source-1",
+                    "source_duration_ms": 10_000,
+                    "completed_windows": [{"base_window_index": 0}],
+                }),
+                encoding="utf-8",
+            )
+
+            loaded = _load_semantic_progress(
+                path, source_id="source-1", source_duration_ms=10_000
+            )
+
+        self.assertEqual(loaded["completed_windows"], [])
+        self.assertEqual(
+            loaded["transcription_stage_version"],
+            EDITORIAL_STAGE_VERSIONS["transcription"],
+        )
+
+    def test_long_visual_learning_uses_bounded_dense_windows(self) -> None:
+        analysis = MediaAnalysisResult(
+            "Gameplay", [], [], "openai", "model", "v1", 10, 100, 20, 0.01
+        )
+        with (
+            patch("subtitler.editorial_hosted.OpenAIEditorialVisualProvider"),
+            patch(
+                "subtitler.editorial_hosted.analyze_media", return_value=analysis
+            ) as analyze,
+        ):
+            result = _analyze_editorial_visual_windows(
+                media_path=Path("game.mp4"),
+                duration_sec=31 * 60,
+                detail="detailed",
+                ffmpeg="ffmpeg",
+                sampling_scale=1.5,
+                model="gpt-5.6-luna",
+                reasoning_effort="low",
+                output_locale="ja",
+                editorial_context="context",
+            )
+
+        self.assertEqual(analyze.call_count, 3)
+        windows = sorted(
+            (call.kwargs["start_sec"], call.kwargs["end_sec"])
+            for call in analyze.call_args_list
+        )
+        self.assertEqual(windows, [(0.0, 720.0), (720.0, 1440.0), (1440.0, 1860)])
+        self.assertEqual(result.sample_count, 30)
+
+    def test_visual_learning_reuses_each_completed_window(self) -> None:
+        analysis = MediaAnalysisResult(
+            "Gameplay", [], [], "openai", "model", "v1", 10, 100, 20, 0.01
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "subtitler.editorial_hosted.OpenAIEditorialVisualProvider"
+        ), patch(
+            "subtitler.editorial_hosted.analyze_media", return_value=analysis
+        ) as analyze:
+            progress_path = Path(directory) / "visual-progress.json"
+            arguments = {
+                "media_path": Path("game.mp4"),
+                "duration_sec": 20 * 60,
+                "detail": "detailed",
+                "ffmpeg": "ffmpeg",
+                "sampling_scale": 1.5,
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "low",
+                "output_locale": "ja",
+                "editorial_context": "context",
+                "progress_path": progress_path,
+            }
+            first = _analyze_editorial_visual_windows(**arguments)
+            second = _analyze_editorial_visual_windows(**arguments)
+
+        self.assertEqual(analyze.call_count, 2)
+        self.assertEqual(first.sample_count, 20)
+        self.assertEqual(second.sample_count, 20)
+
+    def test_cached_visual_windows_skip_request_pacing(self) -> None:
+        analysis = MediaAnalysisResult(
+            "Gameplay", [], [], "openai", "model", "v1", 10, 100, 20, 0.01
+        )
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "subtitler.editorial_hosted.OpenAIEditorialVisualProvider"
+        ), patch(
+            "subtitler.editorial_hosted.analyze_media", return_value=analysis
+        ), patch("subtitler.editorial_hosted.time.sleep") as sleep:
+            progress_path = Path(directory) / "visual-progress.json"
+            arguments = {
+                "media_path": Path("game.mp4"),
+                "duration_sec": 20 * 60,
+                "detail": "detailed",
+                "ffmpeg": "ffmpeg",
+                "sampling_scale": 1.5,
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "low",
+                "output_locale": "ja",
+                "editorial_context": "context",
+                "progress_path": progress_path,
+                "max_workers": 1,
+            }
+            _analyze_editorial_visual_windows(**arguments)
+            _analyze_editorial_visual_windows(**arguments, window_interval_sec=30.0)
+
+        sleep.assert_not_called()
+
+    def test_malformed_visual_window_is_retried_as_smaller_requests(self) -> None:
+        recovered = MediaAnalysisResult(
+            "Recovered", [], [], "openai", "model", "v1", 1, 10, 2, 0.01
+        )
+        with patch(
+            "subtitler.editorial_hosted.OpenAIEditorialVisualProvider"
+        ), patch(
+            "subtitler.editorial_hosted.analyze_media",
+            side_effect=[MediaAnalysisResponseError("malformed"), recovered, recovered],
+        ) as analyze:
+            result = _analyze_editorial_visual_windows(
+                media_path=Path("game.mp4"),
+                duration_sec=10 * 60,
+                detail="detailed",
+                ffmpeg="ffmpeg",
+                sampling_scale=1.5,
+                model="gpt-5.6-luna",
+                reasoning_effort="low",
+                output_locale="ja",
+                editorial_context="context",
+            )
+
+        self.assertEqual(analyze.call_count, 3)
+        self.assertEqual(result.sample_count, 2)
+
+    def test_visual_window_failure_does_not_start_queued_windows(self) -> None:
+        with patch(
+            "subtitler.editorial_hosted.OpenAIEditorialVisualProvider"
+        ), patch(
+            "subtitler.editorial_hosted.analyze_media",
+            side_effect=SubtitlerError("rate limited"),
+        ) as analyze:
+            with self.assertRaisesRegex(SubtitlerError, "rate limited"):
+                _analyze_editorial_visual_windows(
+                    media_path=Path("game.mp4"),
+                    duration_sec=31 * 60,
+                    detail="detailed",
+                    ffmpeg="ffmpeg",
+                    sampling_scale=1.5,
+                    model="gpt-5.6-luna",
+                    reasoning_effort="low",
+                    output_locale="ja",
+                    editorial_context="context",
+                    max_workers=1,
+                )
+        self.assertEqual(analyze.call_count, 1)
+
     def test_editorial_and_subtitle_cleanup_models_are_independent(self) -> None:
         executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
         executor.config = {
@@ -27,8 +259,8 @@ class HostedEditorialTests(unittest.TestCase):
                 "reasoning_effort": "low",
                 "director_model": "gpt-5.6-terra",
                 "director_reasoning_effort": "low",
-                "subtitle_cleanup_model": "gpt-5.4-mini",
-                "subtitle_cleanup_reasoning_effort": "medium",
+                "subtitle_cleanup_model": "gpt-5.6-luna",
+                "subtitle_cleanup_reasoning_effort": "low",
             },
         }
 
@@ -40,8 +272,8 @@ class HostedEditorialTests(unittest.TestCase):
         self.assertEqual(editorial["cleanup"]["reasoning_effort"], "low")
         self.assertEqual(director["cleanup"]["api_model"], "gpt-5.6-terra")
         self.assertEqual(director["cleanup"]["reasoning_effort"], "low")
-        self.assertEqual(cleanup["cleanup"]["api_model"], "gpt-5.4-mini")
-        self.assertEqual(cleanup["cleanup"]["reasoning_effort"], "medium")
+        self.assertEqual(cleanup["cleanup"]["api_model"], "gpt-5.6-luna")
+        self.assertEqual(cleanup["cleanup"]["reasoning_effort"], "low")
         self.assertEqual(executor.config["cleanup"]["api_model"], "user-cleanup")
 
     def test_editorial_analysis_defaults_to_medium_reasoning(self) -> None:
@@ -53,60 +285,7 @@ class HostedEditorialTests(unittest.TestCase):
             "medium",
         )
 
-    def test_failed_director_retry_reuses_completed_global_synthesis(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
-            executor.options = HostedEditorialExecutorOptions(
-                config_path=root / "config.json",
-                env_file=root / ".env",
-                workspace=root / "workspace",
-                pipeline_script=root / "pipeline.py",
-            )
-            executor.config = {
-                "cleanup": {},
-                "editorial": {
-                    "analysis_model": "gpt-5.6-luna",
-                    "director_model": "gpt-5.6-terra",
-                },
-            }
-            project = {
-                "editorial_map": {"global_reconciliation": {"output": None}},
-                "sources": [],
-            }
-            base = {"global_threads": [], "conflicts": [], "editorial_direction_summary": "Base"}
-            global_refiner = Mock()
-            global_refiner.complete_structured = Mock()
-            director_refiner = Mock()
-            director_refiner.complete_structured = Mock()
-            with (
-                patch.object(executor, "_build_editorial_refiner", return_value=global_refiner),
-                patch.object(executor, "_build_director_refiner", return_value=director_refiner),
-                patch("subtitler.editorial_hosted.reconcile_editorial_project", return_value=base) as reconcile,
-                patch("subtitler.editorial_hosted.review_editorial_project", side_effect=RuntimeError("director failed")),
-                self.assertRaises(RuntimeError) as raised,
-            ):
-                executor.finalize_project(project)
-            failure_output = raised.exception.editorial_failure_output
-            self.assertEqual(failure_output["base_reconciliation"], base)
-            self.assertEqual(reconcile.call_count, 1)
-
-            project["editorial_map"]["global_reconciliation"]["output"] = failure_output
-            director_review = {"executive_direction": "Final"}
-            with (
-                patch.object(executor, "_build_editorial_refiner") as build_global,
-                patch.object(executor, "_build_director_refiner", return_value=director_refiner),
-                patch("subtitler.editorial_hosted.reconcile_editorial_project") as reconcile_again,
-                patch("subtitler.editorial_hosted.review_editorial_project", return_value=director_review),
-            ):
-                result = executor.finalize_project(project)
-
-            build_global.assert_not_called()
-            reconcile_again.assert_not_called()
-            self.assertEqual(result["director_review"], director_review)
-            self.assertEqual(result["director_model"], "gpt-5.6-terra")
-
-    def test_global_model_calls_report_progress_while_waiting(self) -> None:
+    def test_cutting_assistant_selects_aligns_and_cleans_sparse_subtitles(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
@@ -119,11 +298,100 @@ class HostedEditorialTests(unittest.TestCase):
             executor.config = {"cleanup": {}, "editorial": {}}
             project = {
                 "output_locale": "en",
-                "editorial_map": {"global_reconciliation": {"output": None}},
+                "title_or_game": "Game",
+                "objective": "Explain the run",
+                "target_duration_min_ms": 1_000,
+                "target_duration_max_ms": 2_000,
+                "editorial_map": {
+                    "global_reconciliation": {"output": {"global_threads": []}},
+                    "action_planning": {"output": None},
+                },
+                "sources": [{
+                    "source_id": "source-1",
+                    "stages": {"transcription": {"output": {
+                        "aligned_tokens_path": str(root / "tokens.csv")
+                    }}},
+                }],
+            }
+            planner = Mock()
+            cleaner = Mock()
+            cleaner.refine.return_value = ["Cleaned line"]
+            with (
+                patch.object(executor, "_build_editorial_refiner", return_value=planner),
+                patch.object(executor, "_build_subtitle_cleanup_refiner", return_value=cleaner) as cleanup,
+                patch("subtitler.editorial_hosted.select_editorial_subtitles", return_value=[{
+                    "source_id": "source-1", "start_ms": 100, "end_ms": 500,
+                    "source_text": "Raw line", "reason": "Reaction",
+                    "emphasis_energy": 0.5, "confidence": 0.9,
+                }]),
+                patch("subtitler.editorial_hosted._align_emphasized_phrases", return_value=[{
+                    "source_id": "source-1", "start_ms": 120, "end_ms": 480,
+                    "source_text": "Raw line", "text": "Raw line",
+                    "timing_verified": True,
+                }]),
+            ):
+                result = executor.plan_actions(project)
+
+        cleanup.assert_called_once()
+        cleaner.refine.assert_called_once_with(["Raw line"])
+        cleaner.close.assert_called_once_with()
+        self.assertEqual(result["emphasized_phrases"][0]["text"], "Cleaned line")
+        self.assertTrue(result["emphasized_phrases"][0]["cleanup_applied"])
+        self.assertEqual(result["workflow"], "human_information")
+
+    def test_action_planning_requires_completed_factual_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
+            executor.options = HostedEditorialExecutorOptions(
+                config_path=root / "config.json",
+                env_file=root / ".env",
+                workspace=root / "workspace",
+                pipeline_script=root / "pipeline.py",
+            )
+            executor.config = {"cleanup": {}, "editorial": {}}
+            project = {
+                "title_or_game": "Game",
+                "objective": "Explain the run",
+                "target_duration_min_ms": 1_000,
+                "target_duration_max_ms": 2_000,
+                "must_keep_notes": [],
+                "de_emphasize_notes": [],
+                "editorial_map": {
+                    "global_reconciliation": {"output": None},
+                    "action_planning": {"output": None},
+                },
+                "sources": [],
+            }
+            with self.assertRaisesRegex(SubtitlerError, "completed story synthesis"):
+                executor.plan_actions(project)
+
+    def test_global_synthesis_reports_progress_while_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executor = HostedEditorialStageExecutor.__new__(HostedEditorialStageExecutor)
+            executor.options = HostedEditorialExecutorOptions(
+                config_path=root / "config.json",
+                env_file=root / ".env",
+                workspace=root / "workspace",
+                pipeline_script=root / "pipeline.py",
+            )
+            executor.config = {"cleanup": {}, "editorial": {}}
+            project = {
+                "output_locale": "en",
+                "title_or_game": "Game",
+                "objective": "Explain",
+                "target_duration_min_ms": 1_000,
+                "target_duration_max_ms": 2_000,
+                "must_keep_notes": [],
+                "de_emphasize_notes": [],
+                "editorial_map": {
+                    "global_reconciliation": {"output": None},
+                    "action_planning": {"output": None},
+                },
                 "sources": [],
             }
             base = {"global_threads": [], "conflicts": []}
-            director_review = {"final_actions": [], "supporting_edits": [], "threads": []}
             refiner = Mock()
 
             def slow_result(value: dict[str, object]) -> dict[str, object]:
@@ -135,12 +403,8 @@ class HostedEditorialTests(unittest.TestCase):
                 patch.object(executor, "_build_editorial_refiner", return_value=refiner),
                 patch.object(executor, "_build_director_refiner", return_value=refiner),
                 patch(
-                    "subtitler.editorial_hosted.reconcile_editorial_project",
+                    "subtitler.editorial_hosted.synthesize_human_information_project",
                     side_effect=lambda **_kwargs: slow_result(base),
-                ),
-                patch(
-                    "subtitler.editorial_hosted.review_editorial_project",
-                    side_effect=lambda **_kwargs: slow_result(director_review),
                 ),
                 patch("subtitler.editorial_hosted.EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS", 0.01),
                 patch("subtitler.editorial_hosted.EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS", 0.02),
@@ -149,8 +413,7 @@ class HostedEditorialTests(unittest.TestCase):
                 executor.finalize_project(project)
 
             logs = output.getvalue()
-            self.assertIn("Editorial synthesis: the hosted model is still processing", logs)
-            self.assertIn("Editorial director: the hosted model is still processing", logs)
+            self.assertIn("Story synthesis: the hosted model is still processing", logs)
 
     def test_emphasized_phrase_uses_verified_token_timing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +430,71 @@ class HostedEditorialTests(unittest.TestCase):
             )
         self.assertEqual((result[0]["start_ms"], result[0]["end_ms"]), (1000, 1500))
         self.assertTrue(result[0]["timing_verified"])
+
+    def test_long_selected_phrase_becomes_short_token_timed_display_beats(self) -> None:
+        words = [
+            "This", "is", "a", "surprisingly", "important", "discovery,",
+            "and", "now", "we", "run.",
+        ]
+        source_text = " ".join(words)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tokens.csv"
+            rows = ["chunk_index,token_index,start,end,text,kind"]
+            for index, word in enumerate(words):
+                csv_word = f'"{word}"' if "," in word else word
+                rows.append(
+                    f"0,{index},{1 + index * 0.2:.1f},{1.2 + index * 0.2:.1f},{csv_word},word"
+                )
+            path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+            result = _align_emphasized_phrases(
+                [{
+                    "id": "phrase",
+                    "source_text": source_text,
+                    "start_ms": 900,
+                    "end_ms": 4000,
+                }],
+                path,
+            )
+
+        self.assertGreater(len(result), 1)
+        self.assertTrue(
+            all(len("".join(item["text"].split())) <= 20 for item in result)
+        )
+        self.assertEqual(
+            "".join("".join(item["text"].split()) for item in result),
+            "".join(source_text.split()),
+        )
+        self.assertEqual(
+            [item["display_segment_index"] for item in result],
+            list(range(1, len(result) + 1)),
+        )
+        self.assertTrue(
+            all(
+                int(left["end_ms"]) <= int(right["start_ms"])
+                for left, right in zip(result, result[1:])
+            )
+        )
+
+    def test_selected_editorial_subtitles_are_cleaned_without_changing_timing(self) -> None:
+        refiner = Mock()
+        refiner.refine.return_value = ["Cleaned\nphrase。"]
+        phrase = {
+            "source_id": "source-1",
+            "start_ms": 1_000,
+            "end_ms": 1_500,
+            "source_text": "raw phrase",
+            "text": "raw phrase",
+            "timing_verified": True,
+        }
+
+        result = _clean_selected_editorial_subtitles([phrase], refiner)
+
+        refiner.refine.assert_called_once_with(["raw phrase"])
+        self.assertEqual(result[0]["text"], "Cleaned phrase。")
+        self.assertEqual((result[0]["start_ms"], result[0]["end_ms"]), (1_000, 1_500))
+        self.assertEqual(result[0]["source_text"], "raw phrase")
+        self.assertTrue(result[0]["cleanup_applied"])
 
     def test_emphasized_phrase_clamps_silence_stretched_boundary_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -322,10 +650,9 @@ class HostedEditorialTests(unittest.TestCase):
             refiner = Mock()
             refiner.complete_structured.return_value = json.dumps({})
             with (
-                patch("subtitler.editorial_hosted.OpenAIMediaAnalysisProvider"),
+                patch("subtitler.editorial_hosted.OpenAIEditorialVisualProvider"),
                 patch("subtitler.editorial_hosted.analyze_media", return_value=analysis) as analyze,
                 patch("subtitler.editorial_hosted.analyze_acoustic_emphasis", return_value=[]),
-                patch("subtitler.editorial_hosted.analyze_temporal_bursts", return_value={"bursts": [], "cost_usd": 0.0}),
                 patch("subtitler.editorial_hosted.lookup_game_wiki", return_value={"status": "unavailable"}),
                 patch("subtitler.editorial_hosted.build_refiner", return_value=refiner),
             ):

@@ -8,6 +8,83 @@ from subtitler.editorial_report import render_editorial_html, write_editorial_ht
 
 
 class EditorialReportTests(unittest.TestCase):
+    def test_human_information_report_is_a_narration_and_story_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "game.mp4"
+            source.write_bytes(b"media")
+            project = create_editorial_project(
+                [EditorialSourceInput(source, 60_000)],
+                EditorialProjectOptions("Game", "First look", 20_000, 50_000),
+            )
+            source_id = project["sources"][0]["source_id"]
+            project["editorial_map"].update({
+                "workflow": "human_information",
+                "progression_summary": "The player learns the rules and reaches the boss.",
+                "confirmed_cuts": [{
+                    "source_id": source_id, "start_ms": 1000, "end_ms": 2500,
+                }],
+                "final_actions": [{
+                    "action_id": "narration-001", "action_type": "narrated_summary",
+                    "source_id": source_id, "start_ms": 0, "end_ms": 5000,
+                    "narration_guidance": {
+                        "purpose": "Introduce the unfamiliar game.",
+                        "vision": "Give one cohesive setup.",
+                        "talking_points": ["Premise"], "representative_visuals": ["Title"],
+                    },
+                }],
+                "event_phases": [{
+                    "source_id": source_id, "start_ms": 0, "end_ms": 60_000,
+                    "label": "Opening stage", "summary": "The rules are discovered.",
+                }],
+                "global_threads": [],
+            })
+
+            rendered = render_editorial_html(project)
+
+        self.assertNotIn("Narration dashboard", rendered)
+        self.assertIn("Narration possibilities", rendered)
+        self.assertIn("Use the reviewed range to generate a factual narration brief.", rendered)
+        self.assertNotIn("Give one cohesive setup", rendered)
+        self.assertIn("Factual progression", rendered)
+        self.assertIn("Voice-free review markers", rendered)
+        self.assertNotIn("Cut map", rendered)
+        self.assertNotIn("00:01–00:02", rendered)
+        self.assertIn("Initial cut markers remain visible even underneath narration possibilities.", rendered)
+
+    def test_operation_labels_follow_the_parent_editorial_treatment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "game.mp4"
+            source.write_bytes(b"media")
+            project = create_editorial_project(
+                [EditorialSourceInput(source, 60_000)],
+                EditorialProjectOptions("Game", "Finish", 20_000, 40_000),
+            )
+            source_id = project["sources"][0]["source_id"]
+            project["editorial_map"]["final_actions"] = [{
+                "action_id": "action-001",
+                "action_type": "montage",
+                "source_id": source_id,
+                "start_ms": 0,
+                "end_ms": 60_000,
+                "instruction": "Build a short montage from the marked clips.",
+                "rationale": "The complete route is repetitive.",
+                "operation_ranges": [{
+                    "source_id": source_id,
+                    "start_ms": 10_000,
+                    "end_ms": 15_000,
+                    "role": "keep",
+                    "note": "Keep the discovery.",
+                }],
+                "narration_brief_ids": [],
+                "supporting_edit_ids": [],
+                "thread_ids": [],
+            }]
+
+            rendered = render_editorial_html(project)
+
+            self.assertIn("MONTAGE · game-001-1", rendered)
+            self.assertNotIn("SELECT HIGHLIGHTS · game-001-1", rendered)
+
     def test_final_plan_uses_explicit_links_numbered_directions_and_thread_colors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -72,12 +149,27 @@ class EditorialReportTests(unittest.TestCase):
                     output_locale="ja",
                 ),
             )
+            project["editorial_map"]["final_actions"] = [{
+                "action_id": "action-001",
+                "action_type": "preserve",
+                "source_id": project["sources"][0]["source_id"],
+                "start_ms": 0,
+                "end_ms": 10_000,
+                "instruction": "この場面を残す。",
+                "rationale": "導入に必要。",
+                "story_beat_number": 1,
+                "narration_brief_ids": [],
+                "supporting_edit_ids": [],
+                "thread_ids": [],
+            }]
 
             rendered = render_editorial_html(project)
 
             self.assertIn('<html lang="ja">', rendered)
             self.assertIn("目標時間", rendered)
             self.assertIn("編集提案", rendered)
+            self.assertIn("展開 1", rendered)
+            self.assertNotIn("構成 1", rendered)
             self.assertIn("最終プランはタイムライン全体を対象", rendered)
             self.assertNotIn("No editorial recommendations have been generated yet.", rendered)
 
@@ -144,6 +236,12 @@ class EditorialReportTests(unittest.TestCase):
                 "backup_option": "Leave it clean.",
             }]
             project["editorial_map"]["director_review"] = {
+                "style_contract": {
+                    "opening_mode": "opening_narration",
+                    "viewer_promise": "Understand the premise, then experience the live discovery.",
+                    "narration_policy": "Use narration for the opening setup only.",
+                    "summary": "Preserve discovery and compress repeated travel.",
+                },
                 "executive_direction": "Protect the payoff and accelerate the repeated route.",
                 "pacing_assessment": "The middle needs one decisive compression.",
                 "intrigue_assessment": "The objective remains clear.",
@@ -176,7 +274,7 @@ class EditorialReportTests(unittest.TestCase):
             self.assertIn("Selected editorial plan", rendered)
             self.assertIn('class="card editorial-pair"', rendered)
             self.assertIn(
-                "grid-template-columns: 36px minmax(0, 1fr) minmax(0, 1fr)",
+                "grid-template-columns: 36px minmax(0, 2fr) minmax(0, 3fr)",
                 rendered,
             )
             self.assertIn(".timeline-rail { position: relative; z-index: 2; width: 108px;", rendered)
@@ -187,10 +285,19 @@ class EditorialReportTests(unittest.TestCase):
             )
             self.assertIn(".editorial-primary { min-width: 0; padding-bottom: 72px;", rendered)
             self.assertIn(
-                ".editorial-primary > .recommendation-head { margin-left: 16px;",
+                ".editorial-primary > .recommendation-head { margin: 18px 0 0 16px;",
                 rendered,
             )
-            self.assertIn(".linked-card .editorial-frame { max-width: 480px;", rendered)
+            self.assertIn(
+                ".linked-card-body { position: relative; display: grid;", rendered
+            )
+            self.assertIn(
+                ".linked-card img.editorial-frame:hover { z-index: 5; transform: scale(2.4);",
+                rendered,
+            )
+            self.assertIn(
+                ".reference-proof img:hover { width: min(620px, 100%);", rendered
+            )
             self.assertIn("font-size: 18px;", rendered)
             self.assertIn("Suggested edits", rendered)
             self.assertIn("Bridge the repeated route", rendered)
@@ -198,6 +305,9 @@ class EditorialReportTests(unittest.TestCase):
             self.assertNotIn("<h2>Narration briefs</h2>", rendered)
             self.assertNotIn("<h2>Creative editorial accents</h2>", rendered)
             self.assertIn("Director’s review", rendered)
+            self.assertIn("Editorial contract", rendered)
+            self.assertIn("Narrated opening, then live handoff", rendered)
+            self.assertIn("Understand the premise", rendered)
             self.assertIn("Protect the payoff", rendered)
             self.assertNotIn("Highest-priority changes", rendered)
             self.assertNotIn("Moments to protect", rendered)
@@ -209,8 +319,14 @@ class EditorialReportTests(unittest.TestCase):
                 Path(command[-1]).write_bytes(b"jpeg")
                 return mock.Mock(returncode=0)
 
-            with mock.patch("subtitler.editorial_report.subprocess.run", side_effect=create_frame):
+            with mock.patch("subtitler.editorial_report.subprocess.run", side_effect=create_frame) as render_frame:
                 write_editorial_html(output, project)
+                first_render_count = render_frame.call_count
+                stale_frame = root / "report-frames" / "stale-from-prior-plan.jpg"
+                stale_frame.write_bytes(b"old")
+                write_editorial_html(output, project)
+                self.assertEqual(render_frame.call_count, first_render_count * 2)
+                self.assertFalse(stale_frame.exists())
             written = output.read_text(encoding="utf-8")
             self.assertTrue(written.startswith("<!doctype html>"))
             self.assertIn('class="editorial-frame"', written)

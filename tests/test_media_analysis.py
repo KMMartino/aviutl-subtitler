@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import threading
@@ -13,6 +14,8 @@ import numpy as np
 from subtitler.media_analysis import (
     AnalyzedRange,
     BoundaryClassification,
+    MediaAnalysisResponseError,
+    OpenAIMediaAnalysisProvider,
     VisualSample,
     _extract_sample,
     _extract_samples,
@@ -110,6 +113,92 @@ class AdaptiveProvider:
 
 
 class MediaAnalysisTests(unittest.TestCase):
+    def test_openai_media_analysis_uses_strict_schema_and_records_raw_response(self) -> None:
+        response_text = json.dumps(
+            {
+                "description": "Gameplay",
+                "tags": ["gameplay"],
+                "ranges": [
+                    {
+                        "start_index": 0,
+                        "end_index": 0,
+                        "description": "Exploration",
+                        "observed_label": "Exploring the first floor",
+                        "tags": ["exploration"],
+                        "confidence": 0.9,
+                        "motion_level": 0.4,
+                        "visual_category": "gameplay",
+                        "suitability": "Keepable gameplay",
+                        "handoff_required": True,
+                        "handoff_reason": "Outcome is not visible in the sampled still",
+                    }
+                ],
+            }
+        )
+        response = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": response_text}],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"jpeg")
+            diagnostics = root / "responses.jsonl"
+            with patch("subtitler.media_analysis.request_json", return_value=response) as request:
+                provider = OpenAIMediaAnalysisProvider(
+                    "gpt-5.6-luna",
+                    api_key="key",
+                    diagnostics_path=diagnostics,
+                )
+                result = provider.analyze(
+                    [VisualSample(0, 0.0, frame)], "video", "game", 1
+                )
+
+            payload = request.call_args.args[2]
+            record = json.loads(diagnostics.read_text(encoding="utf-8"))
+
+        self.assertEqual(result[0], "Gameplay")
+        self.assertEqual(payload["text"]["format"]["type"], "json_schema")
+        self.assertTrue(payload["text"]["format"]["strict"])
+        self.assertEqual(payload["max_output_tokens"], 16_384)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["response_content"], response_text)
+        self.assertTrue(result[2][0].handoff_required)
+        self.assertEqual(result[2][0].observed_label, "Exploring the first floor")
+
+    def test_openai_media_analysis_reports_incomplete_structured_output(self) -> None:
+        response = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+            "usage": {"input_tokens": 10, "output_tokens": 16_384},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frame = root / "frame.jpg"
+            frame.write_bytes(b"jpeg")
+            diagnostics = root / "responses.jsonl"
+            with patch("subtitler.media_analysis.request_json", return_value=response):
+                provider = OpenAIMediaAnalysisProvider(
+                    "gpt-5.6-luna",
+                    api_key="key",
+                    diagnostics_path=diagnostics,
+                )
+                with self.assertRaises(MediaAnalysisResponseError) as raised:
+                    provider.analyze(
+                        [VisualSample(0, 0.0, frame)], "video", "game", 1
+                    )
+            record = json.loads(diagnostics.read_text(encoding="utf-8"))
+
+        self.assertIn("max_output_tokens", str(raised.exception))
+        self.assertEqual(record["incomplete_details"]["reason"], "max_output_tokens")
+
     def test_frame_extraction_converts_limited_range_for_jpeg(self) -> None:
         def run_ffmpeg(command, **_kwargs):
             video_filter = command[command.index("-vf") + 1]

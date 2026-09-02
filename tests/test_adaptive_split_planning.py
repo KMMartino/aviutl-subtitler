@@ -132,6 +132,30 @@ class _HostedDiagnosticSplitter(_HostedMultiSplitter):
 
 
 class AdaptiveSplitPlanningTests(unittest.TestCase):
+    def test_zero_duration_punctuation_does_not_become_a_separate_subtitle(self) -> None:
+        aligned = AlignedChunk(
+            AudioChunk(0, 10.0, 15.0, []),
+            "ナイス。",
+            [
+                AlignedToken("ナイス", 10.0, 10.8, "word"),
+                AlignedToken("。", 10.8, 10.8, "char"),
+            ],
+        )
+
+        subtitles = build_grouped_subtitles(
+            [aligned],
+            max_chars=3,
+            min_duration=0.2,
+            max_duration=60.0,
+            gap_threshold=0.3,
+            regroup_gap_sec=1.2,
+            strip_sentence_periods=False,
+        )
+
+        self.assertEqual([(item.text, item.start_time, item.end_time) for item in subtitles], [
+            ("ナイス。", 10.0, 10.8),
+        ])
+
     def test_enabled_split_diagnostics_write_safe_request_sidecar(self) -> None:
         text = "あ漢" * 30
         tokens = _tokens(text)

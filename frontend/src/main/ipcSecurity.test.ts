@@ -31,13 +31,14 @@ describe("IPC security boundary", () => {
     expect(() => validateIpcArguments("editorial:list-games", [])).not.toThrow();
     expect(() => validateIpcArguments("editorial:remember-game", ["Example Game"])).not.toThrow();
     expect(() => validateIpcArguments("editorial:remove-checkpoint", ["C:\\media\\run-editorial.json"])).not.toThrow();
+    expect(() => validateIpcArguments("editorial:apply-reviewed-cuts", ["C:\\media\\run-editorial.exo"])).not.toThrow();
     expect(() => validateIpcArguments("run:start", [{
       workflow: "hosted-long-stream", inputPath: "C:\\media\\one.mp4", outputPath: "C:\\media\\run.editorial.json",
       configPath: "C:\\config\\hosted-long-stream.json", envFile: "C:\\config\\.env", profile: true, sidecarsEnabled: true,
       cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
       editorialProject: {
         sources: [singleEditorialSource("C:\\media\\one.mp4", 3600)], titleOrGame: "Game", objective: "Finish",
-        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000, mustKeepNotes: [], deEmphasizeNotes: [], outputLocale: "ja"
+        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000, outputLocale: "ja"
       }
     }])).not.toThrow();
     expect(() => validateIpcArguments("run:start", [{
@@ -46,8 +47,13 @@ describe("IPC security boundary", () => {
       cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
       editorialProject: {
         sources: [singleEditorialSource("C:\\media\\one.mp4", 3600)], titleOrGame: "Game", objective: "Finish",
-        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000, mustKeepNotes: [], deEmphasizeNotes: []
+        targetDurationMinSeconds: 1800, targetDurationMaxSeconds: 3000
       }
+    }])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("run:start", [{
+      workflow: "local-long-stream", inputPath: "C:\\media\\one.mp4", outputPath: "C:\\media\\one.exo",
+      configPath: "C:\\config\\local-long-stream.json", envFile: "C:\\config\\.env", profile: true, sidecarsEnabled: true,
+      cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
     }])).toThrow(/Invalid IPC/);
     expect(() => validateIpcArguments("silence:source", ["run-1"])).not.toThrow();
     expect(() => validateIpcArguments("silence:proxy", ["run-1", "silence-0001", "seam"])).not.toThrow();

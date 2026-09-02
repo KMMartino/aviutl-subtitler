@@ -378,12 +378,16 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       config.cleanup.skip_final_review = false;
       changed = true;
     }
+    if (oldHostedDefaultCleanup && config.cleanup) {
+      config.cleanup.api_model = APPROVED_MODELS.openaiCleanup56Luna;
+      changed = true;
+    }
     if (config.cleanup?.backend === "openai" || config.cleanup?.backend === "gemini") {
       let tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model ?? ""));
       if (!tuning) {
         config.cleanup.api_model = config.cleanup.backend === "gemini"
           ? APPROVED_MODELS.gemini36Flash
-          : APPROVED_MODELS.openaiCleanup;
+          : APPROVED_MODELS.openaiCleanup56Luna;
         tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model));
         changed = true;
       }

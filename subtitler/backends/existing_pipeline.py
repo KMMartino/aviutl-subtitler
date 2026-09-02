@@ -7,10 +7,10 @@ import os
 import re
 import unicodedata
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from subtitler.aligner import ctc_language_code, is_japanese_language
 from subtitler.alignment_pool import AlignmentConfig, AlignmentPool
@@ -20,11 +20,13 @@ from subtitler.audio import write_wav_segment
 from subtitler.errors import SubtitlerError
 from subtitler.external_transcribers import (
     FallbackTranscriber,
+    Gemini35TranscribeAdapter,
     GeminiTranscriber,
     GPTTranscribeAdapter,
     MalformedTranscriptionResponse,
     OpenAITranscriber,
 )
+from subtitler.gpu_memory import primary_video_memory_budget
 from subtitler.models import AlignedChunk, AlignedToken, AudioChunk, TranscriptChunk
 from subtitler.profiling import PipelineProfiler, now
 from subtitler.transcriber import ServerGemmaTranscriber
@@ -43,7 +45,6 @@ from subtitler.vad import (
     VadSession,
     assign_vad_groups_by_largest_gaps,
     segment_speech_with_groups,
-    select_high_activation_chunks,
     split_chunk_with_tighter_vad,
 )
 from subtitler.silence_cut import build_cut_candidates
@@ -52,11 +53,26 @@ from subtitler.silence_cut import build_cut_candidates
 FAILED_TRANSCRIPTION_TEXT = "transcription failed"
 
 
-ALIGNER_CPU_MEMORY_BUDGET_BYTES = 2 * 1024**3
+GIB = 1024**3
+ALIGNER_MAX_THREAD_NUMERATOR = 3
+ALIGNER_MAX_THREAD_DENOMINATOR = 4
+ALIGNER_DUAL_MODEL_MIN_TOTAL_MEMORY_BYTES = 24 * GIB
+ALIGNER_DUAL_MODEL_MIN_AVAILABLE_MEMORY_BYTES = 12 * GIB
+ALIGNER_DUAL_MODEL_MIN_THREADS_PER_WORKER = 8
+ALIGNER_SUBSTANTIAL_JOB_SECONDS = 120.0
+DIRECTML_DUAL_MODEL_MIN_DEDICATED_MEMORY_BYTES = 12 * GIB
+DIRECTML_DUAL_MODEL_MIN_AVAILABLE_BUDGET_BYTES = 8 * GIB
+DIRECTML_DUAL_MODEL_MIN_AVAILABLE_SYSTEM_MEMORY_BYTES = 6 * GIB
 
 
-def available_memory_bytes() -> int | None:
-    """Best-effort available-memory reading without adding a runtime dependency."""
+@dataclass(frozen=True)
+class SystemMemory:
+    total_bytes: int | None
+    available_bytes: int | None
+
+
+def system_memory() -> SystemMemory:
+    """Best-effort physical-memory reading without adding a runtime dependency."""
     if os.name == "nt":
         try:
             import ctypes
@@ -77,46 +93,219 @@ def available_memory_bytes() -> int | None:
             status = MemoryStatusEx()
             status.length = ctypes.sizeof(status)
             if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-                return int(status.avail_phys)
+                return SystemMemory(int(status.total_phys), int(status.avail_phys))
         except (AttributeError, OSError, ValueError):
-            return None
+            return SystemMemory(None, None)
     try:
         sysconf = getattr(os, "sysconf")
         page_size = sysconf("SC_PAGE_SIZE")
+        total_pages = sysconf("SC_PHYS_PAGES")
         available_pages = sysconf("SC_AVPHYS_PAGES")
-        return int(page_size * available_pages)
+        return SystemMemory(int(page_size * total_pages), int(page_size * available_pages))
     except (AttributeError, OSError, ValueError):
-        return None
+        return SystemMemory(None, None)
 
 
-def alignment_uses_gpu(device: str, cuda_available: bool | None = None) -> bool:
+def alignment_uses_gpu(
+    device: str,
+    cuda_available: bool | None = None,
+    directml_is_available: bool | None = None,
+) -> bool:
     normalized = device.strip().lower()
     if normalized != "auto":
         return normalized != "cpu"
-    if cuda_available is not None:
-        return cuda_available
-    try:
-        import torch
+    if cuda_available is None:
+        try:
+            import torch
 
-        return bool(torch.cuda.is_available())
-    except (ImportError, RuntimeError):
-        return False
+            cuda_available = bool(torch.cuda.is_available())
+        except (ImportError, RuntimeError):
+            cuda_available = False
+    if cuda_available:
+        return True
+    if directml_is_available is None:
+        try:
+            from subtitler.directml_alignment import directml_available
+
+            directml_is_available = directml_available()
+        except (ImportError, OSError, RuntimeError):
+            directml_is_available = False
+    return directml_is_available
 
 
-def default_align_workers(
-    device: str = "cpu",
-    available_bytes: int | None = None,
+def alignment_backend(
+    device: str,
     cuda_available: bool | None = None,
-) -> int:
-    """Choose a conservative model replica count; explicit config still overrides it."""
-    if alignment_uses_gpu(device, cuda_available):
-        return 1
-    core_limit = max(1, (os.cpu_count() or 4) // 4)
-    memory = available_memory_bytes() if available_bytes is None else available_bytes
-    if memory is None:
-        return core_limit
-    memory_limit = max(1, memory // ALIGNER_CPU_MEMORY_BUDGET_BYTES)
-    return max(1, min(core_limit, memory_limit))
+    directml_is_available: bool | None = None,
+) -> Literal["cpu", "cuda", "directml"]:
+    normalized = device.strip().lower()
+    if normalized in {"cpu", "cuda", "directml"}:
+        return normalized
+    if normalized != "auto":
+        return "cuda"
+    if cuda_available is None:
+        try:
+            import torch
+
+            cuda_available = bool(torch.cuda.is_available())
+        except (ImportError, RuntimeError):
+            cuda_available = False
+    if cuda_available:
+        return "cuda"
+    if directml_is_available is None:
+        try:
+            from subtitler.directml_alignment import directml_available
+
+            directml_is_available = directml_available()
+        except (ImportError, OSError, RuntimeError):
+            directml_is_available = False
+    return "directml" if directml_is_available else "cpu"
+
+
+@dataclass(frozen=True)
+class AlignmentExecutionPlan:
+    model_instances: int
+    torch_threads: int
+    thread_budget: int
+    substantial_job_count: int
+    backend: Literal["cpu", "cuda", "directml"]
+    isolate_models: bool
+    reason: str
+
+
+def alignment_execution_plan(
+    device: str,
+    chunks: list[AudioChunk],
+    *,
+    total_memory_bytes: int | None = None,
+    available_memory_bytes: int | None = None,
+    logical_threads: int | None = None,
+    cuda_available: bool | None = None,
+    directml_is_available: bool | None = None,
+    requested_workers: int | None = None,
+    configured_torch_threads: int | None = None,
+    dedicated_video_memory_bytes: int | None = None,
+    available_video_memory_budget_bytes: int | None = None,
+) -> AlignmentExecutionPlan:
+    """Choose one or two dedicated alignment lanes from live resources and workload."""
+    logical = max(1, logical_threads if logical_threads is not None else (os.cpu_count() or 4))
+    thread_budget = max(1, logical * ALIGNER_MAX_THREAD_NUMERATOR // ALIGNER_MAX_THREAD_DENOMINATOR)
+    single_threads = min(thread_budget, max(1, configured_torch_threads or thread_budget))
+    substantial_jobs = sum(
+        max(0.0, chunk.end - chunk.start) >= ALIGNER_SUBSTANTIAL_JOB_SECONDS for chunk in chunks
+    )
+    backend = alignment_backend(device, cuda_available, directml_is_available)
+    memory = system_memory()
+    total = memory.total_bytes if total_memory_bytes is None else total_memory_bytes
+    available = memory.available_bytes if available_memory_bytes is None else available_memory_bytes
+    dual_threads = min(thread_budget // 2, max(1, configured_torch_threads or thread_budget // 2))
+    if backend == "directml":
+        video_memory = (
+            primary_video_memory_budget()
+            if dedicated_video_memory_bytes is None
+            or available_video_memory_budget_bytes is None
+            else None
+        )
+        dedicated_video = (
+            video_memory.dedicated_bytes
+            if dedicated_video_memory_bytes is None and video_memory is not None
+            else dedicated_video_memory_bytes
+        )
+        available_video = (
+            video_memory.available_budget_bytes
+            if available_video_memory_budget_bytes is None and video_memory is not None
+            else available_video_memory_budget_bytes
+        )
+        dual_allowed = (
+            requested_workers != 1
+            and dedicated_video is not None
+            and dedicated_video >= DIRECTML_DUAL_MODEL_MIN_DEDICATED_MEMORY_BYTES
+            and available_video is not None
+            and available_video >= DIRECTML_DUAL_MODEL_MIN_AVAILABLE_BUDGET_BYTES
+            and available is not None
+            and available >= DIRECTML_DUAL_MODEL_MIN_AVAILABLE_SYSTEM_MEMORY_BYTES
+            and substantial_jobs >= 2
+        )
+        if dual_allowed:
+            return AlignmentExecutionPlan(
+                model_instances=2,
+                torch_threads=dual_threads,
+                thread_budget=thread_budget,
+                substantial_job_count=substantial_jobs,
+                backend=backend,
+                isolate_models=True,
+                reason="two substantial jobs and sufficient live VRAM and system RAM budgets",
+            )
+        constraints = []
+        if requested_workers == 1:
+            constraints.append("configuration requested one worker")
+        if dedicated_video is None or dedicated_video < DIRECTML_DUAL_MODEL_MIN_DEDICATED_MEMORY_BYTES:
+            constraints.append("less than 12 GiB dedicated VRAM")
+        if available_video is None or available_video < DIRECTML_DUAL_MODEL_MIN_AVAILABLE_BUDGET_BYTES:
+            constraints.append("less than 8 GiB available VRAM budget")
+        if available is None or available < DIRECTML_DUAL_MODEL_MIN_AVAILABLE_SYSTEM_MEMORY_BYTES:
+            constraints.append("less than 6 GiB available system RAM")
+        if substantial_jobs < 2:
+            constraints.append("fewer than two jobs of at least 120 seconds")
+        return AlignmentExecutionPlan(
+            model_instances=1,
+            torch_threads=single_threads,
+            thread_budget=thread_budget,
+            substantial_job_count=substantial_jobs,
+            backend=backend,
+            isolate_models=False,
+            reason=", ".join(constraints) or "single DirectML model selected",
+        )
+    if backend == "cuda":
+        return AlignmentExecutionPlan(
+            model_instances=1,
+            torch_threads=single_threads,
+            thread_budget=thread_budget,
+            substantial_job_count=substantial_jobs,
+            backend=backend,
+            isolate_models=False,
+            reason="CUDA alignment uses one model lane",
+        )
+    dual_allowed = (
+        requested_workers != 1
+        and total is not None
+        and total >= ALIGNER_DUAL_MODEL_MIN_TOTAL_MEMORY_BYTES
+        and available is not None
+        and available >= ALIGNER_DUAL_MODEL_MIN_AVAILABLE_MEMORY_BYTES
+        and dual_threads >= ALIGNER_DUAL_MODEL_MIN_THREADS_PER_WORKER
+        and substantial_jobs >= 2
+    )
+    if dual_allowed:
+        return AlignmentExecutionPlan(
+            model_instances=2,
+            torch_threads=dual_threads,
+            thread_budget=thread_budget,
+            substantial_job_count=substantial_jobs,
+            backend=backend,
+            isolate_models=False,
+            reason="two substantial jobs and sufficient RAM and per-model thread budget",
+        )
+
+    constraints = []
+    if requested_workers == 1:
+        constraints.append("configuration requested one worker")
+    if total is None or total < ALIGNER_DUAL_MODEL_MIN_TOTAL_MEMORY_BYTES:
+        constraints.append("less than 24 GiB total RAM")
+    if available is None or available < ALIGNER_DUAL_MODEL_MIN_AVAILABLE_MEMORY_BYTES:
+        constraints.append("less than 12 GiB available RAM")
+    if dual_threads < ALIGNER_DUAL_MODEL_MIN_THREADS_PER_WORKER:
+        constraints.append("fewer than 8 threads per model")
+    if substantial_jobs < 2:
+        constraints.append("fewer than two jobs of at least 120 seconds")
+    return AlignmentExecutionPlan(
+        model_instances=1,
+        torch_threads=single_threads,
+        thread_budget=thread_budget,
+        substantial_job_count=substantial_jobs,
+        backend=backend,
+        isolate_models=False,
+        reason=", ".join(constraints) or "single model selected",
+    )
 
 
 @dataclass(frozen=True)
@@ -304,6 +493,18 @@ class ExistingPipelineBackend:
             self.profiler.start_chunk(chunk.index, chunk.start, chunk.end)
 
         transcriber = self._build_transcriber(request, vad_session)
+        transcriber_released = False
+
+        def release_transcriber() -> None:
+            nonlocal transcriber_released
+            if transcriber_released:
+                return
+            close = getattr(transcriber, "close", None)
+            if close is not None:
+                close()
+                print("Transcription runtime released before alignment.", flush=True)
+            transcriber_released = True
+
         try:
             split_size = "char" if is_japanese_language(request.language) else "word"
             ctc_language = ctc_language_code(request.language)
@@ -313,14 +514,8 @@ class ExistingPipelineBackend:
                 f"ctc_language={ctc_language}, split_size={split_size}, star_frequency=edges",
                 flush=True,
             )
-            align_workers = int(
-                alignment_cfg["workers"] or default_align_workers(str(alignment_cfg["device"]))
-            )
-            torch_threads = alignment_cfg["torch_threads"]
-            if torch_threads is None:
-                cpu_count = os.cpu_count() or 4
-                torch_threads = max(1, cpu_count // max(1, align_workers))
-            config = AlignmentConfig(
+            requested_workers = alignment_cfg["workers"]
+            base_config = AlignmentConfig(
                 model_name=alignment_cfg["model"],
                 language=request.language,
                 device=alignment_cfg["device"],
@@ -328,28 +523,75 @@ class ExistingPipelineBackend:
                 temp_dir=request.temp_dir,
                 sample_rate=request.sample_rate,
                 emission_batch_size=int(alignment_cfg["emission_batch_size"]),
-                torch_threads=int(torch_threads),
+                torch_threads=(
+                    int(alignment_cfg["torch_threads"])
+                    if alignment_cfg["torch_threads"] is not None
+                    else None
+                ),
                 max_split_depth=max(0, int(alignment_cfg["max_split_depth"])),
                 vad_session=vad_session,
             )
+
+            def build_alignment_plan(
+                transcripts: list[TranscriptChunk],
+            ) -> tuple[AlignmentConfig, int]:
+                release_transcriber()
+                execution_plan = alignment_execution_plan(
+                    str(alignment_cfg["device"]),
+                    [transcript.chunk for transcript in transcripts],
+                    requested_workers=(
+                        int(requested_workers) if requested_workers is not None else None
+                    ),
+                    configured_torch_threads=(
+                        int(alignment_cfg["torch_threads"])
+                        if alignment_cfg["torch_threads"] is not None
+                        else None
+                    ),
+                )
+                print(
+                    "Alignment execution: "
+                    f"{execution_plan.model_instances} {execution_plan.backend} model(s), "
+                    f"1 worker/model, {execution_plan.torch_threads} threads/model "
+                    f"({execution_plan.thread_budget}/{os.cpu_count() or 4} logical-thread budget). "
+                    f"Reason: {execution_plan.reason}.",
+                    flush=True,
+                )
+                return (
+                    replace(
+                        base_config,
+                        device=(
+                            "auto"
+                            if str(base_config.device).strip().lower() == "auto"
+                            else execution_plan.backend
+                        ),
+                        emission_batch_size=(
+                            1
+                            if execution_plan.backend == "directml"
+                            else base_config.emission_batch_size
+                        ),
+                        torch_threads=execution_plan.torch_threads,
+                        isolate_models=execution_plan.isolate_models,
+                    ),
+                    execution_plan.model_instances,
+                )
+
             aligned, failed_transcripts = transcribe_and_align(
                 chunks=transcription_chunks,
                 transcriber=transcriber,
-                alignment_config=config,
+                alignment_config=base_config,
                 profiler=self.profiler,
                 audio_prep_workers=max(1, int(backend_cfg["audio_prep_workers"])),
-                align_workers=max(1, align_workers),
+                align_workers=1,
                 transcription_workers=max(1, transcription_workers(self.config)),
                 hosted_recovery_depth=max(0, int(backend_cfg["transcription_max_split_depth"])),
                 hosted_recovery_temp_dir=request.temp_dir,
                 hosted_recovery_vad_session=vad_session,
                 hosted_recovery_min_silence_ms=int(vad_cfg["min_silence_ms"]),
                 hosted_recovery_speech_pad_ms=int(vad_cfg["speech_pad_ms"]),
+                alignment_plan_factory=build_alignment_plan,
             )
         finally:
-            close = getattr(transcriber, "close", None)
-            if close is not None:
-                close()
+            release_transcriber()
 
         segments = aligned_chunks_to_segments(aligned, request.language)
         status = transcription_result_status(
@@ -416,14 +658,17 @@ class ExistingPipelineBackend:
         if not model:
             raise SubtitlerError("Hosted workflow requires backend.transcription_model")
         if name == "gemini":
+            transcriber_args = {
+                "model": model,
+                "temp_dir": request.temp_dir,
+                "usage": self.api_usage,
+                "glossary": request.glossary,
+                "allow_sparse_transcript": allow_sparse_transcript,
+            }
+            if model == "gemini-3.5-transcribe":
+                transcriber_args["language"] = request.language
             return FallbackTranscriber(
-                GeminiTranscriber(
-                    model=model,
-                    temp_dir=request.temp_dir,
-                    usage=self.api_usage,
-                    glossary=request.glossary,
-                    allow_sparse_transcript=allow_sparse_transcript,
-                ),
+                (Gemini35TranscribeAdapter if model == "gemini-3.5-transcribe" else GeminiTranscriber)(**transcriber_args),
                 self._build_fallback_transcriber(request, allow_sparse_transcript=allow_sparse_transcript),
             )
         if name == "openai":
@@ -455,14 +700,17 @@ class ExistingPipelineBackend:
         if name == backend_cfg["transcriber"] and model == transcription_model(self.config):
             return None
         if name == "gemini":
-            return GeminiTranscriber(
-                model=model,
-                temp_dir=request.temp_dir,
-                usage=self.api_usage,
-                glossary=request.glossary,
-                timeout_scale=2.0,
-                allow_sparse_transcript=allow_sparse_transcript,
-            )
+            transcriber_args = {
+                "model": model,
+                "temp_dir": request.temp_dir,
+                "usage": self.api_usage,
+                "glossary": request.glossary,
+                "timeout_scale": 2.0,
+                "allow_sparse_transcript": allow_sparse_transcript,
+            }
+            if model == "gemini-3.5-transcribe":
+                transcriber_args["language"] = request.language
+            return (Gemini35TranscribeAdapter if model == "gemini-3.5-transcribe" else GeminiTranscriber)(**transcriber_args)
         if name == "openai":
             transcriber_type = GPTTranscribeAdapter if model == "gpt-transcribe" else OpenAITranscriber
             return transcriber_type(
@@ -602,13 +850,6 @@ def uses_larger_hosted_transcription_segments(config: dict[str, Any]) -> bool:
     )
 
 
-def long_stream_default_duration_ratio(media_duration_sec: float) -> float:
-    duration_hours = max(0.0, media_duration_sec) / 3600.0
-    t = min(1.0, duration_hours / 5.0)
-    smooth = t * t * (3.0 - 2.0 * t)
-    return 0.15 + (0.07 - 0.15) * smooth
-
-
 def build_speech_selection(workflow_cfg: dict[str, Any], chunks: list[AudioChunk], media_duration_sec: float) -> SpeechSelection:
     selected_chunks = select_transcription_chunks(workflow_cfg, chunks, media_duration_sec)
     selected_ids = {chunk.index for chunk in selected_chunks}
@@ -706,37 +947,14 @@ def build_hosted_transcription_chunks(
 
 
 def select_transcription_chunks(workflow_cfg: dict[str, Any], chunks: list[AudioChunk], media_duration_sec: float) -> list[AudioChunk]:
-    if (
-        workflow_cfg["mode"] != "long-stream"
-        or workflow_cfg.get("transcription_scope", "full") == "full"
-    ):
-        if workflow_cfg["mode"] == "long-stream" and chunks:
-            total_speech_minutes = sum(max(0.0, chunk.end - chunk.start) for chunk in chunks) / 60.0
-            print(
-                "Long-stream mode: full detected speech selected "
-                f"({len(chunks)} VAD chunks, {total_speech_minutes:.2f} active voice min).",
-                flush=True,
-            )
-        return chunks
-    ratio = workflow_cfg.get("long_stream_selection_ratio")
-    duration_ratio = long_stream_default_duration_ratio(media_duration_sec) if ratio is None else max(0.0, min(1.0, float(ratio)))
-    selected = select_high_activation_chunks(
-        chunks,
-        target_duration_ratio=duration_ratio,
-        min_chunks=max(0, int(workflow_cfg["long_stream_min_chunks"])),
-    )
-    if chunks:
-        threshold = min((chunk.vad_activation for chunk in selected), default=0.0)
-        selected_speech_minutes = sum(max(0.0, chunk.end - chunk.start) for chunk in selected) / 60.0
+    if workflow_cfg["mode"] == "long-stream" and chunks:
         total_speech_minutes = sum(max(0.0, chunk.end - chunk.start) for chunk in chunks) / 60.0
         print(
-            "Long-stream mode: "
-            f"selected {len(selected)}/{len(chunks)} VAD chunks "
-            f"({selected_speech_minutes:.2f}/{total_speech_minutes:.2f} active voice min, "
-            f"target={duration_ratio * 100.0:.1f}%) by VAD activation >= {threshold:.4f}.",
+            "Long-stream mode: full detected speech selected "
+            f"({len(chunks)} VAD chunks, {total_speech_minutes:.2f} active voice min).",
             flush=True,
         )
-    return selected
+    return chunks
 
 
 def write_vad_selection(path: Path, chunks: list[AudioChunk], selected_chunks: list[AudioChunk]) -> None:
@@ -777,6 +995,34 @@ def aligned_chunks_to_segments(chunks: list[AlignedChunk], language: str) -> lis
     return segments
 
 
+AlignmentPlanFactory = Callable[
+    [list[TranscriptChunk]],
+    tuple[AlignmentConfig, int],
+]
+
+
+def align_completed_transcripts(
+    transcripts: list[TranscriptChunk],
+    alignment_config: AlignmentConfig,
+    profiler: PipelineProfiler,
+    align_workers: int,
+    alignment_plan_factory: AlignmentPlanFactory | None = None,
+) -> list[AlignedChunk]:
+    if not transcripts:
+        return []
+    if alignment_plan_factory is not None:
+        alignment_config, align_workers = alignment_plan_factory(transcripts)
+    pool = AlignmentPool(
+        capped_align_workers(align_workers, len(transcripts)),
+        alignment_config,
+        profiler,
+    )
+    for transcript in transcripts:
+        pool.submit(transcript)
+    print("Waiting for alignment workers...", flush=True)
+    return pool.close_and_collect()
+
+
 def transcribe_and_align(
     chunks,
     transcriber,
@@ -790,6 +1036,7 @@ def transcribe_and_align(
     hosted_recovery_vad_session: VadSession | None = None,
     hosted_recovery_min_silence_ms: int = 400,
     hosted_recovery_speech_pad_ms: int = 200,
+    alignment_plan_factory: AlignmentPlanFactory | None = None,
 ):
     if not chunks:
         return [], []
@@ -806,14 +1053,31 @@ def transcribe_and_align(
             recovery_vad_session=hosted_recovery_vad_session,
             recovery_min_silence_ms=hosted_recovery_min_silence_ms,
             recovery_speech_pad_ms=hosted_recovery_speech_pad_ms,
+            alignment_plan_factory=alignment_plan_factory,
         )
     if hasattr(transcriber, "prepare_payload") and hasattr(transcriber, "transcribe_payload"):
-        return transcribe_and_align_server(chunks, transcriber, alignment_config, profiler, audio_prep_workers, align_workers)
+        return transcribe_and_align_server(
+            chunks,
+            transcriber,
+            alignment_config,
+            profiler,
+            audio_prep_workers,
+            align_workers,
+            alignment_plan_factory=alignment_plan_factory,
+        )
     if transcription_workers > 1:
-        return transcribe_and_align_parallel(chunks, transcriber, alignment_config, profiler, transcription_workers, align_workers)
+        return transcribe_and_align_parallel(
+            chunks,
+            transcriber,
+            alignment_config,
+            profiler,
+            transcription_workers,
+            align_workers,
+            alignment_plan_factory=alignment_plan_factory,
+        )
 
-    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
+    transcripts: list[TranscriptChunk] = []
     for i, chunk in enumerate(chunks, start=1):
         print(f"Transcribing chunk {i}/{len(chunks)} [{chunk.start:.2f}-{chunk.end:.2f}s]...")
         transcript = transcribe_one(transcriber, chunk, profiler)
@@ -823,9 +1087,14 @@ def transcribe_and_align(
         if not transcript.text:
             print(f"Warning: empty transcript for chunk {chunk.index}")
             continue
-        pool.submit(transcript)
-    print("Waiting for alignment workers...", flush=True)
-    aligned = pool.close_and_collect()
+        transcripts.append(transcript)
+    aligned = align_completed_transcripts(
+        transcripts,
+        alignment_config,
+        profiler,
+        align_workers,
+        alignment_plan_factory,
+    )
     print_transcription_failure_summary(failed)
     return aligned, failed
 
@@ -871,9 +1140,9 @@ def transcribe_and_align_hosted(
     recovery_vad_session: VadSession | None = None,
     recovery_min_silence_ms: int = 400,
     recovery_speech_pad_ms: int = 200,
+    alignment_plan_factory: AlignmentPlanFactory | None = None,
 ):
     ordered = sorted(chunks, key=lambda item: (item.start, item.end, item.index))
-    pool = AlignmentPool(capped_align_workers(align_workers, len(ordered)), alignment_config, profiler)
     normal: dict[int, HostedAttemptOutcome] = {}
     with ThreadPoolExecutor(max_workers=max(1, workers)) as transcribe_pool:
         futures = {}
@@ -965,12 +1234,29 @@ def transcribe_and_align_hosted(
             else:
                 resolved[chunk.index] = None
 
+    native_aligned: list[AlignedChunk] = []
+    ctc_transcripts: list[TranscriptChunk] = []
     for chunk in ordered:
         transcript = resolved[chunk.index]
         if transcript is not None:
-            pool.submit(transcript)
-    print("Waiting for alignment workers...", flush=True)
-    aligned = pool.close_and_collect()
+            if transcript.tokens:
+                native_aligned.append(AlignedChunk(chunk, transcript.text, transcript.tokens))
+            else:
+                ctc_transcripts.append(transcript)
+    aligned = native_aligned
+    if ctc_transcripts:
+        aligned.extend(
+            align_completed_transcripts(
+                ctc_transcripts,
+                alignment_config,
+                profiler,
+                align_workers,
+                alignment_plan_factory,
+            )
+        )
+    elif native_aligned:
+        print("Using provider word timestamps; CTC forced alignment skipped.", flush=True)
+    aligned.sort(key=lambda item: (item.chunk.start, item.chunk.end, item.chunk.index))
     print_transcription_failure_summary(failed)
     return aligned, failed
 
@@ -1058,9 +1344,10 @@ def transcribe_and_align_parallel(
     profiler: PipelineProfiler,
     workers: int,
     align_workers: int,
+    alignment_plan_factory: AlignmentPlanFactory | None = None,
 ):
-    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
+    transcripts: list[TranscriptChunk] = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as transcribe_pool:
         futures = {}
         for i, chunk in enumerate(chunks, start=1):
@@ -1077,9 +1364,14 @@ def transcribe_and_align_parallel(
             if not transcript.text:
                 print(f"Warning: empty transcript for chunk {chunk.index}")
                 continue
-            pool.submit(transcript)
-    print("Waiting for alignment workers...", flush=True)
-    aligned = pool.close_and_collect()
+            transcripts.append(transcript)
+    aligned = align_completed_transcripts(
+        transcripts,
+        alignment_config,
+        profiler,
+        align_workers,
+        alignment_plan_factory,
+    )
     print_transcription_failure_summary(failed)
     return aligned, failed
 
@@ -1098,12 +1390,13 @@ def transcribe_and_align_server(
     profiler: PipelineProfiler,
     audio_prep_workers: int,
     align_workers: int,
+    alignment_plan_factory: AlignmentPlanFactory | None = None,
 ):
     prep_futures: dict[int, Future] = {}
     next_to_submit = 0
     total = len(chunks)
-    pool = AlignmentPool(capped_align_workers(align_workers, len(chunks)), alignment_config, profiler)
     failed: list[TranscriptChunk] = []
+    completed_transcripts: list[TranscriptChunk] = []
     previous_text: str | None = None
     with ThreadPoolExecutor(max_workers=audio_prep_workers) as prep_pool:
         while next_to_submit < min(audio_prep_workers, total):
@@ -1134,14 +1427,21 @@ def transcribe_and_align_server(
                     previous_text = None
                     continue
                 for transcript in transcripts:
-                    pool.submit(transcript)
+                    completed_transcripts.append(transcript)
                 previous_text = "".join(item.text for item in transcripts)
             except Exception as exc:
                 profiler.mark_error(chunk.index, exc)
                 failed.append(failed_transcript(chunk, exc))
                 previous_text = None
-    print("Waiting for alignment workers...", flush=True)
-    aligned = deduplicate_overlapping_aligned_chunks(pool.close_and_collect())
+    aligned = deduplicate_overlapping_aligned_chunks(
+        align_completed_transcripts(
+            completed_transcripts,
+            alignment_config,
+            profiler,
+            align_workers,
+            alignment_plan_factory,
+        )
+    )
     print_transcription_failure_summary(failed)
     return aligned, failed
 

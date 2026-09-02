@@ -7,7 +7,7 @@ from unittest import mock
 
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.glossary import GlossaryEntry
-from subtitler.models import AlignedChunk, AudioChunk, ExoMarker, Subtitle
+from subtitler.models import AlignedChunk, AlignedToken, AudioChunk, ExoMarker, Subtitle
 from subtitler.run_artifacts import build_run_artifact_paths
 from subtitler.run_context import CliArguments, RunContext
 from subtitler.subtitle_stage import build_refiner, run_subtitle_stage
@@ -83,8 +83,19 @@ def _aligned() -> list[AlignedChunk]:
     return [AlignedChunk(chunk, "元字幕", [], fallback=True)]
 
 
+def _long_aligned() -> list[AlignedChunk]:
+    text = "これは意味のまとまりを保ったまま表示用字幕だけを適切な長さに分割する長い発話です。"
+    duration = 12.0
+    step = duration / len(text)
+    tokens = [
+        AlignedToken(character, index * step, (index + 1) * step, "char")
+        for index, character in enumerate(text)
+    ]
+    return [AlignedChunk(AudioChunk(1, 0.0, duration, []), text, tokens)]
+
+
 class SubtitleStageContractTests(unittest.TestCase):
-    def test_partial_editorial_subtitles_skip_full_cleanup_but_persist_timing(self) -> None:
+    def test_hosted_long_stream_persists_raw_transcript_without_full_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             context = _context(
                 Path(temp_name),
@@ -93,7 +104,6 @@ class SubtitleStageContractTests(unittest.TestCase):
                 skip_review=False,
                 chapters=False,
             )
-            context.config["additional_settings"]["editorial_subtitle_mode"] = "emphasis"
             factory = mock.Mock()
             result = run_subtitle_stage(
                 context,
@@ -103,9 +113,43 @@ class SubtitleStageContractTests(unittest.TestCase):
                 refiner_factory=factory,
             )
             self.assertTrue(context.artifacts.subtitle_timing_profile.is_file())
-            self.assertTrue(context.artifacts.final_text.is_file())
+            self.assertIn(
+                "元字幕", context.artifacts.final_text.read_text(encoding="utf-8")
+            )
         factory.assert_not_called()
         self.assertEqual(len(result.subtitles), 1)
+
+    def test_hosted_long_stream_splits_on_tokens_without_clipping_them(self) -> None:
+        aligned = _long_aligned()
+        with tempfile.TemporaryDirectory() as temp_name:
+            context = _context(
+                Path(temp_name),
+                workflow="hosted-long-stream",
+                backend="openai",
+                skip_review=False,
+                chapters=False,
+            )
+            result = run_subtitle_stage(
+                context,
+                aligned,
+                [],
+                ApiUsageLedger(),
+                refiner_factory=mock.Mock(),
+            )
+
+        self.assertGreater(len(result.subtitles), 1)
+        self.assertEqual(
+            "".join(token.text for subtitle in result.subtitles for token in subtitle.tokens),
+            aligned[0].text,
+        )
+        self.assertTrue(
+            all(
+                subtitle.end_time >= max(token.end for token in subtitle.tokens)
+                for subtitle in result.subtitles
+                if subtitle.tokens
+            )
+        )
+        self.assertTrue(all(subtitle.end_time - subtitle.start_time <= 6.0 for subtitle in result.subtitles))
 
     def test_local_stage_passes_planning_contract_writes_text_skips_review_and_closes(self) -> None:
         subtitles = [Subtitle(0.0, 1.0, "字幕")]

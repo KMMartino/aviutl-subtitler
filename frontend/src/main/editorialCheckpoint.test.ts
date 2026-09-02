@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEditorialInspectionArgs } from "./editorialCheckpoint";
+import { buildEditorialApplyCutsArgs, buildEditorialInspectionArgs } from "./editorialCheckpoint";
 
 describe("editorial checkpoint inspection command", () => {
   it("passes the checkpoint and selected logical sources without shell interpolation", () => {
@@ -29,4 +29,20 @@ describe("editorial checkpoint inspection command", () => {
       visualPath: source.visualPath,
     });
   });
+});
+
+it("builds the reviewed-cut application command without shell interpolation", () => {
+  const paths = {
+    userConfigRoot: "C:\\state\\configs",
+    envFile: "C:\\state\\.env",
+    bundledBackendRoot: "C:\\app\\backend",
+  } as never;
+  expect(buildEditorialApplyCutsArgs(paths, "C:\\media\\run-editorial.exo")).toEqual([
+    "-m", "subtitler.editorial_project_cli", "apply-cuts",
+    "--review-project", "C:\\media\\run-editorial.exo",
+    "--config", "C:\\state\\configs\\hosted-long-stream.json",
+    "--env-file", "C:\\state\\.env",
+    "--workspace", "C:\\media\\run-editorial.files\\narration-review",
+    "--pipeline-script", "C:\\app\\backend\\aviutl_subtitle.py",
+  ]);
 });

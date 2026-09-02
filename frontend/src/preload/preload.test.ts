@@ -48,6 +48,7 @@ describe("preload bridge contract", () => {
     ["listEditorialGames", "editorial:list-games", []],
     ["rememberEditorialGame", "editorial:remember-game", ["Example Game"]],
     ["removeEditorialCheckpoint", "editorial:remove-checkpoint", ["C:\\media\\run-editorial.json"]],
+    ["applyReviewedEditorialCuts", "editorial:apply-reviewed-cuts", ["C:\\media\\run-editorial.exo"]],
     ["getManagedLlamaStatus", "llama:status", ["vulkan", "b1234"]],
     ["startRun", "run:start", [{ workflow: "local", inputPath: "C:\\in.mkv" }]],
     ["cancelRun", "run:cancel", ["run-1", false]],

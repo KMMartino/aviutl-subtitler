@@ -16,9 +16,10 @@ from .errors import ModelLoadError, SubtitlerError
 from .external_transcribers import require_api_key
 from .hosted_http import request_json
 from .media_analysis import VisualSample, _extract_samples
+from .model_prompts import EDITORIAL_EVIDENCE_SYSTEM_PROMPT
 
 
-ASSET_PROMPT_VERSION = "editorial-assets-v1"
+ASSET_PROMPT_VERSION = "editorial-assets-v2-agent-contracts"
 MAX_EVIDENCE_REQUESTS = 16
 MAX_CANDIDATES_PER_REQUEST = 8
 
@@ -82,7 +83,7 @@ class OpenAIEditorialEvidenceProvider:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You verify visual evidence for a video editor. Use only visible evidence and return the requested JSON.",
+                        "content": EDITORIAL_EVIDENCE_SYSTEM_PROMPT,
                     },
                     {"role": "user", "content": content},
                 ],
@@ -248,7 +249,7 @@ def _candidate_timestamps(
 
 def _evidence_prompt(edit: dict[str, Any], locale: str) -> str:
     language = "Japanese" if locale == "ja" else "English"
-    return f"""Select the candidate frame that best supports this proposed editorial reference.
+    return f"""Task: inspect every labeled candidate and select the frame that best supports this proposed editorial reference.
 Suggestion: {edit.get('instruction', '')}
 What to find: {edit.get('reference_query', '')}
 
@@ -257,6 +258,8 @@ Rules:
 - If none supports the requested fact, set verified=false and explain briefly.
 - Select a tight normalized crop (x, y, width, height from 0.0 to 1.0) around the useful evidence. Use the full frame when cropping would remove context.
 - Write caption and verification_note in {language}.
+
+Completion: return one candidate index, an evidence-grounded verification decision, and a valid normalized crop in every required schema field.
 """
 
 

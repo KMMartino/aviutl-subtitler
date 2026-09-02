@@ -68,6 +68,7 @@ class ForcedAligner:
         self.model_name = model_name
         self.language = language
         self.ctc_language = ctc_language_code(language)
+        self.requested_device = device
         self.device = device
         self.split_size = split_size
         self.temp_dir = temp_dir
@@ -84,9 +85,18 @@ class ForcedAligner:
         try:
             import torch
 
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                return "cuda"
         except Exception:
-            return "cpu"
+            pass
+        try:
+            from .directml_alignment import directml_available
+
+            if directml_available():
+                return "directml"
+        except Exception:
+            pass
+        return "cpu"
 
     def _load_model(self) -> None:
         try:
@@ -95,16 +105,39 @@ class ForcedAligner:
             from transformers.utils import logging as transformers_logging
 
             self.device = self._resolve_device()
+            if self.device == "directml":
+                self.emission_batch_size = 1
+            if self.device in {"cpu", "directml"} and self.torch_threads:
+                torch.set_num_threads(max(1, self.torch_threads))
+                with contextlib.suppress(RuntimeError):
+                    torch.set_num_interop_threads(1)
             transformers_logging.disable_progress_bar()
             warnings.filterwarnings(
                 "ignore",
                 message="The given buffer is not writable.*",
                 category=UserWarning,
             )
-            if self.device == "cpu" and self.torch_threads:
-                torch.set_num_threads(max(1, self.torch_threads))
-                with contextlib.suppress(RuntimeError):
-                    torch.set_num_interop_threads(1)
+            if self.device == "directml":
+                from .directml_alignment import load_directml_alignment_model
+
+                try:
+                    prepared = load_directml_alignment_model(self.model_name)
+                    self.alignment_model = prepared.model
+                    self.alignment_tokenizer = prepared.tokenizer
+                    print(
+                        "Alignment backend: DirectML GPU "
+                        f"({prepared.precision}, batch=1, accuracy-preserving metacommands disabled).",
+                        flush=True,
+                    )
+                    return
+                except Exception as exc:
+                    if self.requested_device != "auto":
+                        raise
+                    print(
+                        f"Warning: DirectML alignment initialization failed; using CPU. {exc}",
+                        flush=True,
+                    )
+                    self.device = "cpu"
             self.alignment_model, self.alignment_tokenizer = load_alignment_model(
                 self.device,
                 model_path=self.model_name,
@@ -184,6 +217,8 @@ class ForcedAligner:
                 )
             if tokens:
                 return AlignedChunk(chunk=item.chunk, text=item.text, tokens=tokens, fallback=False)
+            if self.device == "directml":
+                raise AlignmentError(f"DirectML alignment produced no tokens for chunk {item.chunk.index}")
         except ModuleNotFoundError as exc:
             if exc.name == "ctc_forced_aligner":
                 raise AlignmentError(
@@ -194,8 +229,11 @@ class ForcedAligner:
         except Exception as exc:
             if _is_ctc_too_long_error(exc):
                 raise AlignmentTooLongError(str(exc)) from exc
+            if self.device == "directml":
+                raise AlignmentError(
+                    f"DirectML alignment failed for chunk {item.chunk.index}: {exc}"
+                ) from exc
             print(f"Warning: alignment failed for chunk {item.chunk.index}; using proportional timing. {exc}")
-
         return proportional_alignment(item, self.language)
 
 

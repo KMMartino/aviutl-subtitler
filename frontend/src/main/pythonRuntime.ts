@@ -3,7 +3,9 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { runtimePaths, type RuntimePaths } from "./paths";
 
-const requiredRuntimeImports = ["ctc_forced_aligner"];
+const requiredRuntimeImports = process.platform === "win32"
+  ? ["ctc_forced_aligner", "onnx", "onnxscript", "onnxruntime"]
+  : ["ctc_forced_aligner"];
 
 export type PythonRuntimeStatus = {
   selectedPath: string;

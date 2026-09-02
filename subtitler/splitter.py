@@ -86,9 +86,31 @@ JAPANESE_STRONG_CLAUSE_BOUNDARY_TAILS = (
     "ますが",
 )
 JAPANESE_PROTECTED_GRAMMATICAL_PHRASES = (
+    "ですけれども",
+    "ますけれども",
+    "ですけれど",
+    "ますけれど",
+    "ですけども",
+    "ますけども",
+    "でしょうか",
+    "でしたか",
+    "ましたか",
+    "ですけど",
+    "ますけど",
+    "ですが",
+    "ますが",
+    "ですか",
+    "ますか",
     "であれば",
     "である",
     "に合わせて",
+)
+JAPANESE_LEFT_ATTACHING_TERMS = (
+    "けれども",
+    "けども",
+    "けれど",
+    "けど",
+    "か",
 )
 JAPANESE_NUMERAL_CHARS = "〇零一二三四五六七八九十百千万億兆"
 _NUMERIC_CORE = rf"(?:[0-9]+(?:[.,][0-9]+)*|[{JAPANESE_NUMERAL_CHARS}]+)"
@@ -303,6 +325,22 @@ def _trailing_connective_phrase_end(tokens: list[AlignedToken], index: int) -> i
                     return None
                 phrase_end = index + count
                 return phrase_end if phrase_end <= len(tokens) else None
+    for term in sorted(JAPANESE_LEFT_ATTACHING_TERMS, key=len, reverse=True):
+        if not right_text.startswith(term):
+            continue
+        phrase = term
+        following = right_text[len(term) :]
+        if following and following[0] in PHRASE_BREAK_CHARS:
+            phrase += following[0]
+        elif following and _is_hiragana_char(following[0]):
+            # Do not mistake the opening of words such as から or かな for a
+            # particle/connective that closes the preceding clause.
+            continue
+        count = _token_count_for_normalized_prefix(tokens[index:], phrase)
+        if count is None:
+            return None
+        phrase_end = index + count
+        return phrase_end if phrase_end <= len(tokens) else None
     return None
 
 
@@ -324,6 +362,8 @@ def _is_safe_boundary(tokens: list[AlignedToken], index: int) -> bool:
         return False
     left = left_text[-1]
     right = right_text[0]
+    if right in SENTENCE_BREAK_CHARS or right in PHRASE_BREAK_CHARS:
+        return False
     if left == "." and right.isdigit():
         return False
     if left.isdigit() and right == ".":
@@ -423,11 +463,23 @@ def _boundary_candidates(
             continue
         kind_priority = _classify_boundary(tokens, index)
         distance = _candidate_distance(tokens, index, target_chars, max_duration)
-        if kind_priority is not None:
+        prefix_within_limits = _span_within_limits(
+            tokens,
+            0,
+            index,
+            max_chars,
+            max_duration,
+        )
+        prefix_chars = _normalized_len(tokens[:index])
+        # A punctuation/clause match alone should not create a tiny subtitle.
+        # Real pauses remain eligible through the acoustic candidate below.
+        minimum_clause_chars = min(8, max(2, target_chars // 3))
+        if kind_priority is not None and prefix_within_limits:
             kind, priority = kind_priority
-            candidates[(index, kind)] = BoundaryCandidate(index, kind, priority, distance)
+            if kind == "structural_sentence" or prefix_chars >= minimum_clause_chars:
+                candidates[(index, kind)] = BoundaryCandidate(index, kind, priority, distance)
         gap = max(0.0, tokens[index].start - tokens[index - 1].end)
-        if gap >= 0.08:
+        if gap >= 0.08 and prefix_within_limits:
             candidates[(index, "acoustic_pause")] = BoundaryCandidate(
                 index,
                 "acoustic_pause",
@@ -486,7 +538,7 @@ def _max_char_boundary(tokens: list[AlignedToken], max_chars: int) -> int | None
         return None
     for candidate in (raw_index, raw_index - 1, raw_index + 1):
         index = _normalized_boundary(tokens, candidate, max_chars)
-        if index is not None:
+        if index is not None and _normalized_len(tokens[:index]) <= max_chars:
             return index
     legal = [
         index

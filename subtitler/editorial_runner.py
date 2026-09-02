@@ -8,8 +8,10 @@ from typing import Any, Protocol, Sequence
 
 from .editorial_locale import editorial_locale, locale_label
 from .editorial_project import (
+    ACTION_CHECKPOINT_STAGE,
     ASSET_CHECKPOINT_STAGE,
     CHECKPOINT_STAGES,
+    PROJECT_CHECKPOINT_STAGES,
     load_editorial_checkpoint,
     next_incomplete_source,
     unresolved_editorial_sources,
@@ -33,6 +35,8 @@ class EditorialStageExecutor(Protocol):
 
     def finalize_project(self, project: dict[str, Any]) -> dict[str, Any]: ...
 
+    def plan_actions(self, project: dict[str, Any]) -> dict[str, Any]: ...
+
     def resolve_assets(self, project: dict[str, Any]) -> dict[str, Any]: ...
 
 
@@ -44,20 +48,22 @@ STAGE_LABELS = {
     "source_probe": "Source verification",
     "transcription": "Transcription and alignment",
     "visual_learning": "Visual and game learning",
-    "semantic_spans": "Editorial mapping",
+    "semantic_spans": "Event and story mapping",
     "local_reconciliation": "Per-recording synthesis",
-    "global_reconciliation": "Project-wide synthesis",
-    "editorial_assets": "Editorial evidence lookup",
+    "global_reconciliation": "Factual story synthesis",
+    "action_planning": "Human editing guides",
+    "editorial_assets": "Dashboard preparation",
 }
 
 STAGE_LABELS_JA = {
     "source_probe": "素材確認",
     "transcription": "文字起こし・アラインメント",
     "visual_learning": "映像・ゲーム学習",
-    "semantic_spans": "編集マッピング",
+    "semantic_spans": "イベント・構成マッピング",
     "local_reconciliation": "録画別の統合",
-    "global_reconciliation": "プロジェクト全体の統合",
-    "editorial_assets": "編集用の根拠画像検索",
+    "global_reconciliation": "事実ベースのストーリー統合",
+    "action_planning": "人間向け編集ガイド",
+    "editorial_assets": "ダッシュボードの準備",
 }
 
 
@@ -78,15 +84,6 @@ def run_editorial_project(
     """
     project = load_editorial_checkpoint(checkpoint_path)
     locale = editorial_locale(project.get("output_locale"))
-    print(
-        locale_label(
-            locale,
-            "Editorial API cost carried forward: ",
-            "引き継いだ編集 API 費用: ",
-        )
-        + f"${float(project.get('run_provenance', {}).get('actual_cost_usd', 0.0)):.4f}",
-        flush=True,
-    )
     if source_specs is not None:
         relink_matching_editorial_sources(project, source_specs)
     unresolved = unresolved_editorial_sources(project)
@@ -105,6 +102,15 @@ def run_editorial_project(
     resolved_report = report_path or checkpoint_path.with_suffix(".html")
     resolved_exo = exo_path or checkpoint_path.with_suffix(".exo")
     invalidated_from = prepare_editorial_resume(project, restart_from)
+    print(
+        locale_label(
+            locale,
+            "Current end-to-end editorial API cost: ",
+            "現在の編集処理全体の API 費用: ",
+        )
+        + f"${float(project.get('run_provenance', {}).get('actual_cost_usd', 0.0)):.4f}",
+        flush=True,
+    )
     if invalidated_from is not None:
         print(
             locale_label(
@@ -131,10 +137,10 @@ def run_editorial_project(
             print(
                 locale_label(
                     locale,
-                    f"Editorial stage {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 2} - "
+                    f"Editorial stage {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + len(PROJECT_CHECKPOINT_STAGES)} - "
                     f"{stage_label} started for {source['original_name']} "
                     f"(recording {source_number}/{len(project['sources'])}).",
-                    f"編集段階 {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + 2} - "
+                    f"編集段階 {CHECKPOINT_STAGES.index(stage) + 1}/{len(CHECKPOINT_STAGES) + len(PROJECT_CHECKPOINT_STAGES)} - "
                     f"{source['original_name']} の{stage_label}を開始 "
                     f"(録画 {source_number}/{len(project['sources'])})。",
                 ),
@@ -213,8 +219,8 @@ def run_editorial_project(
         print(
             locale_label(
                 locale,
-                f"Editorial stage 6/7 - {global_label} started.",
-                f"編集段階 6/7 - {global_label}を開始。",
+                f"Editorial stage 6/8 - {global_label} started.",
+                f"編集段階 6/8 - {global_label}を開始。",
             ),
             flush=True,
         )
@@ -280,9 +286,13 @@ def run_editorial_project(
             "optimal_plan",
             "director_review",
             "director_model",
-            "final_actions",
-            "supporting_edits",
-            "editorial_threads",
+            "payoff_threads",
+            "story_actions",
+            "event_phases",
+            "narration_briefs",
+            "progression_summary",
+            "uncertainties",
+            "workflow",
         ):
             if field in final_map:
                 project["editorial_map"][field] = final_map[field]
@@ -297,14 +307,82 @@ def run_editorial_project(
             ),
             flush=True,
         )
+    action_checkpoint = project["editorial_map"][ACTION_CHECKPOINT_STAGE]
+    if action_checkpoint["status"] != "complete":
+        action_label = _stage_label(ACTION_CHECKPOINT_STAGE, locale)
+        print(
+            locale_label(
+                locale,
+                f"Editorial stage 7/8 - {action_label} started.",
+                f"編集段階 7/8 - {action_label}を開始。",
+            ),
+            flush=True,
+        )
+        action_started = time.monotonic()
+        _ensure_cost_ceiling(project)
+        _update_global_checkpoint(action_checkpoint, "in_progress")
+        write_editorial_checkpoint(checkpoint_path, project)
+        write_editorial_html(resolved_report, project)
+        try:
+            action_output = executor.plan_actions(project)
+        except Exception as exc:
+            failure_output = getattr(exc, "editorial_failure_output", None)
+            _update_global_checkpoint(
+                action_checkpoint, "failed", output=failure_output, error=str(exc)
+            )
+            if isinstance(failure_output, dict):
+                _record_stage_cost(project, "project", ACTION_CHECKPOINT_STAGE, failure_output)
+            project["editorial_map"]["status"] = "failed"
+            write_editorial_checkpoint(checkpoint_path, project)
+            write_editorial_html(resolved_report, project)
+            raise EditorialRunInterrupted(
+                locale_label(
+                    locale,
+                    "The factual story synthesis is complete, but human editing-guide generation stopped. "
+                    f"Checkpoint: {checkpoint_path}. Resume to retry only guide generation: {exc}",
+                    "事実ベースのストーリー統合は完了しましたが、人間向け編集ガイドの生成中に停止しました。"
+                    f"チェックポイント: {checkpoint_path}。ガイド生成だけを再試行できます: {exc}",
+                )
+            ) from exc
+        if not isinstance(action_output, dict):
+            raise EditorialRunInterrupted("Human editing-guide planning returned no usable artifact")
+        for field in (
+            "director_review",
+            "director_model",
+            "final_actions",
+            "supporting_edits",
+            "editorial_threads",
+            "story_actions",
+            "emphasized_phrases",
+            "duration_budget",
+            "workflow",
+            "protected_zones",
+            "cut_candidates",
+            "confirmed_cuts",
+            "removed_ms",
+            "narration_replaced_ms",
+            "prompt_version",
+        ):
+            if field in action_output:
+                project["editorial_map"][field] = action_output[field]
+        _record_stage_cost(project, "project", ACTION_CHECKPOINT_STAGE, action_output)
+        _update_global_checkpoint(action_checkpoint, "complete", output=action_output)
+        print(
+            locale_label(
+                locale,
+                f"Editorial stage complete in {time.monotonic() - action_started:.1f}s: {action_label}.",
+                f"編集段階が {time.monotonic() - action_started:.1f} 秒で完了: {action_label}。",
+            ),
+            flush=True,
+        )
     asset_checkpoint = project["editorial_map"][ASSET_CHECKPOINT_STAGE]
     if asset_checkpoint["status"] != "complete":
         asset_label = _stage_label(ASSET_CHECKPOINT_STAGE, locale)
         print(
             locale_label(
                 locale,
-                f"Editorial stage 7/7 - {asset_label} started.",
-                f"編集段階 7/7 - {asset_label}を開始。",
+                f"Editorial stage 8/8 - {asset_label} started.",
+                f"編集段階 8/8 - {asset_label}を開始。",
             ),
             flush=True,
         )
@@ -372,7 +450,11 @@ def run_editorial_project(
     write_editorial_checkpoint(checkpoint_path, project)
     write_editorial_html(resolved_report, project)
     print(
-        locale_label(locale, "Editorial run complete. Total API cost: ", "編集処理が完了しました。API 費用合計: ")
+        locale_label(
+            locale,
+            "Editorial run complete. End-to-end API cost: ",
+            "編集処理が完了しました。処理全体の API 費用: ",
+        )
         + f"${float(project.get('run_provenance', {}).get('actual_cost_usd', 0.0)):.4f}",
         flush=True,
     )
@@ -413,7 +495,6 @@ def _apply_stage_output(
         "recommendations",
         "narration_briefs",
         "creative_suggestions",
-        "emphasized_phrases",
         "timeline_coverage",
         "connections",
         "conflicts",
@@ -431,24 +512,37 @@ def _record_stage_cost(
     raw_cost = output.get("api_cost_usd")
     if raw_cost is None and stage == "visual_learning":
         raw_cost = output.get("cost_usd")
+    if raw_cost is None:
+        return
     try:
         cost = max(0.0, float(raw_cost or 0.0))
     except (TypeError, ValueError):
         cost = 0.0
-    if not cost:
-        return
     provenance = project["run_provenance"]
-    provenance["actual_cost_usd"] = float(provenance.get("actual_cost_usd", 0.0)) + cost
-    provenance["runs"].append(
-        {"source_id": source_id, "stage": stage, "actual_cost_usd": cost}
+    runs = [
+        row
+        for row in provenance.get("runs", [])
+        if not (
+            isinstance(row, dict)
+            and str(row.get("source_id")) == source_id
+            and str(row.get("stage")) == stage
+        )
+    ]
+    if cost:
+        runs.append({"source_id": source_id, "stage": stage, "actual_cost_usd": cost})
+    provenance["runs"] = runs
+    provenance["actual_cost_usd"] = sum(
+        max(0.0, float(row.get("actual_cost_usd", 0.0)))
+        for row in runs
+        if isinstance(row, dict)
     )
     print(
         locale_label(
             project.get("output_locale"),
-            f"Editorial API cost: ${provenance['actual_cost_usd']:.4f} total "
-            f"(+${cost:.4f} {source_id}/{stage})",
-            f"編集 API 費用: 合計 ${provenance['actual_cost_usd']:.4f} "
-            f"(+${cost:.4f} {source_id}/{stage})",
+            f"End-to-end editorial API cost: ${provenance['actual_cost_usd']:.4f} "
+            f"(${cost:.4f} {source_id}/{stage})",
+            f"編集処理全体の API 費用: ${provenance['actual_cost_usd']:.4f} "
+            f"(${cost:.4f} {source_id}/{stage})",
         ),
         flush=True,
     )

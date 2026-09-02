@@ -29,8 +29,18 @@ class FakeProvider:
 
     def __init__(self, *responses: str) -> None:
         self.responses = list(responses)
+        self.response_schemas: list[dict[str, object] | None] = []
+        self.operations: list[str] = []
 
-    def complete(self, _prompt: str) -> str:
+    def complete(
+        self,
+        _prompt: str,
+        *,
+        operation: str,
+        response_schema: dict[str, object] | None = None,
+    ) -> str:
+        self.operations.append(operation)
+        self.response_schemas.append(response_schema)
         if not self.responses:
             raise AssertionError("Unexpected B-roll provider call")
         return self.responses.pop(0)
@@ -376,6 +386,11 @@ class BrollTests(unittest.TestCase):
         self.assertEqual(outcome.filename_rejected_count, 0)
         self.assertEqual(outcome.retrieved_asset_count, 1)
         self.assertEqual(provider.responses, [])
+        self.assertEqual(
+            provider.operations,
+            ["broll_needs", "broll_placement", "broll_placement"],
+        )
+        self.assertTrue(all(schema is not None for schema in provider.response_schemas))
 
     def test_cover_scaling_expands_low_resolution_video_to_canvas(self) -> None:
         asset = CatalogAsset(

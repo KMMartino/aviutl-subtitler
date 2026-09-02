@@ -124,9 +124,6 @@ describe("python command builder", () => {
         objective: "Finish with the selected restriction",
         targetDurationMinSeconds: 2400,
         targetDurationMaxSeconds: 4200,
-        mustKeepNotes: ["Final attempt"],
-        deEmphasizeNotes: ["Repeated setup"],
-        subtitleMode: "emphasis",
         outputLocale: "ja"
       }
     });
@@ -135,8 +132,9 @@ describe("python command builder", () => {
     expect(command.args.filter((value) => value === "--source-spec")).toHaveLength(2);
     const firstSpec = JSON.parse(command.args[command.args.indexOf("--source-spec") + 1]);
     expect(firstSpec).toMatchObject({ mode: "paired", audioPath: "C:/media/part-1-face.mp4", visualPath: "C:/media/part-1-game.mp4" });
-    expect(command.args).toContain("--must-keep");
-    expect(command.args.slice(command.args.indexOf("--subtitle-mode"), command.args.indexOf("--subtitle-mode") + 2)).toEqual(["--subtitle-mode", "emphasis"]);
+    expect(command.args).not.toContain("--must-keep");
+    expect(command.args).not.toContain("--de-emphasize");
+    expect(command.args.slice(command.args.indexOf("--subtitle-mode"), command.args.indexOf("--subtitle-mode") + 2)).toEqual(["--subtitle-mode", "full"]);
     expect(command.args.slice(command.args.indexOf("--output-locale"), command.args.indexOf("--output-locale") + 2)).toEqual(["--output-locale", "ja"]);
     expect(command.args).not.toContain("--workflow");
   });
@@ -162,7 +160,7 @@ describe("python command builder", () => {
 
   it("extends an editorial checkpoint with the full chronological project request", () => {
     const source = { path: "C:/media/part-1.mp4", durationSeconds: 60, mode: "single" as const, audioPath: "C:/media/part-1.mp4", visualPath: "C:/media/part-1.mp4", audioDurationSeconds: 60, visualDurationSeconds: 60, width: 1920, height: 1080, audioWidth: 1920, audioHeight: 1080, frameRate: 60, audioFrameRate: 60, pairingBasis: "single" as const, roleConfirmed: true };
-    const project = { sources: [source], titleOrGame: "Recovered run", objective: "Continue it", targetDurationMinSeconds: 30, targetDurationMaxSeconds: 50, mustKeepNotes: [], deEmphasizeNotes: [] };
+    const project = { sources: [source], titleOrGame: "Recovered run", objective: "Continue it", targetDurationMinSeconds: 30, targetDurationMaxSeconds: 50 };
     const command = buildRunCommand(paths, "python", {
       workflow: "hosted-long-stream",
       inputPath: "C:/media/run.editorial.json",

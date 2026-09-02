@@ -10,7 +10,7 @@ type Props = { settings: CoreWorkflowSettings; envFile: string; envStatus: EnvSt
 
 export default function HostedSettingsSection({ settings, envFile, envStatus, verification, verifying, expanded, onToggle, onChange, onEnvFile, onVerify }: Props) {
   const { t } = useI18n();
-  const hosted = settings.hosted ?? { transcriptionProvider: "openai", transcriptionModel: APPROVED_MODELS.openaiTranscriptionGpt, fallbackTranscriptionProvider: recommendedFallbackTranscription("openai", APPROVED_MODELS.openaiTranscriptionGpt).provider, fallbackTranscriptionModel: recommendedFallbackTranscription("openai", APPROVED_MODELS.openaiTranscriptionGpt).model, cleanupProvider: "openai", cleanupModel: APPROVED_MODELS.openaiCleanup, envFile: "" };
+  const hosted = settings.hosted ?? { transcriptionProvider: "openai", transcriptionModel: APPROVED_MODELS.openaiTranscriptionGpt, fallbackTranscriptionProvider: recommendedFallbackTranscription("openai", APPROVED_MODELS.openaiTranscriptionGpt).provider, fallbackTranscriptionModel: recommendedFallbackTranscription("openai", APPROVED_MODELS.openaiTranscriptionGpt).model, cleanupProvider: "openai", cleanupModel: APPROVED_MODELS.openaiCleanup56Luna, envFile: "" };
   function setCost(key: keyof NonNullable<CoreWorkflowSettings["cost"]>, value: number | boolean) { onChange({ ...settings, cost: { maxEstimatedApiCostUsd: 5, allowApiSpend: false, estimateCostOnly: false, ...settings.cost, [key]: value } }); }
   async function pickEnv() { const path = await window.subtitler.chooseFile(); if (path) onEnvFile(path); }
   return <>

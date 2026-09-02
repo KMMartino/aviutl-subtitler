@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Literal, cast
 
+from .api_usage import ApiUsageLedger
 from .audio import get_media_duration
 from .config import default_config_path, project_root
 from .editorial_hosted import HostedEditorialExecutorOptions, HostedEditorialStageExecutor
@@ -22,6 +23,7 @@ from .editorial_project import (
     write_editorial_checkpoint,
 )
 from .editorial_report import write_editorial_html
+from .editorial_review import apply_reviewed_editorial_cuts
 from .editorial_resume import (
     inspect_editorial_resume,
     invalidate_editorial_from,
@@ -77,6 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
     relink.add_argument("--source-id", required=True)
     relink.add_argument("--source", required=True)
     relink.add_argument("--role", choices=("audio", "visual"), default="visual")
+
+    apply_cuts = commands.add_parser(
+        "apply-cuts", help="Apply exact [CUT] markers from a reviewed EXO without re-encoding"
+    )
+    apply_cuts.add_argument("--review-project", required=True)
+    apply_cuts.add_argument("--checkpoint")
+    apply_cuts.add_argument("--output")
+    apply_cuts.add_argument("--config", default=str(default_config_path("hosted-long-stream")))
+    apply_cuts.add_argument("--env-file", default=str(project_root() / ".env"))
+    apply_cuts.add_argument("--workspace")
+    apply_cuts.add_argument("--pipeline-script", default=str(project_root() / "aviutl_subtitle.py"))
     return parser
 
 
@@ -96,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
             return _inspect(args)
         if args.command == "relink":
             return _relink(args)
+        if args.command == "apply-cuts":
+            return _apply_cuts(args)
         raise SubtitlerError(f"Unknown editorial command: {args.command}")
     except EditorialRunInterrupted as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -215,6 +230,42 @@ def _relink(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_cuts(args: argparse.Namespace) -> int:
+    review_project = Path(args.review_project).resolve()
+    workspace = (
+        Path(args.workspace).resolve()
+        if args.workspace
+        else review_project.parent / f"{review_project.stem}.files" / "narration-review"
+    )
+    usage = ApiUsageLedger()
+    executor = HostedEditorialStageExecutor(
+        HostedEditorialExecutorOptions(
+            config_path=Path(args.config).resolve(),
+            env_file=Path(args.env_file).resolve(),
+            workspace=workspace,
+            pipeline_script=Path(args.pipeline_script).resolve(),
+        )
+    )
+    provider = executor.build_narration_review_provider(
+        usage, workspace / "narration-review"
+    )
+    try:
+        result = apply_reviewed_editorial_cuts(
+            review_project,
+            checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+            output_path=Path(args.output) if args.output else None,
+            narration_provider=provider,
+            progress=lambda message: print(message, file=sys.stderr, flush=True),
+        )
+    finally:
+        if provider is not None and hasattr(provider, "close"):
+            provider.close()
+    result["api_cost_usd"] = usage.total_cost_usd
+    result["api_usage"] = [row.__dict__ for row in usage.rows]
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def _parse_source_spec(raw_spec: str) -> EditorialSourceInput:
     try:
         spec = json.loads(raw_spec)
@@ -275,6 +326,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser, *, include_checkpoint: b
                 "semantic_spans",
                 "local_reconciliation",
                 "global_reconciliation",
+                "action_planning",
                 "editorial_assets",
             ),
             default="compatible",

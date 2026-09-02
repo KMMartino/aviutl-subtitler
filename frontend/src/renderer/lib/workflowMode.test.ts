@@ -5,7 +5,7 @@ describe("workflow mode mapping", () => {
   it("maps all two-axis combinations", () => {
     expect(modeToWorkflow(false, false)).toBe("local");
     expect(modeToWorkflow(true, false)).toBe("hosted");
-    expect(modeToWorkflow(false, true)).toBe("local-long-stream");
+    expect(modeToWorkflow(false, true)).toBe("hosted-long-stream");
     expect(modeToWorkflow(true, true)).toBe("hosted-long-stream");
   });
 
@@ -13,4 +13,3 @@ describe("workflow mode mapping", () => {
     expect(workflowToMode("hosted-long-stream")).toEqual({ hosted: true, longStream: true });
   });
 });
-

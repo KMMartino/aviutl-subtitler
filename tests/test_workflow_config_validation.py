@@ -149,20 +149,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         with self.assertRaises(SubtitlerError):
             validate_workflow_config(config, workflow="local", check_paths=False)
 
-    def test_long_stream_min_chunks_below_zero_is_rejected(self):
-        config = load_workflow_config("local-long-stream")
-        config["workflow"]["long_stream_min_chunks"] = -1
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local-long-stream", check_paths=False)
-
-    def test_invalid_long_stream_transcription_scope_is_rejected(self):
-        config = load_workflow_config("hosted-long-stream")
-        config["workflow"]["transcription_scope"] = "sometimes"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="hosted-long-stream", check_paths=False)
-
     def test_hosted_short_youtube_chapters_are_allowed(self):
         config = load_workflow_config("hosted")
         config["additional_settings"]["youtube_chapters"] = True
@@ -194,9 +180,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
     def test_invalid_cut_silence_mode_is_rejected(self):
         self.assert_invalid_field("additional_settings", "cut_silence_mode", "sometimes")
-
-    def test_invalid_editorial_map_mode_is_rejected(self):
-        self.assert_invalid_field("additional_settings", "editorial_map_mode", "automatic")
 
     def test_render_cut_video_is_allowed_only_for_short_workflows(self):
         for workflow in ("local", "hosted"):
@@ -235,7 +218,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("backend", "transcription_max_split_depth"),
             ("backend", "spec_draft_n_max"),
             ("audio", "track"),
-            ("workflow", "long_stream_min_chunks"),
             ("vad", "min_silence_ms"),
             ("vad", "speech_pad_ms"),
             ("alignment", "max_split_depth"),
@@ -260,7 +242,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
 
     def test_non_finite_numeric_fields_are_rejected(self):
         fields = (
-            ("workflow", "long_stream_selection_ratio"),
             ("vad", "max_chunk_sec"),
             ("vad", "min_speech_sec"),
             ("vad", "min_silence_ms"),
@@ -316,7 +297,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         config = load_workflow_config("hosted")
         for section, field in (
             ("backend", "transcription_workers"),
-            ("workflow", "long_stream_selection_ratio"),
             ("alignment", "workers"),
             ("alignment", "torch_threads"),
             ("cleanup", "window_subtitles"),

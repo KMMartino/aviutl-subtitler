@@ -11,6 +11,64 @@ from subtitler.editorial_project_cli import main
 
 
 class EditorialProjectCliTests(unittest.TestCase):
+    def test_apply_cuts_wires_hosted_narration_review_and_reports_its_result(self) -> None:
+        class Provider:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        provider = Provider()
+
+        class Executor:
+            def __init__(self, options) -> None:
+                self.options = options
+
+            def build_narration_review_provider(self, usage, sidecar_base):
+                self.usage = usage
+                self.sidecar_base = sidecar_base
+                return provider
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reviewed = root / "review.exo"
+            output = io.StringIO()
+            with (
+                patch(
+                    "subtitler.editorial_project_cli.HostedEditorialStageExecutor",
+                    Executor,
+                ),
+                patch(
+                    "subtitler.editorial_project_cli.apply_reviewed_editorial_cuts",
+                    return_value={
+                        "review_project": str(reviewed),
+                        "checkpoint": str(root / "review.json"),
+                        "output_path": str(root / "review-cuts-applied.exo"),
+                        "report_path": str(root / "review-cuts-applied.html"),
+                        "cut_count": 2,
+                        "removed_ms": 3000,
+                        "ignored_short_count": 0,
+                        "narration_brief_count": 1,
+                        "narration_reference_count": 3,
+                    },
+                ) as apply_cuts,
+                contextlib.redirect_stdout(output),
+            ):
+                code = main([
+                    "apply-cuts",
+                    "--review-project", str(reviewed),
+                    "--config", str(root / "hosted-long-stream.json"),
+                    "--env-file", str(root / ".env"),
+                    "--workspace", str(root / "review.files"),
+                ])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["narration_reference_count"], 3)
+        self.assertEqual(payload["api_cost_usd"], 0)
+        self.assertTrue(provider.closed)
+        self.assertIs(apply_cuts.call_args.kwargs["narration_provider"], provider)
+
     def test_status_reports_durable_stage_state_and_unresolved_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

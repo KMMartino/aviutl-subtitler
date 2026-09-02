@@ -33,12 +33,126 @@ BrollMode = Literal["off", "automatic"]
 DescriptionSource = Literal["user", "ai", "inferred"]
 DisplayMode = Literal["cover", "contain", "overlay"]
 
+BROLL_NEEDS_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "needs": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "search_terms": {"type": "array", "items": {"type": "string"}},
+                    "preferred_media": {"type": "string", "enum": ["video", "image", "either"]},
+                    "need_score": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "start_line", "end_line", "description", "search_terms",
+                    "preferred_media", "need_score", "reason",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "protected_ranges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["start_line", "end_line", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["needs", "protected_ranges"],
+    "additionalProperties": False,
+}
+
+BROLL_PLAN_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "placements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "asset_id": {"type": "string"},
+                    "segment_id": {"type": ["string", "null"]},
+                    "source_start_sec": {"type": "number"},
+                    "source_end_sec": {"type": ["number", "null"]},
+                    "need_score": {"type": "number"},
+                    "relevance_score": {"type": "number"},
+                    "placement_safety_score": {"type": "number"},
+                    "source_grounding_score": {"type": "number"},
+                    "technical_quality_score": {"type": "number"},
+                    "display_mode": {"type": "string", "enum": ["cover", "contain", "overlay"]},
+                    "display_intent_score": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "start_line", "end_line", "asset_id", "segment_id",
+                    "source_start_sec", "source_end_sec", "need_score",
+                    "relevance_score", "placement_safety_score",
+                    "source_grounding_score", "technical_quality_score",
+                    "display_mode", "display_intent_score", "reason",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "filename_review_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "asset_id": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["start_line", "end_line", "asset_id", "confidence", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "missing_assets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["start_line", "end_line", "description", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["placements", "filename_review_candidates", "missing_assets"],
+    "additionalProperties": False,
+}
+
 
 class BrollPlanningProvider(Protocol):
     provider: str
     model: str
 
-    def complete(self, prompt: str) -> str: ...
+    def complete(
+        self,
+        prompt: str,
+        *,
+        operation: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str: ...
 
     def close(self) -> None: ...
 
@@ -153,8 +267,19 @@ class HostedBrollProvider:
         self.provider = refiner.provider
         self.model = refiner.model
 
-    def complete(self, prompt: str) -> str:
-        return self.refiner.complete_structured(prompt, max_tokens=4096, operation="broll_planning")
+    def complete(
+        self,
+        prompt: str,
+        *,
+        operation: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        return self.refiner.complete_structured(
+            prompt,
+            max_tokens=4096,
+            operation=operation,
+            response_schema=response_schema,
+        )
 
     def close(self) -> None:
         self.refiner.close()
@@ -332,10 +457,18 @@ def plan_broll(
         print("Warning: B-roll is enabled, but the Media Library has no available indexed assets.", flush=True)
 
     try:
-        needs_raw = provider.complete(_needs_prompt(subtitles))
+        needs_raw = provider.complete(
+            _needs_prompt(subtitles),
+            operation="broll_needs",
+            response_schema=BROLL_NEEDS_RESPONSE_SCHEMA,
+        )
         needs, protected_ranges = parse_broll_needs(needs_raw, subtitles)
         retrieved = retrieve_catalog_assets(assets, needs)
-        raw = provider.complete(_planning_prompt(subtitles, retrieved, needs, protected_ranges))
+        raw = provider.complete(
+            _planning_prompt(subtitles, retrieved, needs, protected_ranges),
+            operation="broll_placement",
+            response_schema=BROLL_PLAN_RESPONSE_SCHEMA,
+        )
         review_candidates = parse_filename_review_candidates(
             raw,
             retrieved,
@@ -397,7 +530,9 @@ def plan_broll(
                     final_assets,
                     needs,
                     protected_ranges,
-                )
+                ),
+                operation="broll_placement",
+                response_schema=BROLL_PLAN_RESPONSE_SCHEMA,
             )
             proposed, missing_assets, final_rejected = parse_broll_response(
                 final_raw,
@@ -785,18 +920,19 @@ def request_filename_descriptions(
 
 def _needs_prompt(subtitles: Sequence[Subtitle]) -> str:
     return (
-        "Act as a conservative video editor. Identify only transcript passages where optional B-roll would "
-        "materially help, and separately protect passages where the speaker probably expects the viewer to "
-        "look at the primary video. Infer protected passages from wording such as 'as you can see', 'on screen', "
+        "Task: identify optional B-roll needs and primary-video protected ranges.\n\n"
+        "Selection rule: create a need only where B-roll would materially improve comprehension, emotion, or "
+        "pacing. Zero needs is a complete valid result.\n\n"
+        "Protection rule: protect passages where the speaker probably expects the viewer to inspect the primary "
+        "video. Infer this from wording such as 'as you can see', 'on screen', "
         "'here', 'this button/menu/chart', clicking, opening, scrolling, selecting, pointing, comparing visible "
         "items, step-by-step demonstrations, and equivalent cues in any language (for Japanese, examples include "
         "画面, ご覧, ここ, こちら, このボタン, クリック, 選択, 表示, 見て). Protect the complete explanation, "
         "not just the cue sentence. Never create a B-roll need inside a protected range. Do not seek a coverage "
-        "quota; zero needs is valid. Give concrete multilingual search terms, including useful English aliases "
-        "for Japanese topics and exact product/game/person names. Return strict JSON only as "
-        '{"needs":[{"start_line":1,"end_line":2,"description":"...","search_terms":["..."],'
-        '"preferred_media":"video|image|either","need_score":0.0,"reason":"..."}],'
-        '"protected_ranges":[{"start_line":3,"end_line":5,"reason":"the viewer is being shown a menu"}]}.'
+        "quota. Give concrete multilingual search terms, including useful English aliases for Japanese topics "
+        "and exact product/game/person names.\n\n"
+        "Completion: inspect every transcript line, return all supported needs and protected ranges in source "
+        "order, and emit only the JSON object required by the response schema."
         "\n\nTRANSCRIPT (line, start, end, text):\n"
         + _transcript_lines(subtitles)
     )
@@ -853,7 +989,8 @@ def _planning_prompt(
     need_lines = [json.dumps(asdict(need), ensure_ascii=False, separators=(",", ":")) for need in needs]
     protected_text = json.dumps(list(protected_ranges), separators=(",", ":"))
     return (
-        "Plan optional B-roll using only the retrieved catalog and the supplied editorial needs. The primary "
+        "Task: plan grounded optional B-roll placements using only the retrieved catalog and supplied needs.\n\n"
+        "The primary "
         "video may be a screen recording or demonstration, not a talking head. Never place B-roll over a "
         "protected range or over wording that implies the viewer should inspect the current screen, even if the "
         "protected list missed it. It is better to omit a weak match. Do not target a coverage quota. Keep density "
@@ -870,14 +1007,10 @@ def _planning_prompt(
         "remove important diagram/UI/document content. Use overlay only for an intentional small comedic/reaction "
         "insert, and give it display_intent_score >= 0.9 only when that intent is explicit. Score each independent "
         "dimension from 0 to 1: need_score, relevance_score, placement_safety_score, source_grounding_score, "
-        "technical_quality_score, and display_intent_score. Return strict JSON only with this shape:\n"
-        '{"placements":[{"start_line":1,"end_line":2,"asset_id":"id","segment_id":null,'
-        '"source_start_sec":0,"source_end_sec":5,"need_score":0.8,"relevance_score":0.9,'
-        '"placement_safety_score":0.9,"source_grounding_score":0.7,"technical_quality_score":0.8,'
-        '"display_mode":"cover|contain|overlay","display_intent_score":0.0,"reason":"..."}],'
-        '"filename_review_candidates":[{"start_line":3,"end_line":4,"asset_id":"id",'
-        '"confidence":0.7,"reason":"the specific title appears to match this need"}],'
-        '"missing_assets":[{"start_line":3,"end_line":4,"description":"...","reason":"..."}]}\n\n'
+        "technical_quality_score, and display_intent_score.\n\n"
+        "Completion: evaluate every supplied need, return only independently grounded placements, route the "
+        "strongest eligible filename-only match to review, record genuine missing assets, and emit only the JSON "
+        "object required by the response schema.\n\n"
         "PROTECTED LINE RANGES:\n"
         + protected_text
         + "\n\nEDITORIAL NEEDS (one JSON object per line):\n"

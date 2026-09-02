@@ -16,11 +16,13 @@ from subtitler.errors import StructuredOutputIncompleteError
 from subtitler.external_transcribers import (
     DeadTranscriptionRequest,
     FallbackTranscriber,
+    Gemini35TranscribeAdapter,
     GeminiTranscriber,
     GPTTranscribeAdapter,
     MalformedTranscriptionResponse,
     OpenAITranscriber,
     _hosted_transcription_timeout,
+    _gemini_interaction_tokens,
     _multipart_body,
     _request_json,
     verify_gemini_model_available,
@@ -156,6 +158,57 @@ class ExternalApiClientTests(unittest.TestCase):
                 ).transcribe(self._chunk())
         payload = request.call_args.args[2]
         self.assertEqual(payload["generationConfig"], {"thinkingConfig": {"thinkingLevel": "low"}})
+
+    def test_gemini_35_transcribe_uses_verbatim_interactions_and_glossary(self) -> None:
+        response = {"output_text": "どうも", "usage": {}}
+        glossary = [GlossaryEntry("AviUtl")]
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch("subtitler.external_transcribers.verify_gemini_model_available"), mock.patch(
+                "subtitler.external_transcribers._upload_gemini_file", return_value="https://generativelanguage.googleapis.com/v1beta/files/test"
+            ), mock.patch("subtitler.external_transcribers._delete_gemini_file") as delete, mock.patch(
+                "subtitler.external_transcribers._request_json", return_value=response
+            ) as request:
+                result = Gemini35TranscribeAdapter(
+                    "gemini-3.5-transcribe", Path(temp_name), ApiUsageLedger(), glossary=glossary, api_key="secret-key"
+                ).transcribe(self._chunk())
+
+        self.assertEqual(result.text, "どうも")
+        self.assertEqual(request.call_args.args[1], "https://generativelanguage.googleapis.com/v1beta/interactions")
+        config = request.call_args.args[2]["generation_config"]["transcription_config"]
+        self.assertEqual(config["language_codes"], ["ja-JP"])
+        self.assertEqual(config["custom_vocabulary"], ["AviUtl"])
+        self.assertEqual(config["mode"], {"type": "verbatim"})
+        delete.assert_called_once_with("https://generativelanguage.googleapis.com/v1beta/files/test", "secret-key")
+
+    def test_gemini_native_timestamps_omit_incompatible_custom_vocabulary(self) -> None:
+        response = {"output_text": "どうも", "usage": {}, "steps": [{"content": [{"annotations": [{
+            "type": "word_info", "text": "どうも", "start_offset": "0s", "end_offset": "1s"
+        }]}]}]}
+        with tempfile.TemporaryDirectory() as temp_name:
+            with mock.patch.dict("os.environ", {"GEMINI_35_NATIVE_TIMESTAMPS": "1"}), mock.patch(
+                "subtitler.external_transcribers.verify_gemini_model_available"
+            ), mock.patch(
+                "subtitler.external_transcribers._upload_gemini_file", return_value="https://generativelanguage.googleapis.com/v1beta/files/test"
+            ), mock.patch("subtitler.external_transcribers._delete_gemini_file"), mock.patch(
+                "subtitler.external_transcribers._request_json", return_value=response
+            ) as request:
+                Gemini35TranscribeAdapter(
+                    "gemini-3.5-transcribe", Path(temp_name), ApiUsageLedger(), glossary=[GlossaryEntry("AviUtl")], api_key="secret-key"
+                ).transcribe(self._chunk())
+
+        config = request.call_args.args[2]["generation_config"]["transcription_config"]
+        self.assertNotIn("custom_vocabulary", config)
+        self.assertEqual(config["mode"], {"type": "verbatim", "timestamp_granularities": ["word"]})
+
+    def test_gemini_interaction_word_annotations_become_global_tokens(self) -> None:
+        tokens = _gemini_interaction_tokens(
+            {"steps": [{"content": [{"annotations": [{
+                "type": "word_info", "text": "字幕", "start_offset": "0.250s", "end_offset": "0.750s"
+            }]}]}]},
+            AudioChunk(1, 12.0, 20.0, []),
+        )
+        self.assertEqual(tokens[0].text, "字幕")
+        self.assertEqual((tokens[0].start, tokens[0].end, tokens[0].kind), (12.25, 12.75, "word"))
 
     def test_gemini_model_verification_uses_api_key_header_not_query(self) -> None:
         with mock.patch("subtitler.external_transcribers._request_json", return_value={"models": []}) as request:
@@ -496,12 +549,61 @@ class ExternalApiClientTests(unittest.TestCase):
 
         self.assertEqual(result, "{}")
         payload = request.call_args.args[2]
-        self.assertIn("senior long-form video editor", payload["messages"][0]["content"])
+        self.assertIn("factual event-and-meaning map", payload["messages"][0]["content"])
         self.assertEqual(payload["response_format"]["type"], "json_schema")
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(payload["max_completion_tokens"], 16_384)
         self.assertEqual(record["finish_reason"], "stop")
         self.assertEqual(record["response_content"], "{}")
+
+    def test_openai_editorial_visual_request_sends_labeled_images_and_tracks_usage(self) -> None:
+        response = {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '{"decisions":[]}'}],
+                }
+            ],
+            "usage": {"input_tokens": 120, "output_tokens": 8, "total_tokens": 128},
+        }
+        schema = {
+            "type": "object",
+            "properties": {"decisions": {"type": "array", "items": {"type": "object"}}},
+            "required": ["decisions"],
+            "additionalProperties": False,
+        }
+        ledger = ApiUsageLedger()
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "subtitler.external_refiners.verify_openai_model_available"
+        ), mock.patch(
+            "subtitler.external_refiners._request_json_with_retries", return_value=response
+        ) as request:
+            frame = Path(directory) / "frame.jpg"
+            frame.write_bytes(b"jpeg")
+            refiner = OpenAITextRefiner(
+                "gpt-5.6-terra",
+                [],
+                ledger,
+                api_key="secret-key",
+                reasoning_effort="medium",
+            )
+            result = refiner.complete_structured_with_images(
+                "review this candidate",
+                [(frame, "Candidate cut-1 middle frame")],
+                max_tokens=8192,
+                operation="editorial_cut_visual_review",
+                response_schema=schema,
+            )
+
+        self.assertEqual(result, '{"decisions":[]}')
+        payload = request.call_args.args[2]
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
+        content = payload["input"][0]["content"]
+        self.assertEqual(content[1]["text"], "Candidate cut-1 middle frame")
+        self.assertTrue(content[2]["image_url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(len(ledger.rows), 1)
+        self.assertEqual(ledger.rows[0].operation, "editorial_cut_visual_review")
 
     def test_openai_editorial_length_finish_is_diagnostic_and_retryable(self) -> None:
         response = {
@@ -557,6 +659,12 @@ class ExternalApiClientTests(unittest.TestCase):
             cleanup_payload = request.call_args.args[2]
         self.assertEqual(split_payload["reasoning_effort"], "none")
         self.assertEqual(cleanup_payload["reasoning_effort"], "medium")
+        self.assertIn("candidate IDs", split_payload["messages"][0]["content"])
+        self.assertIn("conservatively clean", cleanup_payload["messages"][0]["content"])
+        self.assertNotEqual(
+            split_payload["messages"][0]["content"],
+            cleanup_payload["messages"][0]["content"],
+        )
 
     def test_gemini_split_planning_uses_less_thinking_without_changing_cleanup_profile(self) -> None:
         response = {"candidates": [{"content": {"parts": [{"text": "Z1A"}]}}], "usageMetadata": {}}
@@ -577,6 +685,11 @@ class ExternalApiClientTests(unittest.TestCase):
 
         self.assertEqual(split_config["thinkingConfig"], {"thinkingLevel": "minimal"})
         self.assertEqual(cleanup_config["thinkingConfig"], {"thinkingLevel": "high"})
+        split_system = request.call_args_list[0].args[2]["systemInstruction"]["parts"][0]["text"]
+        cleanup_system = request.call_args_list[1].args[2]["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("candidate IDs", split_system)
+        self.assertIn("conservatively clean", cleanup_system)
+        self.assertNotEqual(split_system, cleanup_system)
 
     @mock.patch("subtitler.hosted_http.time.sleep")
     @mock.patch("subtitler.hosted_http.random.uniform", return_value=0.0)

@@ -12,6 +12,7 @@ from .audio import write_wav_segment
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry, format_glossary
 from .llama_server import LlamaServerProcess
+from .model_prompts import TRANSCRIPTION_SYSTEM_PROMPT
 from .models import AudioChunk, TranscriptChunk
 from .vad import VadSession, split_chunk_with_tighter_vad
 
@@ -19,10 +20,12 @@ from .vad import VadSession, split_chunk_with_tighter_vad
 UNTRANSCRIBABLE_AUDIO_TOKEN = "__SUBTITLER_UNTRANSCRIBABLE_AUDIO__"
 
 PROMPT = (
-    "この音声の日本語の発話を、聞こえた順番どおりに一字一句そのまま文字起こししてください。"
-    "翻訳、要約、補足、タイムスタンプ、記号トークンは出力しないでください。"
-    f"音声が判別不能、無音、ノイズのみ、または日本語の発話として文字起こしできない場合は、必ず {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力してください。"
-    "文字起こし本文だけを出力してください。"
+    "タスク: 現在の音声区間に聞こえる日本語の発話を、聞こえた順番どおり一字一句そのまま文字起こしする。\n"
+    "出力契約:\n"
+    "- 発話がある場合は文字起こし本文だけを出力する。\n"
+    f"- 判別不能、無音、ノイズのみ、または日本語として文字起こし不能なら {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力する。\n"
+    "- 翻訳、要約、補足、タイムスタンプ、記号トークンを含めない。\n"
+    "完了条件: 現在の音声全体を確認し、上記いずれか一つの形式だけを返す。"
 )
 
 TRANSCRIPTION_STOP = ["<|im_end|>", "<end_of_turn>", "<|end|>", "<|eot_id|>"]
@@ -30,17 +33,13 @@ def build_transcription_prompt(
     glossary: list[GlossaryEntry] | None = None,
     previous_transcript: str | None = None,
 ) -> str:
-    if not glossary:
-        prompt = PROMPT
-    else:
+    prompt = PROMPT
+    if glossary:
         hints = format_glossary(glossary)
         prompt = (
-        "この音声の日本語の発話を、聞こえた順番どおりに一字一句そのまま文字起こししてください。\n"
-        "翻訳、要約、補足、タイムスタンプ、記号トークンは出力しないでください。\n"
-        f"音声が判別不能、無音、ノイズのみ、または日本語の発話として文字起こしできない場合は、必ず {UNTRANSCRIBABLE_AUDIO_TOKEN} だけを出力してください。\n"
-        "文字起こし本文だけを出力してください。\n"
-        "以下の語彙ヒントは、音声として聞こえる場合だけ使ってください:\n"
-        f"{hints}"
+            f"{prompt}\n\n"
+            "語彙ヒント（現在の音声として聞こえる語の表記確認にだけ使う）:\n"
+            f"{hints}"
         )
     if not previous_transcript:
         return prompt
@@ -177,6 +176,7 @@ class ServerGemmaTranscriber:
             "max_tokens": 512,
             "stop": TRANSCRIPTION_STOP,
             "messages": [
+                {"role": "system", "content": TRANSCRIPTION_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [

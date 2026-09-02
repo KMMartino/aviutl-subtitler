@@ -8,7 +8,6 @@ export function workflowToMode(workflow: WorkflowName): { hosted: boolean; longS
 }
 
 export function modeToWorkflow(hosted: boolean, longStream: boolean): WorkflowName {
-  if (hosted) return longStream ? "hosted-long-stream" : "hosted";
-  return longStream ? "local-long-stream" : "local";
+  if (longStream) return "hosted-long-stream";
+  return hosted ? "hosted" : "local";
 }
-

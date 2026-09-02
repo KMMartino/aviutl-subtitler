@@ -1,15 +1,10 @@
 # Long-stream editorial direction
 
-Status: product and analysis plan only. No implementation is authorized yet.
+Status: the reduced human-information baseline is implemented and under product testing.
 
-This directory records the proposed suggestion-only workflow for turning one or more long gameplay recordings or streams into an editorial map. The default target remains a lightly edited, mostly chronological video. Narration-heavy restructuring is an available recommendation style, not the default.
+This directory preserves both the current hosted long-stream contract and the research/history that led to it. The active app produces factual editing evidence, sparse narration possibilities, selected subtitles, utterance guides, and deterministic voice-gap markers. Historical suggestion-heavy documents are not runtime specifications.
 
-The planner recognizes two complementary editorial priors:
-
-- **Continuity-first:** begin with the recording intact and justify each removal.
-- **Selection-first:** begin with an empty timeline and justify each inclusion plus the context needed to understand it.
-
-The desired runtime range controls how much each prior contributes, but the blend is decided per sequence and thread rather than imposed as one project-wide compression formula.
+Earlier experiments compared continuity-first and selection-first editing. The active workflow deliberately leaves that judgment to the human editor.
 
 ## Documents
 
@@ -17,18 +12,19 @@ The desired runtime range controls how much each prior contributes, but the blen
 - [feature-plan.md](feature-plan.md) — proposed product behavior, processing architecture, artifacts, and staged delivery plan.
 - [evaluation-plan.md](evaluation-plan.md) — how to evaluate useful recommendations without requiring a pre-existing machine-readable edit plan.
 - [implementation-status.md](implementation-status.md) — current vertical-slice coverage, known gaps, and the next validation target.
+- [human-information-baseline.md](human-information-baseline.md) — current reduced human-information output contract.
+- [narration-practices.md](narration-practices.md) — compact agent-facing narration contract grounded in reference studies.
 - `evidence/` — generated transcript output and future intermediate findings.
 
 ## Fixed decisions
 
-- Version 1 produces suggestions and markers only; it never cuts, rearranges, or renders the sources.
-- Full transcription is the default for local and hosted workflows. Existing high-activity-only transcription becomes an additional setting.
-- The new editorial analysis is hosted-only. The smaller-segment local workflow remains available.
+- The initial run never makes semantic cut, preserve, montage, or creative-effect decisions.
+- Hosted long-stream analysis always transcribes the full detected speech. High-activity-only transcription is retired.
+- Long-stream analysis is hosted-only. Ordinary shorter subtitle workflows remain available locally.
 - Multiple source videos are accepted in the UI, but analyzed serially, one file at a time. Persistent editorial state carries across file boundaries, and later linking treats cross-file and same-file relationships identically.
-- Silence is neutral evidence. It must never be used alone as a reason to cut gameplay.
+- Silence is neutral for factual event analysis. Separately, deterministic `[CUT]` guides mark voice-free gaps for human review without claiming that their visual content is unimportant.
 - The user selects a desired final-duration range with a dual-ended slider. The UI does not need to display a compression ratio.
-- The runtime target is not implemented as uniform trimming. The planner first uses high-confidence continuity-first removals, then applies selection-first construction only where greater condensation is needed and editorially supportable.
-- Dynamic editorial handles are soft suggestions, not fixed trim points.
+- A reviewed EXO is authoritative when applying cuts. Exact `[CUT]` objects on the reserved layer may be moved, resized, duplicated, or deleted by the user.
 - Chat, chat OCR, speaker diarization, privacy UI, and automatic editing are out of scope for version 1.
-- Required inputs are source video, sampled visual evidence, and a time-aligned transcript. Game title and run objective are required metadata; must-keep moments and subjects to de-emphasize are optional.
+- Required inputs are source video, sampled visual evidence, and a time-aligned transcript. Game title and run objective provide synthesis context.
 - Canonical output is checkpointable JSON, accompanied by a readable HTML report and layered EXO markers.

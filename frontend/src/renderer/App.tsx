@@ -15,7 +15,7 @@ import MediaLibraryScreen from "./components/MediaLibraryScreen";
 import BrollReviewScreen from "./components/BrollReviewScreen";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultEditorialCheckpointPath, defaultOutputPath, defaultSidecarDir } from "./lib/paths";
-import type { AppSettings, BrollCandidate, BrollReviewDecision, CoreWorkflowSettings, CutSilenceEncoderPreset, EditorialProjectRequest, EditorialRestartMode, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
+import type { AppSettings, BrollCandidate, BrollReviewDecision, CoreWorkflowSettings, CutSilenceEncoderPreset, EditorialCutApplicationResult, EditorialProjectRequest, EditorialRestartMode, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
 import { useBatchedLog } from "./hooks/useBatchedLog";
 import { useMediaAnalysis } from "./hooks/useMediaAnalysis";
@@ -47,14 +47,14 @@ export default function App() {
     objective: "",
     targetDurationMinSeconds: 60,
     targetDurationMaxSeconds: 60,
-    mustKeepNotes: [],
-    deEmphasizeNotes: [],
     outputLocale: "en"
   });
   const [editorialResumeCheckpoint, setEditorialResumeCheckpoint] = useState("");
   const [editorialRestartFrom, setEditorialRestartFrom] = useState<EditorialRestartMode>("compatible");
   const [editorialExtensionCheckpoint, setEditorialExtensionCheckpoint] = useState("");
   const [editorialExtensionBaseCount, setEditorialExtensionBaseCount] = useState(0);
+  const [reviewedEditorialProject, setReviewedEditorialProject] = useState("");
+  const [editorialCutApplication, setEditorialCutApplication] = useState<EditorialCutApplicationResult | null>(null);
   const [managedDeleteAction, setManagedDeleteAction] = useState("");
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
@@ -138,7 +138,7 @@ export default function App() {
     analysis?.videoCodec
     && (!renderCutVideo || (settings?.cutSilenceEncoderPreset !== "unconfigured" && selectedEncoderProbe?.available && !probingEncoders))
   );
-  const editorialMapEnabled = workflow === "hosted-long-stream" && coreSettings?.additionalSettings?.editorialMapMode === "suggestions";
+  const editorialMapEnabled = workflow === "hosted-long-stream";
   const editorialReady = !editorialMapEnabled || Boolean(
     editorialResumeCheckpoint || (editorialProject.sources.length
     && editorialProject.sources.every((source) => source.roleConfirmed)
@@ -147,7 +147,11 @@ export default function App() {
     && editorialProject.targetDurationMinSeconds > 0
     && editorialProject.targetDurationMaxSeconds >= editorialProject.targetDurationMinSeconds)
   );
-  const canRun = Boolean(settings && configs && configPaths && (inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && outputPath && pythonReady && pythonRequirementsReady && ffmpegReady && alignmentReady && hostedReady && localReady && cutSilenceReady && editorialReady);
+  const canRun = Boolean(workflow !== "local-long-stream" && settings && configs && configPaths && pythonReady && pythonRequirementsReady && hostedReady && localReady && (
+    reviewedEditorialProject
+      ? editorialMapEnabled
+      : (inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && outputPath && ffmpegReady && alignmentReady && cutSilenceReady && editorialReady
+  ));
 
   useEffect(() => {
     void loadInitialState();
@@ -343,6 +347,15 @@ export default function App() {
   async function startRun() {
     if (!settings || !configPaths || !coreSettings) return;
     try {
+      if (reviewedEditorialProject) {
+        clearLogs();
+        setRunState("running");
+        setElapsedMs(0);
+        setEditorialCutApplication(null);
+        const result = await window.subtitler.applyReviewedEditorialCuts(reviewedEditorialProject);
+        setEditorialCutApplication(result);
+        return;
+      }
       await persistWorkflowSettings(false);
       clearLogs();
       setRunState("running");
@@ -362,7 +375,6 @@ export default function App() {
         silencePreviewFps: settings.silencePreviewFps,
         editorialProject: editorialMapEnabled && (!editorialResumeCheckpoint || Boolean(editorialExtensionCheckpoint)) ? {
           ...editorialProject,
-          subtitleMode: coreSettings.additionalSettings?.editorialSubtitleMode ?? "full",
           outputLocale: editorialExtensionCheckpoint ? editorialProject.outputLocale ?? "en" : settings.appLocale
         } : undefined,
         editorialCheckpoint: editorialMapEnabled ? (editorialResumeCheckpoint || editorialExtensionCheckpoint || undefined) : undefined,
@@ -375,7 +387,7 @@ export default function App() {
       const message = error instanceof Error ? error.message : String(error);
       setRunState("failed");
       setActiveRunId("");
-      replaceLogs(message ? `${message}\n` : "");
+      if (!reviewedEditorialProject) replaceLogs(message ? `${message}\n` : "");
       setNotice(message || t("notice.runStartFailed"));
     }
   }
@@ -698,19 +710,12 @@ export default function App() {
               resumeRestartFrom={editorialRestartFrom}
               extensionCheckpoint={editorialExtensionCheckpoint}
               extensionBaseCount={editorialExtensionBaseCount}
+              reviewedProject={reviewedEditorialProject}
+              cutApplication={editorialCutApplication}
               disabled={runState === "running"}
               onChange={setEditorialProject}
               onRecoverProject={(project) => {
                 setEditorialProject(project);
-                if (project.subtitleMode) {
-                  setCoreSettings((current) => current ? {
-                    ...current,
-                    additionalSettings: {
-                      ...(current.additionalSettings ?? { youtubeChapters: false }),
-                      editorialSubtitleMode: project.subtitleMode
-                    }
-                  } : current);
-                }
                 if (project.sources[0]) handleInput(project.sources[0].visualPath);
               }}
               onPrimarySource={handleInput}
@@ -739,6 +744,11 @@ export default function App() {
                   setOutputPath(newEditorialCheckpointPath(checkpoint));
                 }
               }}
+              onReviewedProject={(path) => {
+                setReviewedEditorialProject(path);
+                setEditorialCutApplication(null);
+                setRunState("idle");
+              }}
             /> : <InputPanel
               inputPath={inputPath}
               audioTrack={coreSettings.audioTrack}
@@ -759,7 +769,7 @@ export default function App() {
             disabled={runState === "running" || Boolean(editorialResumeCheckpoint || editorialExtensionCheckpoint)}
             onOutput={setOutputPath}
           />
-           <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />
+           {(workflow === "local" || workflow === "hosted") && <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />}
           <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
           </div>
         </div>

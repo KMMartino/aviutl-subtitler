@@ -18,7 +18,7 @@ export async function chooseInputFiles(window: BrowserWindow, defaultPath?: stri
     defaultPath,
     properties: ["openFile", "multiSelections"],
     filters: [
-      { name: translate(locale, "dialog.video"), extensions: ["mkv", "mp4", "mov", "webm"] },
+      { name: translate(locale, "dialog.editorialReview"), extensions: ["mkv", "mp4", "mov", "webm", "exo", "aup"] },
       { name: translate(locale, "dialog.allFiles"), extensions: ["*"] }
     ]
   });

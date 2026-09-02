@@ -189,7 +189,7 @@ class EditorialProjectTests(unittest.TestCase):
 
             loaded = load_editorial_checkpoint(checkpoint)
 
-            self.assertEqual(loaded["schema_version"], 3)
+            self.assertEqual(loaded["schema_version"], 4)
             self.assertEqual(loaded["output_locale"], "en")
             self.assertEqual(loaded["sources"][0]["media_mode"], "single")
             self.assertEqual(loaded["pipeline_versions"]["transcription"], 1)
@@ -212,7 +212,7 @@ class EditorialProjectTests(unittest.TestCase):
             write_editorial_checkpoint(checkpoint, loaded)
 
             persisted = json.loads(checkpoint.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["schema_version"], 3)
+            self.assertEqual(persisted["schema_version"], 4)
             self.assertEqual(persisted["output_locale"], "en")
 
     def test_load_repairs_duplicated_source_aggregates_from_local_output(self) -> None:
@@ -226,6 +226,7 @@ class EditorialProjectTests(unittest.TestCase):
                     "A game", "Finish the run", 30_000, 45_000, subtitle_mode="emphasis"
                 ),
             )
+            self.assertEqual(project["subtitle_mode"], "full")
             source_id = project["sources"][0]["source_id"]
             local_output = {
                 "recommendations": [{"id": "recommendation-1"}],

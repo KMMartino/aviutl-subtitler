@@ -106,19 +106,15 @@ describe("config patching", () => {
     expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.render_cut_video).toBe(false);
   });
 
-  it("defaults long streams to full transcription and preserves the optional high-activity scope", () => {
-    expect(extractCoreSettings({ workflow: {} }).longStream?.transcriptionScope).toBe("full");
-    const highActivity = extractCoreSettings({ workflow: { transcription_scope: "high-activity" } });
-    expect(highActivity.longStream?.transcriptionScope).toBe("high-activity");
-    expect(applyCoreSettings({}, highActivity, "hosted-long-stream").workflow?.transcription_scope).toBe("high-activity");
-    expect(applyCoreSettings({}, highActivity, "hosted").workflow?.transcription_scope).toBe("full");
-  });
-
-  it("round-trips the hosted editorial subtitle mode", () => {
-    const partial = extractCoreSettings({ additional_settings: { editorial_subtitle_mode: "emphasis" } });
-    expect(partial.additionalSettings?.editorialSubtitleMode).toBe("emphasis");
-    expect(applyCoreSettings({}, partial, "hosted-long-stream").additional_settings?.editorial_subtitle_mode).toBe("emphasis");
-    expect(applyCoreSettings({}, partial, "hosted").additional_settings?.editorial_subtitle_mode).toBe("full");
+  it("does not preserve retired long-stream selection toggles", () => {
+    const settings = extractCoreSettings({
+      workflow: { transcription_scope: "high-activity" },
+      additional_settings: { editorial_map_mode: "off", editorial_subtitle_mode: "emphasis" }
+    });
+    const applied = applyCoreSettings({}, settings, "hosted-long-stream");
+    expect(applied.workflow?.transcription_scope).toBeUndefined();
+    expect(applied.additional_settings?.editorial_map_mode).toBeUndefined();
+    expect(applied.additional_settings?.editorial_subtitle_mode).toBeUndefined();
   });
 
   it("defaults hosted fallback transcription to the recommended model pair", () => {

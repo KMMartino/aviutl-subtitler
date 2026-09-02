@@ -12,9 +12,7 @@
     "track": 1
   },
   "workflow": {
-    "mode": "long-stream",
-    "transcription_scope": "full",
-    "long_stream_min_chunks": 1
+    "mode": "long-stream"
   },
   "alignment": {
     "max_split_depth": 4,
@@ -22,8 +20,8 @@
   },
   "cleanup": {
     "backend": "openai",
-    "api_model": "gpt-5.4-mini",
-    "reasoning_effort": "medium",
+    "api_model": "gpt-5.6-luna",
+    "reasoning_effort": "low",
     "window_subtitles": 256,
     "workers": 8,
     "skip_final_review": false,
@@ -35,8 +33,8 @@
     "visual_sampling_scale": 1.5,
     "director_model": "gpt-5.6-terra",
     "director_reasoning_effort": "low",
-    "subtitle_cleanup_model": "gpt-5.4-mini",
-    "subtitle_cleanup_reasoning_effort": "medium"
+    "subtitle_cleanup_model": "gpt-5.6-luna",
+    "subtitle_cleanup_reasoning_effort": "low"
   },
   "subtitles": {
     "chain_split_workers": 6
@@ -48,8 +46,6 @@
   "additional_settings": {
     "youtube_chapters": false,
     "cut_silence_mode": "off",
-    "render_cut_video": false,
-    "editorial_map_mode": "off",
-    "editorial_subtitle_mode": "full"
+    "render_cut_video": false
   }
 }

@@ -29,12 +29,12 @@ from subtitler.transcription_backend import RawVadSpeechInterval
 
 
 class SilenceCandidateTests(unittest.TestCase):
-    def test_five_second_gap_proposes_four_point_three_second_cut(self) -> None:
+    def test_five_second_gap_proposes_four_point_six_second_cut(self) -> None:
         candidates = build_cut_candidates([RawVadSpeechInterval(1.0, 2.0), RawVadSpeechInterval(7.0, 8.0)])
         self.assertEqual(len(candidates), 1)
-        self.assertAlmostEqual(candidates[0].cut_start, 2.5)
+        self.assertAlmostEqual(candidates[0].cut_start, 2.2)
         self.assertAlmostEqual(candidates[0].cut_end, 6.8)
-        self.assertAlmostEqual(candidates[0].cut_duration, 4.3)
+        self.assertAlmostEqual(candidates[0].cut_duration, 4.6)
 
     def test_edges_and_safety_consumed_gaps_are_not_candidates(self) -> None:
         self.assertEqual(build_cut_candidates([]), [])
@@ -46,11 +46,11 @@ class SilenceCandidateTests(unittest.TestCase):
 
     def test_proposed_cuts_shorter_than_half_a_second_are_not_candidates(self) -> None:
         self.assertEqual(
-            build_cut_candidates([RawVadSpeechInterval(1.0, 2.0), RawVadSpeechInterval(3.19, 4.0)]),
+            build_cut_candidates([RawVadSpeechInterval(1.0, 2.0), RawVadSpeechInterval(2.89, 4.0)]),
             [],
         )
         candidates = build_cut_candidates(
-            [RawVadSpeechInterval(1.0, 2.0), RawVadSpeechInterval(3.2, 4.0)]
+            [RawVadSpeechInterval(1.0, 2.0), RawVadSpeechInterval(2.9, 4.0)]
         )
         self.assertEqual(len(candidates), 1)
         self.assertAlmostEqual(candidates[0].cut_duration, 0.5)

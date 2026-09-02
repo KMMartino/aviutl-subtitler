@@ -71,6 +71,7 @@ contextBridge.exposeInMainWorld("subtitler", {
   findEditorialCheckpoint: (sources: EditorialSourceSelection[]) => ipcRenderer.invoke("editorial:find-checkpoint", sources),
   listEditorialCheckpoints: () => ipcRenderer.invoke("editorial:list-checkpoints"),
   removeEditorialCheckpoint: (checkpoint: string) => ipcRenderer.invoke("editorial:remove-checkpoint", checkpoint),
+  applyReviewedEditorialCuts: (reviewProject: string) => ipcRenderer.invoke("editorial:apply-reviewed-cuts", reviewProject),
   listEditorialGames: () => ipcRenderer.invoke("editorial:list-games"),
   rememberEditorialGame: (title: string) => ipcRenderer.invoke("editorial:remember-game", title),
   startRun: (request: RunRequest) => ipcRenderer.invoke("run:start", request),

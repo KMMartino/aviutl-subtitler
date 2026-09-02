@@ -93,6 +93,30 @@ class EditorialResumeTests(unittest.TestCase):
             )
             self.assertEqual(project["editorial_map"]["global_reconciliation"]["status"], "pending")
 
+    def test_restart_cost_keeps_only_the_reusable_pipeline_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = _completed_project(Path(directory))
+            source_id = project["sources"][0]["source_id"]
+            project["run_provenance"].update(
+                {
+                    "actual_cost_usd": 10.0,
+                    "runs": [
+                        {"source_id": source_id, "stage": "transcription", "actual_cost_usd": 2.0},
+                        {"source_id": "project", "stage": "global_reconciliation", "actual_cost_usd": 3.0},
+                        {"source_id": "project", "stage": "action_planning", "actual_cost_usd": 4.0},
+                        {"source_id": "project", "stage": "editorial_assets", "actual_cost_usd": 1.0},
+                    ],
+                }
+            )
+
+            prepare_editorial_resume(project, "action_planning")
+
+            self.assertEqual(project["run_provenance"]["actual_cost_usd"], 5.0)
+            self.assertEqual(
+                [(row["source_id"], row["stage"]) for row in project["run_provenance"]["runs"]],
+                [(source_id, "transcription"), ("project", "global_reconciliation")],
+            )
+
     def test_successful_checkpoint_can_rerun_only_reference_assets(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = _completed_project(Path(directory))
@@ -139,7 +163,7 @@ class EditorialResumeTests(unittest.TestCase):
             )
 
             self.assertTrue(inspection["matches_sources"])
-            self.assertEqual(inspection["recommended_restart_from"], "global_reconciliation")
+            self.assertEqual(inspection["recommended_restart_from"], "action_planning")
             self.assertIn("compatible", inspection["available_restart_from"])
 
     def test_matching_selected_media_relinks_a_moved_source_before_resume(self) -> None:
@@ -208,6 +232,15 @@ def _completed_project(root: Path) -> dict:
             "attempts": 1,
             "completed_at_utc": "2026-01-01T00:00:00+00:00",
             "output": {"plan": True},
+        }
+    )
+    action_checkpoint = project["editorial_map"]["action_planning"]
+    action_checkpoint.update(
+        {
+            "status": "complete",
+            "attempts": 1,
+            "completed_at_utc": "2026-01-01T00:00:00+00:00",
+            "output": {"final_actions": []},
         }
     )
     asset_checkpoint = project["editorial_map"]["editorial_assets"]

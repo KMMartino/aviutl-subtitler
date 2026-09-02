@@ -31,9 +31,6 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
     diagnostics: {
       profile: Boolean(config.diagnostics?.profile)
     },
-    longStream: {
-      transcriptionScope: config.workflow?.transcription_scope === "high-activity" ? "high-activity" : "full"
-    },
     cost: {
       maxEstimatedApiCostUsd: Number(config.cost?.max_estimated_api_cost_usd ?? 5),
       allowApiSpend: Boolean(config.cost?.allow_api_spend),
@@ -47,9 +44,7 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
       renderCutVideo: Boolean(config.additional_settings?.render_cut_video),
       brollMode: ["automatic", "review"].includes(String(config.additional_settings?.broll_mode))
         ? "automatic"
-        : "off",
-      editorialMapMode: config.additional_settings?.editorial_map_mode === "suggestions" ? "suggestions" : "off",
-      editorialSubtitleMode: config.additional_settings?.editorial_subtitle_mode === "emphasis" ? "emphasis" : "full"
+        : "off"
     },
     cleanupGroupPolicy: {
       minSec: Number(config.cleanup?.group_min_sec ?? 60),
@@ -101,9 +96,6 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
     next.cleanup.thinking_level = tuning?.thinkingLevel ?? null;
   }
   next.diagnostics.profile = settings.diagnostics.profile;
-  next.workflow.transcription_scope = workflow === "local-long-stream" || workflow === "hosted-long-stream"
-    ? settings.longStream?.transcriptionScope ?? "full"
-    : "full";
   next.cost.max_estimated_api_cost_usd = settings.cost?.maxEstimatedApiCostUsd ?? next.cost.max_estimated_api_cost_usd ?? 5;
   next.cost.allow_api_spend = settings.cost?.allowApiSpend ?? false;
   next.cost.estimate_cost_only = settings.cost?.estimateCostOnly ?? false;
@@ -117,12 +109,6 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.additional_settings.broll_mode = workflow === "hosted"
     ? settings.additionalSettings?.brollMode ?? "off"
     : "off";
-  next.additional_settings.editorial_map_mode = workflow === "hosted-long-stream"
-    ? settings.additionalSettings?.editorialMapMode ?? "off"
-    : "off";
-  next.additional_settings.editorial_subtitle_mode = workflow === "hosted-long-stream"
-    ? settings.additionalSettings?.editorialSubtitleMode ?? "full"
-    : "full";
   if (settings.cleanupGroupPolicy !== undefined) {
     next.cleanup.group_min_sec = settings.cleanupGroupPolicy.minSec;
     next.cleanup.group_duration_divisor = settings.cleanupGroupPolicy.durationDivisor;

@@ -30,9 +30,7 @@ export default function AdditionalSettingsPanel({
     youtubeChapters: false,
     cutSilenceMode: "off",
     renderCutVideo: false,
-    brollMode: "off",
-    editorialMapMode: "off",
-    editorialSubtitleMode: "full"
+    brollMode: "off"
   };
   const shortWorkflow = workflow === "local" || workflow === "hosted";
   const cutMode = additionalSettings.cutSilenceMode ?? "off";
@@ -78,45 +76,6 @@ export default function AdditionalSettingsPanel({
           <TooltipLabel text={t("additional.brollHelp")}>{t("additional.broll")}</TooltipLabel>
         </label>
       </>}
-    </div> : <div className="stack">
-      <label className="check">
-        <input
-          disabled={disabled}
-          type="checkbox"
-          checked={(settings.longStream?.transcriptionScope ?? "full") === "high-activity"}
-          onChange={(event) => onChange({
-            ...settings,
-            longStream: { transcriptionScope: event.target.checked ? "high-activity" : "full" }
-          })}
-        />
-        <TooltipLabel text={t("additional.highActivityHelp")}>{t("additional.highActivity")}</TooltipLabel>
-      </label>
-      {workflow === "hosted-long-stream" && <>
-        <label className="check">
-          <input
-            disabled={disabled}
-            type="checkbox"
-            checked={(additionalSettings.editorialMapMode ?? "off") === "suggestions"}
-            onChange={(event) => updateAdditional({
-              ...additionalSettings,
-              editorialMapMode: event.target.checked ? "suggestions" : "off"
-            })}
-          />
-          <TooltipLabel text={t("additional.editorialMapHelp")}>{t("additional.editorialMap")}</TooltipLabel>
-        </label>
-        <label className="check">
-          <input
-            disabled={disabled}
-            type="checkbox"
-            checked={(additionalSettings.editorialSubtitleMode ?? "full") === "full"}
-            onChange={(event) => updateAdditional({
-              ...additionalSettings,
-              editorialSubtitleMode: event.target.checked ? "full" : "emphasis"
-            })}
-          />
-          <TooltipLabel text={t("additional.fullSubtitlesHelp")}>{t("additional.fullSubtitles")}</TooltipLabel>
-        </label>
-      </>}
-    </div>}
+    </div> : <div className="stack" />}
   </section>;
 }

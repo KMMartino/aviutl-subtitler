@@ -53,7 +53,7 @@ describe("Cut silence additional settings", () => {
     expect(markup).not.toContain("Possible variable frame rate detected");
   });
 
-  it("keeps full transcription available locally and exposes editorial mapping only when hosted", () => {
+  it("does not expose retired long-stream transcription or editorial toggles", () => {
     const localMarkup = renderPanel(<AdditionalSettingsPanel
       workflow="local-long-stream" settings={base} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
@@ -62,12 +62,9 @@ describe("Cut silence additional settings", () => {
       workflow="hosted-long-stream" settings={base} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
-    expect(localMarkup).toContain("Only transcribe high-activity speech");
-    expect(localMarkup).not.toContain("Create editorial map");
-    expect(hostedMarkup).toContain("Create editorial map");
-    expect(hostedMarkup).toContain("Include full subtitles");
-    expect(hostedMarkup).toContain("selected noteworthy phrases");
-    expect(hostedMarkup).toContain("EXO with linked recordings, subtitles, chapters, and editorial markers");
-    expect(hostedMarkup).not.toContain("Hosted only");
+    expect(localMarkup).not.toContain("Only transcribe high-activity speech");
+    expect(hostedMarkup).not.toContain("Only transcribe high-activity speech");
+    expect(hostedMarkup).not.toContain("Create editorial map");
+    expect(hostedMarkup).not.toContain("Include full subtitles");
   });
 });

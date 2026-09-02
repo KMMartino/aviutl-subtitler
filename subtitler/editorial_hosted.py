@@ -10,10 +10,10 @@ import threading
 import time
 import unicodedata
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .api_usage import ApiUsageLedger
 from .audio import get_media_duration
@@ -23,10 +23,10 @@ from .editorial_analysis import (
     TranscriptEvidence,
     VisualEvidence,
     analyze_editorial_source,
-    deduplicate_creative_suggestions,
-    reconcile_editorial_project,
-    review_editorial_project,
+    select_editorial_subtitles,
+    synthesize_human_information_project,
 )
+from .editorial_cutting import build_human_information_plan
 from .editorial_assets import (
     OpenAIEditorialEvidenceProvider,
     resolve_editorial_assets,
@@ -34,9 +34,6 @@ from .editorial_assets import (
 from .editorial_project import EDITORIAL_STAGE_VERSIONS
 from .editorial_enrichment import (
     analyze_acoustic_emphasis,
-    analyze_temporal_bursts,
-    apply_targeted_reviews,
-    review_editorial_candidates,
 )
 from .editorial_locale import locale_label
 from .env import load_env_file
@@ -46,14 +43,27 @@ from .game_knowledge import (
     load_game_profile,
     update_game_profile,
 )
+from .glossary import load_glossary
 from .media_layout import analyze_wide_recording, probe_video_geometry
 from .game_wiki import lookup_game_wiki
-from .media_analysis import OpenAIMediaAnalysisProvider, analyze_media
+from .editorial_visual import OpenAIEditorialVisualProvider
+from .media_analysis import (
+    AnalysisSegment,
+    MediaAnalysisResponseError,
+    MediaAnalysisResult,
+    analyze_media,
+)
 from .subtitle_stage import build_refiner
 
 
 EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS = 20.0
 EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS = 30.0
+EDITORIAL_VISUAL_WINDOW_SECONDS = 12 * 60.0
+MAX_EDITORIAL_VISUAL_WORKERS = 3
+MAX_EDITORIAL_VISUAL_SPLIT_DEPTH = 2
+EDITORIAL_SUBTITLE_TARGET_CHARS = 20
+EDITORIAL_SUBTITLE_MAX_CHARS = 40
+EDITORIAL_SUBTITLE_MIN_CHARS = 6
 
 
 @dataclass(frozen=True)
@@ -100,6 +110,12 @@ class HostedEditorialStageExecutor:
             return self._reconcile(prior_outputs)
         raise SubtitlerError(f"Unsupported hosted editorial stage: {stage}")
 
+    def build_narration_review_provider(
+        self, usage: ApiUsageLedger, sidecar_base: Path
+    ) -> Any:
+        """Build the hosted structured-text provider used after narration review."""
+        return self._build_editorial_refiner(usage, sidecar_base)
+
     def finalize_project(self, project: dict[str, Any]) -> dict[str, Any]:
         usage = ApiUsageLedger()
         global_checkpoint = project.get("editorial_map", {}).get("global_reconciliation", {})
@@ -112,28 +128,28 @@ class HostedEditorialStageExecutor:
         )
         try:
             if base_reconciliation is None:
-                refiner = self._build_editorial_refiner(
+                refiner = self._build_director_refiner(
                     usage, self.options.workspace / "editorial-global"
                 )
                 if refiner is None or not hasattr(refiner, "complete_structured"):
                     raise SubtitlerError(
-                        "Hosted editorial reconciliation requires a structured cleanup model"
+                        "Hosted story synthesis requires a structured model"
                     )
                 print(
                     _message(
                         project,
-                        "Editorial synthesis: reviewing project-wide threads, pacing, and duration plans...",
-                        "編集統合: プロジェクト全体の流れ、テンポ、時間配分を確認中…",
+                        "Story synthesis: building factual phases, long-horizon threads, and narration briefs...",
+                        "ストーリー統合: 事実に基づく展開、長期的なつながり、ナレーション案を作成中…",
                     ),
                     flush=True,
                 )
                 try:
                     with _hosted_progress_updates(
                         project,
-                        english_label="Editorial synthesis",
-                        japanese_label="編集統合",
+                        english_label="Story synthesis",
+                        japanese_label="ストーリー統合",
                     ):
-                        base_reconciliation = reconcile_editorial_project(
+                        base_reconciliation = synthesize_human_information_project(
                             provider=refiner, project=project
                         )
                 finally:
@@ -142,37 +158,11 @@ class HostedEditorialStageExecutor:
                 print(
                     _message(
                         project,
-                        "Editorial synthesis: reusing completed project synthesis from the failed director attempt.",
-                        "編集統合: 前回のディレクター処理前に完了した全体統合を再利用します。",
+                        "Story synthesis: reusing the completed factual project map.",
+                        "ストーリー統合: 完了済みの事実ベースのプロジェクトマップを再利用します。",
                     ),
                     flush=True,
                 )
-            director = self._build_director_refiner(
-                usage, self.options.workspace / "editorial-director"
-            )
-            if director is None or not hasattr(director, "complete_structured"):
-                raise SubtitlerError("Hosted final director review requires a structured model")
-            print(
-                _message(
-                    project,
-                    "Editorial director: reviewing pacing, intrigue, information density, and continuity...",
-                    "編集ディレクター: テンポ、引き、情報密度、連続性を確認中…",
-                ),
-                flush=True,
-            )
-            try:
-                with _hosted_progress_updates(
-                    project,
-                    english_label="Editorial director",
-                    japanese_label="編集ディレクター",
-                ):
-                    director_review = review_editorial_project(
-                        provider=director,
-                        project=project,
-                        reconciliation=base_reconciliation,
-                    )
-            finally:
-                director.close()
         except Exception as exc:
             setattr(
                 exc,
@@ -185,42 +175,150 @@ class HostedEditorialStageExecutor:
                         str(
                             self.options.workspace
                             / "editorial-global.structured_responses.jsonl"
-                        ),
-                        str(
-                            self.options.workspace
-                            / "editorial-director.structured_responses.jsonl"
-                        ),
+                        )
                     ],
                 },
             )
             raise
         result = dict(base_reconciliation)
-        result["director_review"] = director_review
-        result["director_model"] = self._director_model()
-        result["final_actions"] = director_review.get("final_actions", [])
-        result["supporting_edits"] = director_review.get("supporting_edits", [])
-        result["editorial_threads"] = director_review.get("threads", [])
-        estimated_final_ms = int(director_review.get("estimated_final_ms") or 0)
-        if estimated_final_ms > 0 and isinstance(result.get("duration_budget"), dict):
-            result["duration_budget"]["estimated_final_ms"] = estimated_final_ms
-            result["duration_budget"]["within_target_range"] = (
-                int(project["target_duration_min_ms"])
-                <= estimated_final_ms
-                <= int(project["target_duration_max_ms"])
-            )
         result["api_cost_usd"] = usage.total_cost_usd
         result["api_usage"] = [row.__dict__ for row in usage.rows]
         print(
             _message(
                 project,
-                f"Editorial synthesis: complete with {len(result.get('global_threads', []))} thread(s) "
-                f"and {len(result.get('conflicts', []))} conflict review(s); final director review complete.",
-                f"編集統合: {len(result.get('global_threads', []))} 件の流れと "
-                f"{len(result.get('conflicts', []))} 件の競合確認を統合し、最終ディレクター確認が完了しました。",
+                f"Story synthesis: complete with {len(result.get('event_phases', []))} phase(s), "
+                f"{len(result.get('global_threads', []))} thread(s), and "
+                f"{len(result.get('narration_briefs', []))} narration brief(s).",
+                f"ストーリー統合: 展開 {len(result.get('event_phases', []))} 件、"
+                f"つながり {len(result.get('global_threads', []))} 件、"
+                f"ナレーション案 {len(result.get('narration_briefs', []))} 件を作成しました。",
             ),
             flush=True,
         )
         return result
+
+    def plan_actions(self, project: dict[str, Any]) -> dict[str, Any]:
+        """Select display subtitles and deterministically expose human editing guides."""
+        usage = ApiUsageLedger()
+        synthesis = (
+            project.get("editorial_map", {})
+            .get("global_reconciliation", {})
+            .get("output")
+        )
+        if not isinstance(synthesis, dict):
+            raise SubtitlerError("Human-information planning requires completed story synthesis")
+        actionable = build_human_information_plan(project=project, synthesis=synthesis)
+        selector = self._build_editorial_refiner(
+            usage, self.options.workspace / "editorial-subtitle-selection"
+        )
+        if selector is None or not hasattr(selector, "complete_structured"):
+            raise SubtitlerError("Hosted display-subtitle selection requires a structured model")
+        print(
+            _message(
+                project,
+                "Display subtitles: selecting meaningful complete thoughts from the factual story map...",
+                "表示字幕: 事実ベースのストーリーマップから意味のある完結した発話を選択中…",
+            ),
+            flush=True,
+        )
+        try:
+            selected = select_editorial_subtitles(
+                provider=selector,
+                project=project,
+                final_actions=actionable["final_actions"],
+                story_actions=actionable["story_actions"],
+                progress=lambda message: print(
+                    _message(
+                        project,
+                        f"Display subtitles: {message}",
+                        f"表示字幕: {message}",
+                    ),
+                    flush=True,
+                ),
+                default_keep=True,
+            )
+        finally:
+            selector.close()
+
+        emphasized_phrases: list[dict[str, Any]] = []
+        for source in project.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("source_id") or "")
+            transcription = source.get("stages", {}).get("transcription", {}).get("output")
+            aligned_tokens_path = (
+                transcription.get("aligned_tokens_path")
+                if isinstance(transcription, dict)
+                else None
+            )
+            emphasized_phrases.extend(
+                _align_emphasized_phrases(
+                    [
+                        item
+                        for item in selected
+                        if str(item.get("source_id")) == source_id
+                    ],
+                    Path(aligned_tokens_path)
+                    if isinstance(aligned_tokens_path, str)
+                    else None,
+                )
+            )
+        if emphasized_phrases:
+            print(
+                _message(
+                    project,
+                    f"Display subtitles: cleaning {len(emphasized_phrases)} timed display beat(s)...",
+                    f"表示字幕: タイミング済み表示単位 {len(emphasized_phrases)} 件を整文中…",
+                ),
+                flush=True,
+            )
+            cleaner = self._build_subtitle_cleanup_refiner(
+                usage, self.options.workspace / "editorial-subtitle-cleanup"
+            )
+            if cleaner is None:
+                raise SubtitlerError(
+                    "Hosted display-subtitle cleanup requires a text cleanup model"
+                )
+            try:
+                emphasized_phrases = _clean_selected_editorial_subtitles(
+                    emphasized_phrases, cleaner
+                )
+            finally:
+                cleaner.close()
+        actionable["emphasized_phrases"] = emphasized_phrases
+        result = {
+            "director_review": synthesis,
+            "director_model": self._director_model(),
+            "final_actions": actionable["final_actions"],
+            "supporting_edits": [],
+            "editorial_threads": actionable["threads"],
+            "story_actions": actionable["story_actions"],
+            "emphasized_phrases": emphasized_phrases,
+            "plan_audit": actionable["plan_audit"],
+            "workflow": "human_information",
+            "protected_zones": [],
+            "cut_candidates": [],
+            "confirmed_cuts": actionable["confirmed_cuts"],
+            "removed_ms": actionable["removed_ms"],
+            "narration_replaced_ms": 0,
+            "prompt_version": actionable["prompt_version"],
+            "api_cost_usd": usage.total_cost_usd,
+            "api_usage": [row.__dict__ for row in usage.rows],
+        }
+        print(
+            _message(
+                project,
+                f"Human editing guides: complete with {len(result['confirmed_cuts'])} voice-gap marker(s), "
+                f"{len(result['final_actions'])} narration brief(s), and "
+                f"{len(emphasized_phrases)} display subtitle(s).",
+                f"人間向け編集ガイド: 無音マーカー {len(result['confirmed_cuts'])} 件、"
+                f"ナレーション案 {len(result['final_actions'])} 件、"
+                f"表示字幕 {len(emphasized_phrases)} 件で完了しました。",
+            ),
+            flush=True,
+        )
+        return result
+
 
     def resolve_assets(self, project: dict[str, Any]) -> dict[str, Any]:
         requests = [
@@ -237,6 +335,13 @@ class HostedEditorialStageExecutor:
                 ),
                 flush=True,
             )
+            return {
+                "prompt_version": "editorial-assets-compatibility-v1",
+                "supporting_edits": [],
+                "editorial_assets": [],
+                "api_cost_usd": 0.0,
+                "api_usage": [],
+            }
         else:
             print(
                 _message(
@@ -271,9 +376,12 @@ class HostedEditorialStageExecutor:
         cleanup = self._editorial_model_config()["cleanup"]
         return str(cleanup["api_model"])
 
-    def _editorial_reasoning_effort(self) -> str:
-        cleanup = self._editorial_model_config()["cleanup"]
-        return str(cleanup["reasoning_effort"])
+    def _visual_reasoning_effort(self) -> str:
+        editorial = self.config.get("editorial")
+        if not isinstance(editorial, dict):
+            editorial = {}
+        value = str(editorial.get("visual_reasoning_effort") or "low")
+        return value if value in {"none", "low", "medium", "high", "xhigh", "max"} else "low"
 
     def _director_model_config(self) -> dict[str, Any]:
         """Use the next hosted model tier for the bounded final director pass."""
@@ -292,6 +400,8 @@ class HostedEditorialStageExecutor:
         cleanup["thinking_level"] = None
         return config
 
+
+
     def _director_model(self) -> str:
         return str(self._director_model_config()["cleanup"]["api_model"])
 
@@ -304,10 +414,10 @@ class HostedEditorialStageExecutor:
         cleanup = config.setdefault("cleanup", {})
         cleanup["backend"] = "openai"
         cleanup["api_model"] = str(
-            editorial.get("subtitle_cleanup_model") or "gpt-5.4-mini"
+            editorial.get("subtitle_cleanup_model") or "gpt-5.6-luna"
         )
         cleanup["reasoning_effort"] = str(
-            editorial.get("subtitle_cleanup_reasoning_effort") or "medium"
+            editorial.get("subtitle_cleanup_reasoning_effort") or "low"
         )
         cleanup["thinking_level"] = None
         return config
@@ -321,6 +431,25 @@ class HostedEditorialStageExecutor:
         self, usage: ApiUsageLedger, sidecar_base: Path
     ) -> Any:
         return build_refiner(self._director_model_config(), [], usage, sidecar_base)
+
+
+    def _build_game_learning_refiner(
+        self, usage: ApiUsageLedger, sidecar_base: Path
+    ) -> Any:
+        """Reserve the output budget for the compact profile rather than deliberation."""
+        config = self._editorial_model_config()
+        config["cleanup"]["reasoning_effort"] = "low"
+        return build_refiner(config, [], usage, sidecar_base)
+
+    def _build_subtitle_cleanup_refiner(
+        self, usage: ApiUsageLedger, sidecar_base: Path
+    ) -> Any:
+        return build_refiner(
+            self._subtitle_cleanup_model_config(),
+            load_glossary(self.options.glossary_path),
+            usage,
+            sidecar_base,
+        )
 
     def _probe(self, source: dict[str, Any]) -> dict[str, Any]:
         audio_path = Path(source["audio_path"])
@@ -387,9 +516,6 @@ class HostedEditorialStageExecutor:
         source_workspace.mkdir(parents=True, exist_ok=True)
         output = source_workspace / "transcript.exo"
         effective_config = self._subtitle_cleanup_model_config()
-        effective_config.setdefault("additional_settings", {})["editorial_subtitle_mode"] = (
-            (project or {}).get("subtitle_mode", "full")
-        )
         effective_config_path = source_workspace / "transcription-config.json"
         effective_config_path.write_text(
             json.dumps(effective_config, ensure_ascii=False, indent=2) + "\n",
@@ -459,7 +585,7 @@ class HostedEditorialStageExecutor:
             "timing_path": str(timing),
             "text_path": str(text),
             "aligned_tokens_path": str(aligned_tokens) if aligned_tokens.is_file() else None,
-            "subtitle_mode": (project or {}).get("subtitle_mode", "full"),
+            "subtitle_mode": "full",
             "speech_segments": len(transcript),
             "first_speech_ms": transcript[0].start_ms if transcript else None,
             "last_speech_ms": transcript[-1].end_ms if transcript else None,
@@ -478,9 +604,9 @@ class HostedEditorialStageExecutor:
             raise SubtitlerError("Visual analysis requires the completed source probe")
         editorial_config = self.config.get("editorial", {})
         model = self._editorial_model()
-        detail = str(editorial_config.get("visual_detail") or "simple")
+        detail = str(editorial_config.get("visual_detail") or "detailed")
         if detail not in {"simple", "medium", "detailed", "precise", "probe"}:
-            detail = "simple"
+            detail = "detailed"
         existing_profile = load_game_profile(
             self.options.game_knowledge_path,
             str(project["title_or_game"]),
@@ -510,25 +636,38 @@ class HostedEditorialStageExecutor:
             ),
             flush=True,
         )
-        provider = OpenAIMediaAnalysisProvider(
-            model,
-            output_locale=str(project.get("output_locale", "en")),
-            editorial_context=(
-                f"Game/title: {project['title_or_game']}. Objective: {project['objective']}. "
-                f"Known reusable game cues: {game_profile_context(contextual_profile)}"
-            ),
-            reasoning_effort=self._editorial_reasoning_effort(),
+        provider_context = (
+            f"Game/title: {project['title_or_game']}. Objective: {project['objective']}. "
+            f"Known reusable game cues: {game_profile_context(contextual_profile)}"
         )
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="editorial-evidence") as pool:
             visual_future = pool.submit(
-                analyze_media,
+                _analyze_editorial_visual_windows,
                 media_path=Path(source["visual_path"]),
-                media_kind="video",
                 duration_sec=float(probe["duration_ms"]) / 1000.0,
                 detail=detail,
                 ffmpeg="ffmpeg",
-                provider=provider,
                 sampling_scale=float(editorial_config.get("visual_sampling_scale") or 1.5),
+                model=model,
+                reasoning_effort=self._visual_reasoning_effort(),
+                output_locale=str(project.get("output_locale", "en")),
+                editorial_context=provider_context,
+                progress_path=(
+                    self.options.workspace / source["source_id"] / "visual.window_progress.json"
+                ),
+                diagnostics_path=(
+                    self.options.workspace / source["source_id"] / "visual.structured_responses.jsonl"
+                ),
+                progress=lambda complete, total, ranges: print(
+                    _message(
+                        project,
+                        f"Visual learning: state window {complete}/{total} complete "
+                        f"({ranges} event range(s) so far)...",
+                        f"映像学習: 状態ウィンドウ {complete}/{total} が完了 "
+                        f"（現在 {ranges} イベント区間）…",
+                    ),
+                    flush=True,
+                ),
             )
             acoustic_future = pool.submit(
                 analyze_acoustic_emphasis,
@@ -539,44 +678,18 @@ class HostedEditorialStageExecutor:
             result = visual_future.result()
             acoustic_events = acoustic_future.result()
         output = asdict(result)
+        bursts = {
+            "bursts": [],
+            "cost_usd": 0.0,
+            "prompt_version": "disabled-for-cutting-assistant",
+        }
         print(
             _message(
                 project,
-                f"Visual learning: coarse map complete ({len(output.get('segments', []))} visual range(s), "
-                f"{len(acoustic_events)} acoustic cue(s)); reviewing key transitions...",
-                f"映像学習: 概略マップが完了（映像区間 {len(output.get('segments', []))} 件、"
-                f"音響キュー {len(acoustic_events)} 件）。重要な切り替わりを確認中…",
-            ),
-            flush=True,
-        )
-        try:
-            bursts = analyze_temporal_bursts(
-                Path(source["visual_path"]),
-                duration_ms=int(probe["duration_ms"]),
-                segments=output.get("segments", []),
-                acoustic_events=acoustic_events,
-                frame_differences=output.get("frame_differences", []),
-                model=model,
-                reasoning_effort=self._editorial_reasoning_effort(),
-                output_locale=str(project.get("output_locale", "en")),
-            )
-        except Exception as exc:
-            print(
-                _message(
-                    project,
-                    f"Warning: temporal frame-burst review failed; keeping coarse vision: {exc}",
-                    f"警告: 時間的フレームバースト確認に失敗しました。概略の映像分析を維持します: {exc}",
-                ),
-                flush=True,
-            )
-            bursts = {"bursts": [], "cost_usd": 0.0, "prompt_version": "failed"}
-        print(
-            _message(
-                project,
-                f"Visual learning: transition review complete ({len(bursts.get('bursts', []))} burst(s)); "
-                "updating reusable game knowledge...",
-                f"映像学習: 切り替わりの確認が完了（バースト {len(bursts.get('bursts', []))} 件）。"
-                "再利用可能なゲーム知識を更新中…",
+                f"Visual learning: dense map complete ({len(output.get('segments', []))} visual range(s), "
+                f"{len(acoustic_events)} acoustic cue(s)); updating reusable game knowledge...",
+                f"映像学習: 詳細マップが完了（映像区間 {len(output.get('segments', []))} 件、"
+                f"音響キュー {len(acoustic_events)} 件）。再利用可能なゲーム知識を更新中…",
             ),
             flush=True,
         )
@@ -589,7 +702,7 @@ class HostedEditorialStageExecutor:
             )
             transcript_excerpt = [asdict(item) for item in _representative_transcript(evidence)]
         usage = ApiUsageLedger()
-        refiner = self._build_editorial_refiner(
+        refiner = self._build_game_learning_refiner(
             usage, self.options.workspace / source["source_id"] / "game-learning"
         )
         if refiner is None or not hasattr(refiner, "complete_structured"):
@@ -662,6 +775,14 @@ class HostedEditorialStageExecutor:
             Path(transcription["timing_path"]),
             Path(transcription["text_path"]),
         )
+        transcript = _tighten_transcript_to_speech_activity(
+            transcript,
+            _load_vad_speech_activity(
+                Path(transcription["timing_path"]).with_name(
+                    "transcript.vad_selection.csv"
+                )
+            ),
+        )
         visuals = [
             VisualEvidence(
                 start_ms=int(item.get("start_ms", 0)),
@@ -671,6 +792,7 @@ class HostedEditorialStageExecutor:
                 confidence=float(item.get("confidence", 0.0)),
                 motion_level=(float(item["motion_level"]) if item.get("motion_level") is not None else None),
                 visual_category=str(item.get("visual_category") or "other"),
+                observed_label=str(item.get("observed_label") or ""),
             )
             for item in visual.get("segments", [])
             if isinstance(item, dict) and int(item.get("end_ms", 0)) > int(item.get("start_ms", 0))
@@ -689,18 +811,19 @@ class HostedEditorialStageExecutor:
             source_id=str(source["source_id"]),
             source_duration_ms=int(probe["duration_ms"]),
         )
+        semantic_progress_lock = threading.Lock()
 
         def record_completed_window(window: dict[str, Any]) -> None:
-            completed = semantic_progress["completed_windows"]
-            base_index = int(window["base_window_index"])
-            completed[:] = [
-                item for item in completed if int(item.get("base_window_index", -1)) != base_index
-            ]
-            completed.append(window)
-            completed.sort(key=lambda item: int(item.get("base_window_index", -1)))
-            _write_json_atomic(semantic_progress_path, semantic_progress)
+            with semantic_progress_lock:
+                completed = semantic_progress["completed_windows"]
+                base_index = int(window["base_window_index"])
+                completed[:] = [
+                    item for item in completed if int(item.get("base_window_index", -1)) != base_index
+                ]
+                completed.append(window)
+                completed.sort(key=lambda item: int(item.get("base_window_index", -1)))
+                _write_json_atomic(semantic_progress_path, semantic_progress)
 
-        review: dict[str, Any] = {"cost_usd": 0.0}
         try:
             result = analyze_editorial_source(
                 provider=refiner,
@@ -711,8 +834,6 @@ class HostedEditorialStageExecutor:
                 transcript=transcript,
                 visuals=visuals,
                 cumulative_context=project["cumulative_context"],
-                must_keep_notes=project["must_keep_notes"],
-                de_emphasize_notes=project["de_emphasize_notes"],
                 acoustic_events=visual.get("acoustic_events", []),
                 temporal_bursts=visual.get("temporal_bursts", []),
                 game_knowledge=game_profile_context(
@@ -732,108 +853,17 @@ class HostedEditorialStageExecutor:
                 window_completed=record_completed_window,
                 output_locale=str(project.get("output_locale", "en")),
             )
-            review_count = sum(
-                1
-                for item in result["recommendations"]
-                if item.get("disposition") in {"omit", "condense", "review"}
-                and int(item.get("end_ms", 0)) - int(item.get("start_ms", 0)) >= 8000
-            )
             print(
                 _message(
                     project,
-                    "Editorial analysis: first pass complete; targeted visual review will inspect "
-                    f"up to {min(12, review_count)} consequential suggestion(s)...",
-                    "編集分析: 初回分析が完了。影響の大きい提案を最大 "
-                    f"{min(12, review_count)} 件、映像と照合します…",
-                ),
-                flush=True,
-            )
-            try:
-                review = review_editorial_candidates(
-                    Path(source["visual_path"]),
-                    duration_ms=int(probe["duration_ms"]),
-                    recommendations=result["recommendations"],
-                    transcript=[asdict(item) for item in transcript],
-                    visual_segments=[asdict(item) for item in visuals],
-                    temporal_bursts=visual.get("temporal_bursts", []),
-                    acoustic_events=visual.get("acoustic_events", []),
-                    game_knowledge=game_profile_context(
-                        visual.get("game_knowledge", {})
-                        if isinstance(visual.get("game_knowledge"), dict)
-                        else {}
-                    ),
-                    model=self._editorial_model(),
-                    reasoning_effort=self._editorial_reasoning_effort(),
-                    output_locale=str(project.get("output_locale", "en")),
-                )
-            except Exception as exc:
-                print(
-                    _message(
-                        project,
-                        f"Warning: targeted cross-modal review failed; keeping first-pass suggestions: {exc}",
-                        f"警告: 映像・音声の重点照合に失敗しました。初回提案を維持します: {exc}",
-                    ),
-                    flush=True,
-                )
-                review = {
-                    "prompt_version": "failed",
-                    "reviews": [],
-                    "creative_suggestions": [],
-                    "cost_usd": 0.0,
-                }
-            apply_targeted_reviews(result["recommendations"], review.get("reviews", []))
-            result["targeted_reviews"] = review.get("reviews", [])
-            result["creative_suggestions"].extend(review.get("creative_suggestions", []))
-            result["creative_suggestions"] = deduplicate_creative_suggestions(
-                result["creative_suggestions"]
-            )
-            aligned_tokens_path = transcription.get("aligned_tokens_path")
-            emphasized = _align_emphasized_phrases(
-                result.get("emphasized_phrases", []),
-                Path(aligned_tokens_path) if isinstance(aligned_tokens_path, str) else None,
-            )
-            if project.get("subtitle_mode", "full") == "emphasis" and emphasized:
-                print(
-                    _message(
-                        project,
-                        f"Editorial analysis: selectively cleaning {len(emphasized)} emphasized phrase(s)...",
-                        f"編集分析: 強調フレーズ {len(emphasized)} 件を選択的に整文中…",
-                    ),
-                    flush=True,
-                )
-                cleanup_refiner = build_refiner(
-                    self._subtitle_cleanup_model_config(),
-                    [],
-                    usage,
-                    self.options.workspace / source["source_id"] / "emphasis-cleanup",
-                )
-                if cleanup_refiner is None:
-                    raise SubtitlerError("Selective emphasized-phrase cleanup requires a cleanup model")
-                try:
-                    cleaned = cleanup_refiner.refine(
-                        [str(item["source_text"]) for item in emphasized]
-                    )
-                finally:
-                    cleanup_refiner.close()
-                for item, text in zip(emphasized, cleaned):
-                    normalized = " ".join(str(text or "").split())[:240]
-                    if normalized:
-                        item["text"] = normalized
-            result["emphasized_phrases"] = emphasized
-            result["targeted_review_prompt_version"] = review.get("prompt_version")
-            print(
-                _message(
-                    project,
-                    f"Editorial analysis: targeted review complete ({len(review.get('reviews', []))} reviewed, "
-                    f"{len(review.get('creative_suggestions', []))} added creative accent(s)).",
-                    f"編集分析: 重点照合が完了（{len(review.get('reviews', []))} 件を確認、"
-                    f"演出案 {len(review.get('creative_suggestions', []))} 件を追加）。",
+                    "Editorial analysis: factual event mapping complete.",
+                    "編集分析: 事実ベースのイベント整理が完了しました。",
                 ),
                 flush=True,
             )
         except Exception as exc:
             failure_output = {
-                "api_cost_usd": usage.total_cost_usd + float(review.get("cost_usd", 0.0)),
+                "api_cost_usd": usage.total_cost_usd,
                 "api_usage": [row.__dict__ for row in usage.rows],
                 "structured_response_diagnostics_path": str(diagnostics_path),
                 "semantic_progress_path": str(semantic_progress_path),
@@ -842,7 +872,7 @@ class HostedEditorialStageExecutor:
             raise
         finally:
             refiner.close()
-        result["api_cost_usd"] = usage.total_cost_usd + float(review.get("cost_usd", 0.0))
+        result["api_cost_usd"] = usage.total_cost_usd
         result["api_usage"] = [row.__dict__ for row in usage.rows]
         result["structured_response_diagnostics_path"] = str(diagnostics_path)
         result["semantic_progress_path"] = str(semantic_progress_path)
@@ -861,12 +891,287 @@ class HostedEditorialStageExecutor:
             "recommendations": semantics.get("recommendations", []),
             "narration_briefs": semantics.get("narration_briefs", []),
             "creative_suggestions": semantics.get("creative_suggestions", []),
-            "emphasized_phrases": semantics.get("emphasized_phrases", []),
             "timeline_coverage": coverage,
             "connections": semantics.get("connections", []),
             "conflicts": [],
             "semantic_spans": semantics.get("semantic_spans", []),
+            "audio_intent_spans": semantics.get("audio_intent_spans", []),
+            "safe_boundaries_ms": semantics.get("safe_boundaries_ms", []),
+            "speech_segments": semantics.get("speech_segments", []),
+            "utterance_groups": semantics.get("utterance_groups", []),
+            "event_graph": semantics.get("event_graph", {"nodes": [], "edges": []}),
+            "activity_episodes": semantics.get("activity_episodes", []),
         }
+
+
+def _analyze_editorial_visual_windows(
+    *,
+    media_path: Path,
+    duration_sec: float,
+    detail: str,
+    ffmpeg: str,
+    sampling_scale: float,
+    model: str,
+    reasoning_effort: str,
+    output_locale: str,
+    editorial_context: str,
+    progress_path: Path | None = None,
+    diagnostics_path: Path | None = None,
+    progress: Callable[[int, int, int], None] | None = None,
+    max_workers: int | None = None,
+    window_interval_sec: float = 0.0,
+) -> MediaAnalysisResult:
+    """Build a dense event timeline in bounded requests instead of one giant image call."""
+    windows = []
+    start_sec = 0.0
+    while start_sec < duration_sec:
+        end_sec = min(duration_sec, start_sec + EDITORIAL_VISUAL_WINDOW_SECONDS)
+        windows.append((start_sec, end_sec))
+        start_sec = end_sec
+    if not windows:
+        windows = [(0.0, max(0.1, duration_sec))]
+
+    signature = {
+        "visual_stage_version": EDITORIAL_STAGE_VERSIONS["visual_learning"],
+        "duration_sec": duration_sec,
+        "detail": detail,
+        "sampling_scale": sampling_scale,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "window_seconds": EDITORIAL_VISUAL_WINDOW_SECONDS,
+    }
+    cached = _load_visual_window_progress(progress_path, signature)
+    progress_lock = threading.Lock()
+    request_lock = threading.Lock()
+    last_window_started = [0.0]
+
+    def cached_result(start: float, end: float) -> MediaAnalysisResult | None:
+        with progress_lock:
+            value = cached.get(_visual_window_key(start, end))
+        return _media_analysis_result_from_dict(value) if isinstance(value, dict) else None
+
+    def persist_result(start: float, end: float, result: MediaAnalysisResult) -> None:
+        if progress_path is None:
+            return
+        with progress_lock:
+            cached[_visual_window_key(start, end)] = asdict(result)
+            _write_json_atomic(
+                progress_path,
+                {**signature, "completed_windows": cached},
+            )
+
+    def analyze_range(start: float, end: float, split_depth: int = 0) -> MediaAnalysisResult:
+        restored = cached_result(start, end)
+        if restored is not None:
+            return restored
+        provider = OpenAIEditorialVisualProvider(
+            model,
+            output_locale=output_locale,
+            editorial_context=editorial_context,
+            reasoning_effort=reasoning_effort,
+            diagnostics_path=diagnostics_path,
+        )
+        try:
+            result = analyze_media(
+                media_path=media_path,
+                media_kind="video",
+                duration_sec=duration_sec,
+                detail=detail,
+                ffmpeg=ffmpeg,
+                provider=provider,
+                start_sec=start,
+                end_sec=end,
+                sampling_scale=sampling_scale,
+                max_ranges=min(64, max(12, round((end - start) / 20.0))),
+                include_frame_differences=False,
+            )
+        except MediaAnalysisResponseError:
+            if split_depth >= MAX_EDITORIAL_VISUAL_SPLIT_DEPTH or end - start < 4 * 60.0:
+                raise
+            midpoint = start + (end - start) / 2.0
+            print(
+                locale_label(
+                    output_locale,
+                    f"Visual learning: retrying {_visual_clock(start)}-{_visual_clock(end)} "
+                    "as two smaller structured requests...",
+                    f"映像学習: {_visual_clock(start)}-{_visual_clock(end)} を、"
+                    "2 件の小さな構造化リクエストに分けて再試行します…",
+                ),
+                flush=True,
+            )
+            result = _merge_visual_results(
+                [
+                    analyze_range(start, midpoint, split_depth + 1),
+                    analyze_range(midpoint, end, split_depth + 1),
+                ],
+                prompt_suffix=f"split-recovery-{split_depth + 1}",
+            )
+        persist_result(start, end, result)
+        return result
+
+    def analyze_window(bounds: tuple[float, float]) -> MediaAnalysisResult:
+        restored = cached_result(*bounds)
+        if restored is not None:
+            return restored
+        if window_interval_sec > 0:
+            with request_lock:
+                remaining = float(window_interval_sec) - (time.monotonic() - last_window_started[0])
+                if remaining > 0:
+                    time.sleep(remaining)
+                last_window_started[0] = time.monotonic()
+        return analyze_range(*bounds)
+
+    results: dict[int, MediaAnalysisResult] = {}
+    requested_workers = MAX_EDITORIAL_VISUAL_WORKERS if max_workers is None else max(1, int(max_workers))
+    workers = min(requested_workers, MAX_EDITORIAL_VISUAL_WORKERS, len(windows))
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="editorial-visual-state")
+    futures: dict[Any, int] = {}
+    next_index = 0
+    completed_ranges = 0
+    try:
+        while next_index < min(workers, len(windows)):
+            futures[pool.submit(analyze_window, windows[next_index])] = next_index
+            next_index += 1
+        while futures:
+            future = next(as_completed(futures))
+            index = futures.pop(future)
+            result = future.result()
+            results[index] = result
+            completed_ranges += len(result.segments)
+            if progress is not None:
+                progress(len(results), len(windows), completed_ranges)
+            if next_index < len(windows):
+                futures[pool.submit(analyze_window, windows[next_index])] = next_index
+                next_index += 1
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
+    ordered = [results[index] for index in range(len(windows))]
+    described = [
+        MediaAnalysisResult(
+            description=(
+                f"{_visual_clock(windows[index][0])}-{_visual_clock(windows[index][1])}: "
+                f"{result.description}"
+            ),
+            tags=result.tags,
+            segments=result.segments,
+            provider=result.provider,
+            model=result.model,
+            prompt_version=result.prompt_version,
+            sample_count=result.sample_count,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=result.cost_usd,
+            frame_differences=result.frame_differences,
+        )
+        for index, result in enumerate(ordered)
+    ]
+    return _merge_visual_results(described, prompt_suffix="windowed-state-v2")
+
+
+def _visual_window_key(start_sec: float, end_sec: float) -> str:
+    return f"{start_sec:.3f}-{end_sec:.3f}"
+
+
+def _load_visual_window_progress(
+    path: Path | None, signature: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    if path is None:
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(value, dict) or any(value.get(key) != expected for key, expected in signature.items()):
+        return {}
+    completed = value.get("completed_windows")
+    if not isinstance(completed, dict):
+        return {}
+    return {
+        str(key): item
+        for key, item in completed.items()
+        if isinstance(item, dict)
+    }
+
+
+def _media_analysis_result_from_dict(value: dict[str, Any]) -> MediaAnalysisResult | None:
+    try:
+        segments = [
+            AnalysisSegment(
+                start_ms=int(item["start_ms"]),
+                end_ms=int(item["end_ms"]),
+                description=str(item.get("description") or ""),
+                tags=[str(tag) for tag in item.get("tags", [])],
+                confidence=float(item.get("confidence", 0.0)),
+                motion_level=(
+                    float(item["motion_level"])
+                    if item.get("motion_level") is not None
+                    else None
+                ),
+                visual_category=str(item.get("visual_category") or "other"),
+                suitability=str(item.get("suitability") or ""),
+                handoff_required=bool(item.get("handoff_required")),
+                handoff_reason=str(item.get("handoff_reason") or ""),
+            )
+            for item in value.get("segments", [])
+            if isinstance(item, dict)
+        ]
+        return MediaAnalysisResult(
+            description=str(value["description"]),
+            tags=[str(tag) for tag in value.get("tags", [])],
+            segments=segments,
+            provider=str(value["provider"]),
+            model=str(value["model"]),
+            prompt_version=str(value["prompt_version"]),
+            sample_count=int(value.get("sample_count", 0)),
+            input_tokens=int(value.get("input_tokens", 0)),
+            output_tokens=int(value.get("output_tokens", 0)),
+            cost_usd=float(value.get("cost_usd", 0.0)),
+            frame_differences=[
+                dict(item) for item in value.get("frame_differences", []) if isinstance(item, dict)
+            ],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _merge_visual_results(
+    values: list[MediaAnalysisResult], *, prompt_suffix: str
+) -> MediaAnalysisResult:
+    if not values:
+        raise SubtitlerError("Visual analysis produced no completed windows")
+    tags = list(
+        dict.fromkeys(
+            tag for result in values for tag in result.tags if str(tag).strip()
+        )
+    )
+    return MediaAnalysisResult(
+        description="\n".join(
+            result.description for result in values if result.description.strip()
+        )[:48_000],
+        tags=tags[:120],
+        segments=[segment for result in values for segment in result.segments],
+        provider=values[0].provider,
+        model=values[0].model,
+        prompt_version=f"{values[0].prompt_version}-{prompt_suffix}",
+        sample_count=sum(result.sample_count for result in values),
+        input_tokens=sum(result.input_tokens for result in values),
+        output_tokens=sum(result.output_tokens for result in values),
+        cost_usd=sum(result.cost_usd for result in values),
+        frame_differences=[
+            difference for result in values for difference in result.frame_differences
+        ],
+    )
+
+
+def _visual_clock(seconds: float) -> str:
+    total = max(0, round(seconds))
+    return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
 def _message(project: dict[str, Any], english: str, japanese: str) -> str:
@@ -900,6 +1205,96 @@ def _load_transcript_evidence(timing_path: Path, text_path: Path) -> list[Transc
     return result
 
 
+def _load_vad_speech_activity(path: Path) -> list[tuple[int, int]]:
+    """Load fine VAD regions used by transcription as acoustic speech evidence."""
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+    except (FileNotFoundError, OSError, UnicodeError, csv.Error):
+        return []
+    result: list[tuple[int, int]] = []
+    for row in rows:
+        if str(row.get("selected_for_transcription") or "").strip().casefold() not in {
+            "1",
+            "true",
+            "yes",
+        }:
+            continue
+        try:
+            start_ms = round(float(row["start"]) * 1000)
+            end_ms = round(float(row["end"]) * 1000)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end_ms > start_ms:
+            result.append((start_ms, end_ms))
+    return sorted(result)
+
+
+def _tighten_transcript_to_speech_activity(
+    transcript: list[TranscriptEvidence],
+    speech_activity: list[tuple[int, int]],
+) -> list[TranscriptEvidence]:
+    """Remove acoustic silence stretched into the outside of aligned text ranges."""
+    if not speech_activity:
+        return transcript
+    tightened: list[TranscriptEvidence] = []
+    for item in transcript:
+        start_ms, end_ms = _tighten_range_to_speech_activity(
+            item.start_ms,
+            item.end_ms,
+            speech_activity,
+        )
+        tightened.append(TranscriptEvidence(start_ms, end_ms, item.text))
+
+    # Older cached transcription artifacts can contain a punctuation-only row
+    # forced-aligned after several seconds of silence. Preserve its text while
+    # attaching it to an adjacent spoken row instead of extending the range.
+    result: list[TranscriptEvidence] = []
+    pending_leading = ""
+    for index, item in enumerate(tightened):
+        acoustically_supported = any(
+            speech_start < item.end_ms and speech_end > item.start_ms
+            for speech_start, speech_end in speech_activity
+        )
+        if not _is_non_spoken_text(item.text) or acoustically_supported:
+            text = f"{pending_leading}{item.text}" if pending_leading else item.text
+            pending_leading = ""
+            result.append(TranscriptEvidence(item.start_ms, item.end_ms, text))
+            continue
+        if result and not _is_non_spoken_text(result[-1].text):
+            previous = result[-1]
+            result[-1] = TranscriptEvidence(
+                previous.start_ms,
+                previous.end_ms,
+                f"{previous.text}{item.text}",
+            )
+            continue
+        if any(not _is_non_spoken_text(candidate.text) for candidate in tightened[index + 1 :]):
+            pending_leading = f"{pending_leading}{item.text}"
+        else:
+            result.append(item)
+    return result
+
+
+def _tighten_range_to_speech_activity(
+    start_ms: int,
+    end_ms: int,
+    speech_activity: list[tuple[int, int]],
+) -> tuple[int, int]:
+    overlapping = [
+        (speech_start, speech_end)
+        for speech_start, speech_end in speech_activity
+        if speech_start < end_ms and speech_end > start_ms
+    ]
+    if not overlapping:
+        return start_ms, end_ms
+    tightened_start = max(start_ms, overlapping[0][0])
+    tightened_end = min(end_ms, overlapping[-1][1])
+    if tightened_end <= tightened_start:
+        return start_ms, end_ms
+    return tightened_start, tightened_end
+
+
 def _align_emphasized_phrases(
     phrases: Any,
     aligned_tokens_path: Path | None,
@@ -912,6 +1307,9 @@ def _align_emphasized_phrases(
             rows = [row for row in csv.DictReader(handle) if str(row.get("text") or "")]
     except (OSError, UnicodeError, csv.Error):
         return []
+    speech_activity = _load_vad_speech_activity(
+        aligned_tokens_path.with_name("transcript.vad_selection.csv")
+    )
     stream_chars: list[str] = []
     char_tokens: list[int] = []
     for token_index, row in enumerate(rows):
@@ -925,11 +1323,8 @@ def _align_emphasized_phrases(
     for item in phrases:
         if not isinstance(item, dict):
             continue
-        needle = "".join(
-            character
-            for character in str(item.get("source_text") or "").casefold()
-            if not character.isspace()
-        )
+        source_text = str(item.get("source_text") or "")
+        needle, source_positions = _normalized_character_positions(source_text)
         if not needle:
             continue
         candidates: list[int] = []
@@ -947,25 +1342,166 @@ def _align_emphasized_phrases(
             except (KeyError, TypeError, ValueError):
                 return float("inf")
         match = min(candidates, key=distance)
-        first_index = char_tokens[match]
-        last_index = char_tokens[match + len(needle) - 1]
-        timing = _bounded_emphasis_timing(rows, first_index, last_index)
-        if timing is None:
-            continue
-        start_ms, end_ms = timing
-        if end_ms <= start_ms:
-            continue
-        normalized = dict(item)
-        normalized.update(
-            {
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "timing_verified": True,
-                "text": str(item.get("source_text") or ""),
-            }
-        )
-        result.append(normalized)
+        aligned_segments: list[dict[str, Any]] = []
+        for character_start, character_end in _editorial_subtitle_character_ranges(
+            needle,
+            match=match,
+            char_tokens=char_tokens,
+        ):
+            first_index = char_tokens[match + character_start]
+            last_index = char_tokens[match + character_end - 1]
+            timing = _bounded_emphasis_timing(rows, first_index, last_index)
+            if timing is None:
+                continue
+            start_ms, end_ms = _tighten_range_to_speech_activity(
+                timing[0],
+                timing[1],
+                speech_activity,
+            )
+            if end_ms <= start_ms:
+                continue
+            chunk_text = _source_text_character_slice(
+                source_text,
+                source_positions,
+                character_start,
+                character_end,
+            )
+            if not chunk_text:
+                continue
+            normalized = dict(item)
+            normalized.update(
+                {
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "timing_verified": True,
+                    "source_text": chunk_text,
+                    "text": chunk_text,
+                    "parent_source_text": source_text,
+                }
+            )
+            aligned_segments.append(normalized)
+        segment_count = len(aligned_segments)
+        for segment_index, normalized in enumerate(aligned_segments, 1):
+            normalized["display_segment_index"] = segment_index
+            normalized["display_segment_count"] = segment_count
+            if normalized.get("id") and segment_count > 1:
+                normalized["id"] = f"{normalized['id']}-{segment_index}"
+            result.append(normalized)
     return _deduplicate_emphasized_phrases(result)
+
+
+def _normalized_character_positions(value: str) -> tuple[str, list[int]]:
+    characters: list[str] = []
+    source_positions: list[int] = []
+    for source_index, character in enumerate(value):
+        for normalized in character.casefold():
+            if normalized.isspace():
+                continue
+            characters.append(normalized)
+            source_positions.append(source_index)
+    return "".join(characters), source_positions
+
+
+def _editorial_subtitle_character_ranges(
+    value: str,
+    *,
+    match: int,
+    char_tokens: list[int],
+) -> list[tuple[int, int]]:
+    """Split one selected thought into short, token-timed, single-line beats."""
+    length = len(value)
+    if length <= EDITORIAL_SUBTITLE_TARGET_CHARS:
+        return [(0, length)] if length else []
+    strong_breaks = set(".!?。！？")
+    soft_breaks = set(",、，:：;；…—-")
+    token_boundaries = {
+        index
+        for index in range(1, length)
+        if char_tokens[match + index - 1] != char_tokens[match + index]
+    }
+    ranges: list[tuple[int, int]] = []
+    cursor = 0
+    while length - cursor > EDITORIAL_SUBTITLE_TARGET_CHARS:
+        target = min(length, cursor + EDITORIAL_SUBTITLE_TARGET_CHARS)
+        maximum = min(length, cursor + EDITORIAL_SUBTITLE_MAX_CHARS)
+        minimum = min(length, cursor + EDITORIAL_SUBTITLE_MIN_CHARS)
+        semantic_before = [
+            index
+            for index in range(minimum, target + 1)
+            if value[index - 1] in strong_breaks | soft_breaks
+        ]
+        boundaries_before = [
+            index
+            for index in token_boundaries
+            if minimum <= index <= target
+        ]
+        semantic_after = [
+            index
+            for index in range(target + 1, maximum + 1)
+            if value[index - 1] in strong_breaks | soft_breaks
+        ]
+        boundaries_after = [
+            index
+            for index in token_boundaries
+            if target < index <= maximum
+        ]
+        if semantic_before:
+            end = semantic_before[-1]
+        elif boundaries_before:
+            end = boundaries_before[-1]
+        elif semantic_after:
+            end = semantic_after[0]
+        elif boundaries_after:
+            end = boundaries_after[0]
+        else:
+            end = target
+        if length - end < EDITORIAL_SUBTITLE_MIN_CHARS and length - cursor <= EDITORIAL_SUBTITLE_MAX_CHARS:
+            end = length
+        if end <= cursor:
+            end = min(length, cursor + EDITORIAL_SUBTITLE_TARGET_CHARS)
+        ranges.append((cursor, end))
+        cursor = end
+    if cursor < length:
+        ranges.append((cursor, length))
+    return ranges
+
+
+def _source_text_character_slice(
+    value: str,
+    source_positions: list[int],
+    start: int,
+    end: int,
+) -> str:
+    if not source_positions or start >= end:
+        return ""
+    raw_start = source_positions[start]
+    raw_end = source_positions[end] if end < len(source_positions) else len(value)
+    return " ".join(value[raw_start:raw_end].split())
+
+
+def _clean_selected_editorial_subtitles(
+    phrases: list[dict[str, Any]],
+    refiner: Any,
+    *,
+    batch_size: int = 64,
+) -> list[dict[str, Any]]:
+    """Clean only the verified phrases selected for the final editorial track."""
+    cleaned_phrases: list[dict[str, Any]] = []
+    for start in range(0, len(phrases), max(1, batch_size)):
+        batch = phrases[start : start + max(1, batch_size)]
+        originals = [str(item.get("text") or "").strip() for item in batch]
+        refined = refiner.refine(originals)
+        if not isinstance(refined, list) or len(refined) != len(originals):
+            refined = originals
+        for item, original, cleaned in zip(batch, originals, refined):
+            normalized = dict(item)
+            cleaned_text = " ".join(str(cleaned).split()) or original
+            if len("".join(cleaned_text.split())) > EDITORIAL_SUBTITLE_MAX_CHARS:
+                cleaned_text = original
+            normalized["text"] = cleaned_text
+            normalized["cleanup_applied"] = True
+            cleaned_phrases.append(normalized)
+    return cleaned_phrases
 
 
 def _bounded_emphasis_timing(
@@ -1018,6 +1554,11 @@ def _emphasis_token_limit(text: str, *, internal: bool) -> float:
 
 def _is_punctuation(character: str) -> bool:
     return unicodedata.category(character).startswith(("P", "S"))
+
+
+def _is_non_spoken_text(text: str) -> bool:
+    visible = [character for character in text if not character.isspace()]
+    return bool(visible) and all(_is_punctuation(character) for character in visible)
 
 
 def _deduplicate_emphasized_phrases(
@@ -1172,7 +1713,9 @@ def _load_semantic_progress(
     source_duration_ms: int,
 ) -> dict[str, Any]:
     expected = {
+        "transcription_stage_version": EDITORIAL_STAGE_VERSIONS["transcription"],
         "semantic_stage_version": EDITORIAL_STAGE_VERSIONS["semantic_spans"],
+        "visual_stage_version": EDITORIAL_STAGE_VERSIONS["visual_learning"],
         "prompt_version": EDITORIAL_PROMPT_VERSION,
         "source_id": source_id,
         "source_duration_ms": source_duration_ms,
@@ -1186,6 +1729,8 @@ def _load_semantic_progress(
         if isinstance(completed, list):
             return {**expected, "completed_windows": completed}
     return {**expected, "completed_windows": []}
+
+
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:

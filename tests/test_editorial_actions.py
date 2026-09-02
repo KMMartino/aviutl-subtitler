@@ -20,7 +20,7 @@ class EditorialActionCatalogTests(unittest.TestCase):
         families = {item.family for item in EDITORIAL_ACTION_SPECS}
         self.assertEqual(families, {"timeline", "narration", "accent", "continuity", "review"})
         self.assertTrue(
-            {"preserve", "trim", "cut", "extract_highlights", "narrated_montage", "punch_in", "foreshadow", "manual_review"}
+            {"preserve", "trim", "cut", "extract_highlights", "narrated_summary", "punch_in", "foreshadow", "manual_review"}
             <= CANONICAL_ACTION_TYPES
         )
 

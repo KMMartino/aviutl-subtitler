@@ -26,6 +26,7 @@ from .profiling import (
 )
 from .splitter import SENTENCE_TERMINAL_SOURCE, split_aligned_chunk, split_token_chain
 from .text_refiner import TextRefiner, _cleanup_content_fingerprint, _is_filler_only
+from .transcript_normalizer import is_non_spoken_text
 
 BOUNDARY_REVIEW_TERMS = (
     "について",
@@ -306,6 +307,7 @@ def build_grouped_subtitles(
     chain_split_workers: int = 1,
     progress_callback: Callable[[str, int, int], None] | None = None,
     planning_profile_path: Path | None = None,
+    strip_sentence_periods: bool = True,
 ) -> list[Subtitle]:
     planning_started = time.perf_counter()
     chains = group_aligned_chains(
@@ -477,9 +479,14 @@ def build_grouped_subtitles(
             regroup_rows.append(regroup_row)
     subtitles = [s for s in subtitles if s.text.strip()]
     subtitles.sort(key=lambda s: (s.start_time, s.end_time))
+    _attach_zero_duration_punctuation_subtitles(subtitles)
     _move_leading_commas_to_previous_subtitle(subtitles)
-    left_merge_count = _left_merge_adjacent_subtitles(subtitles, max_chars)
-    stripped_period_count = _strip_standard_sentence_periods(subtitles)
+    left_merge_count = _left_merge_adjacent_subtitles(
+        subtitles, max_chars, max_duration=max_duration
+    )
+    stripped_period_count = (
+        _strip_standard_sentence_periods(subtitles) if strip_sentence_periods else 0
+    )
     boundary_review_count = 0
     boundary_started = time.perf_counter()
     if refiner is not None:
@@ -598,6 +605,44 @@ def _append_adjustment(current: str, adjustment: str) -> str:
     return f"{current};{adjustment}"
 
 
+def _attach_zero_duration_punctuation_subtitles(subtitles: list[Subtitle]) -> int:
+    """Prevent normalized, non-acoustic punctuation from becoming a subtitle."""
+    attached = 0
+    index = 0
+    while index < len(subtitles):
+        current = subtitles[index]
+        zero_duration_tokens = bool(current.tokens) and all(
+            token.end <= token.start for token in current.tokens
+        )
+        if not is_non_spoken_text(current.text) or not zero_duration_tokens:
+            index += 1
+            continue
+        previous = subtitles[index - 1] if index > 0 else None
+        following = subtitles[index + 1] if index + 1 < len(subtitles) else None
+        if previous is not None and previous.chain_index == current.chain_index:
+            previous.text = f"{previous.text}{current.text}"
+            previous.tokens.extend(current.tokens)
+            previous.end_time = max(previous.end_time, current.end_time)
+            previous.timing_adjustment = _append_adjustment(
+                previous.timing_adjustment, "punctuation_attach"
+            )
+        elif following is not None and following.chain_index == current.chain_index:
+            following.text = f"{current.text}{following.text}"
+            following.tokens = current.tokens + following.tokens
+            following.start_time = min(following.start_time, current.start_time)
+            following.timing_adjustment = _append_adjustment(
+                following.timing_adjustment, "punctuation_attach"
+            )
+        else:
+            index += 1
+            continue
+        subtitles.pop(index)
+        attached += 1
+    if attached:
+        _renumber_chain_parts(subtitles)
+    return attached
+
+
 def _cap_subtitle_durations(subtitles: list[Subtitle], max_duration: float) -> None:
     for subtitle in subtitles:
         if subtitle.end_time - subtitle.start_time <= max_duration:
@@ -609,7 +654,9 @@ def _cap_subtitle_durations(subtitles: list[Subtitle], max_duration: float) -> N
         )
 
 
-def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) -> int:
+def _left_merge_adjacent_subtitles(
+    subtitles: list[Subtitle], max_chars: int, max_duration: float = 0.0
+) -> int:
     merged: list[Subtitle] = []
     merge_count = 0
     for sub in subtitles:
@@ -620,6 +667,11 @@ def _left_merge_adjacent_subtitles(subtitles: list[Subtitle], max_chars: int) ->
             and _same_chain_for_left_merge(merged[-1], sub)
             and not _blocks_following_left_merge(merged[-1])
             and len(_normalized_text(merged[-1].text + sub.text)) <= max_chars
+            and (
+                max_duration <= 0
+                or max(sub.end_time, merged[-1].end_time) - merged[-1].start_time
+                <= max_duration
+            )
         ):
             _merge_subtitle_left(merged[-1], sub)
             merge_count += 1

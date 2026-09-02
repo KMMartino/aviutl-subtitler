@@ -8,8 +8,10 @@ import json
 import math
 import subprocess
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, Sequence
 
@@ -21,6 +23,7 @@ from .errors import ModelLoadError, SubtitlerError
 from .editorial_locale import output_language_instruction
 from .external_transcribers import require_api_key
 from .hosted_http import request_json
+from .model_prompts import MEDIA_ANALYSIS_SYSTEM_PROMPT, MEDIA_BOUNDARY_SYSTEM_PROMPT
 
 
 DETAIL_MULTIPLIERS = {
@@ -35,8 +38,80 @@ MIN_TRANSITION_BUDGET = 16
 MAX_TRANSITION_BUDGET = 96
 MAX_FRAME_EXTRACTION_WORKERS = 4
 SECONDS_PER_TRANSITION = 150.0
-PROMPT_VERSION = "media-analysis-v7"
+PROMPT_VERSION = "media-analysis-v11-observed-state"
 RESULT_PREFIX = "@@SUBUTL_MEDIA_ANALYSIS@@"
+MEDIA_ANALYSIS_MAX_OUTPUT_TOKENS = 16_384
+BOUNDARY_ANALYSIS_MAX_OUTPUT_TOKENS = 8_192
+_DIAGNOSTIC_WRITE_LOCK = threading.Lock()
+
+
+class MediaAnalysisResponseError(SubtitlerError):
+    """The model response could not safely produce a complete media analysis."""
+
+
+_RANGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start_index": {"type": "integer"},
+        "end_index": {"type": "integer"},
+        "description": {"type": "string"},
+        "observed_label": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
+        "motion_level": {"type": "number"},
+        "visual_category": {"type": "string"},
+        "suitability": {"type": "string"},
+        "handoff_required": {"type": "boolean"},
+        "handoff_reason": {"type": "string"},
+    },
+    "required": [
+        "start_index", "end_index", "description", "observed_label", "tags", "confidence",
+        "motion_level", "visual_category", "suitability", "handoff_required",
+        "handoff_reason",
+    ],
+    "additionalProperties": False,
+}
+MEDIA_ANALYSIS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "description": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "ranges": {"type": "array", "items": _RANGE_SCHEMA},
+    },
+    "required": ["description", "tags", "ranges"],
+    "additionalProperties": False,
+}
+BOUNDARY_ANALYSIS_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "boundary_index": {"type": "integer"},
+                    "probe_position": {"type": "integer"},
+                    "scene": {"type": "string", "enum": ["left", "right", "new"]},
+                    "scene_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "observed_label": {"type": "string"},
+                    "visual_category": {"type": "string"},
+                    "suitability": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number"},
+                    "motion_level": {"type": "number"},
+                },
+                "required": [
+                    "boundary_index", "probe_position", "scene", "scene_id", "description", "observed_label",
+                    "visual_category", "suitability", "tags", "confidence", "motion_level",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["decisions"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +162,7 @@ class BoundaryClassification:
     motion_level: float | None = None
     visual_category: str = "other"
     suitability: str = ""
+    observed_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +183,9 @@ class AnalyzedRange:
     motion_level: float | None
     visual_category: str
     suitability: str
+    observed_label: str = ""
+    handoff_required: bool = False
+    handoff_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -119,6 +198,9 @@ class AnalysisSegment:
     motion_level: float | None
     visual_category: str
     suitability: str
+    observed_label: str = ""
+    handoff_required: bool = False
+    handoff_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,11 +238,13 @@ class OpenAIMediaAnalysisProvider:
         editorial_context: str = "",
         output_locale: str = "en",
         reasoning_effort: str = "low",
+        diagnostics_path: Path | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key or require_api_key("OPENAI_API_KEY")
         self.editorial_context = editorial_context.strip()[:12000]
         self.output_locale = output_locale
+        self.diagnostics_path = diagnostics_path
         self.reasoning_effort = (
             reasoning_effort
             if reasoning_effort in {"none", "low", "medium", "high", "xhigh", "max"}
@@ -177,33 +261,7 @@ class OpenAIMediaAnalysisProvider:
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
-                "text": (
-                    "Analyze this media as an editor searching for useful B-roll, not as a literal scene "
-                    "captioner. The overall description must emphasize what the asset is useful for, its tone, "
-                    "and likely editorial roles (for example explanation, dramatic emphasis, comedy, atmosphere, "
-                    "transition, or illustrative gameplay). Mention identifying subjects only when useful for "
-                    "retrieval. For video, group adjacent samples into chronological ranges whenever their "
-                    "editorial role is the same. Clearly separate gameplay, trailers/cinematics, talking heads, "
-                    "menus/UI, standalone effects, artwork, and unusable material so an editor can avoid presenter "
-                    "shots when selecting gameplay. Avoid narrating incidental objects or frame-by-frame action. "
-                    f"Use no more than {max_ranges} broad ranges. A single range for genuinely continuous gameplay or a "
-                    "consistent talking-head section is correct; do not invent changes merely because time passed. "
-                    "Cover the sampled timeline in chronological order. "
-                    "Do not infer ownership or usage rights. Return strict JSON only as "
-                    '{"description":"broad editorial summary","tags":["retrieval tag"],"ranges":['
-                    '{"start_index":0,"end_index":1,"description":"broad content and editorial role",'
-                    '"tags":["tag"],"confidence":0.0,"motion_level":0.0,'
-                    '"visual_category":"gameplay|trailer|cinematic|talking_head|art|ui|effect|unusable|other",'
-                    '"suitability":"where and how this range could be used"}]}. '
-                    f"Media kind: {media_kind}. Filename title: {title}. "
-                    + (
-                        f"Project/game context: {self.editorial_context}. "
-                        if self.editorial_context
-                        else ""
-                    )
-                    + output_language_instruction(self.output_locale)
-                    + " Each following image is labeled with its sample index and timestamp."
-                ),
+                "text": self._analysis_instruction(media_kind, title, max_ranges),
             }
         ]
         for sample in samples:
@@ -226,8 +284,18 @@ class OpenAIMediaAnalysisProvider:
             "https://api.openai.com/v1/responses",
             {
                 "model": self.model,
+                "instructions": MEDIA_ANALYSIS_SYSTEM_PROMPT,
                 "reasoning": {"effort": self.reasoning_effort},
                 "input": [{"role": "user", "content": content}],
+                "max_output_tokens": MEDIA_ANALYSIS_MAX_OUTPUT_TOKENS,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "media_analysis",
+                        "strict": True,
+                        "schema": MEDIA_ANALYSIS_RESPONSE_SCHEMA,
+                    }
+                },
             },
             ModelLoadError,
             "OpenAI media analysis failed",
@@ -235,6 +303,8 @@ class OpenAIMediaAnalysisProvider:
             timeout_sec=300.0,
         )
         text = _response_text(data)
+        self._record_response("analysis", data, text)
+        text = _structured_response_text(data, "Media analysis")
         parsed = _json_object(text)
         ranges = _parse_ranges(parsed.get("ranges"), len(samples))
         usage = data.get("usage") or {}
@@ -246,6 +316,40 @@ class OpenAIMediaAnalysisProvider:
             int(usage.get("output_tokens") or 0),
         )
 
+    def _analysis_instruction(self, media_kind: str, title: str, max_ranges: int) -> str:
+        return (
+                    "Task: analyze every labeled sample as an editor searching for useful B-roll. "
+                    "Use editorial retrieval value rather than literal frame captioning. "
+                    "captioner. The overall description must emphasize what the asset is useful for, its tone, "
+                    "and likely editorial roles (for example explanation, dramatic emphasis, comedy, atmosphere, "
+                    "transition, or illustrative gameplay). Mention identifying subjects only when useful for "
+                    "retrieval. For every range, observed_label must be a short, concrete phrase describing only "
+                    "the visible state that remains true across that complete range, such as 'fighting a plant "
+                    "enemy' or 'exploring floor 2'. Do not put strategy, spoken interpretation, importance, prior "
+                    "events, future consequences, or multiple sequential actions in observed_label. Put richer "
+                    "retrieval detail in description and suitability instead. For video, group adjacent samples "
+                    "into chronological ranges whenever their editorial role is the same. Clearly separate "
+                    "gameplay, trailers/cinematics, talking heads, "
+                    "menus/UI, standalone effects, artwork, and unusable material so an editor can avoid presenter "
+                    "shots when selecting gameplay. Avoid narrating incidental objects or frame-by-frame action. "
+                    f"Use no more than {max_ranges} broad ranges. A single range for genuinely continuous gameplay or a "
+                    "consistent talking-head section is correct; do not invent changes merely because time passed. "
+                    "Cover the sampled timeline in chronological order. Leave ownership and usage rights "
+                    "unassessed. Set handoff_required=false and handoff_reason to an empty string; downstream "
+                    "editorial handoff is reserved for the long-form editorial provider. Completion means every "
+                    "sample index is covered exactly once by the ordered "
+                    "ranges, the overall summary reflects the complete asset, and the response matches the "
+                    "provided schema. "
+                    f"Media kind: {media_kind}. Filename title: {title}. "
+                    + (
+                        f"Project/game context: {self.editorial_context}. "
+                        if self.editorial_context
+                        else ""
+                    )
+                    + output_language_instruction(self.output_locale)
+                    + " Each following image is labeled with its sample index and timestamp."
+        )
+
     def refine_boundaries(
         self,
         probes: Sequence[BoundaryProbe],
@@ -253,21 +357,7 @@ class OpenAIMediaAnalysisProvider:
         content: list[dict[str, Any]] = [
             {
                 "type": "input_text",
-                "text": (
-                    "Refine coarse editorial boundaries in a long video. Each boundary has two ordered probes "
-                    "at one-third and two-thirds between a known left scene and right scene. Classify each probe "
-                    "as left, right, or new when it belongs to a genuinely different intermediate scene. Reuse "
-                    "the same short scene_id for two probes showing the same new scene. Different new scenes "
-                    "must receive different scene_id values. Use broad editorial role and content type, not "
-                    "incidental objects, and do not invent cuts in continuous footage. For new scenes include "
-                    "a concise editorial description, category, suitability, and retrieval tags. Return strict "
-                    "JSON only as "
-                    '{"decisions":[{"boundary_index":0,"probe_position":0,'
-                    '"scene":"left|right|new","scene_id":"middle-1","description":"",'
-                    '"visual_category":"gameplay|trailer|cinematic|talking_head|art|ui|effect|unusable|other",'
-                    '"suitability":"","tags":[],"confidence":0.0,"motion_level":0.0}]}. '
-                    + output_language_instruction(self.output_locale)
-                ),
+                "text": self._boundary_instruction(),
             }
         ]
         for probe in probes:
@@ -295,15 +385,28 @@ class OpenAIMediaAnalysisProvider:
             "https://api.openai.com/v1/responses",
             {
                 "model": self.model,
+                "instructions": MEDIA_BOUNDARY_SYSTEM_PROMPT,
                 "reasoning": {"effort": self.reasoning_effort},
                 "input": [{"role": "user", "content": content}],
+                "max_output_tokens": BOUNDARY_ANALYSIS_MAX_OUTPUT_TOKENS,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "media_boundaries",
+                        "strict": True,
+                        "schema": BOUNDARY_ANALYSIS_RESPONSE_SCHEMA,
+                    }
+                },
             },
             ModelLoadError,
             "OpenAI boundary refinement failed",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             timeout_sec=300.0,
         )
-        parsed = _json_object(_response_text(data))
+        response_text = _response_text(data)
+        self._record_response("boundary_refinement", data, response_text)
+        response_text = _structured_response_text(data, "Media boundary refinement")
+        parsed = _json_object(response_text)
         decisions: dict[tuple[int, int], BoundaryClassification] = {}
         valid_probes = {(probe.boundary_index, probe.probe_position) for probe in probes}
         raw_decisions = parsed.get("decisions")
@@ -329,12 +432,44 @@ class OpenAIMediaAnalysisProvider:
                     motion_level=_optional_unit_float(item.get("motion_level")),
                     visual_category=str(item.get("visual_category") or "other").strip()[:80],
                     suitability=str(item.get("suitability") or "").strip()[:1000],
+                    observed_label=str(item.get("observed_label") or "").strip()[:80],
                 )
         usage = data.get("usage") or {}
         return (
             decisions,
             int(usage.get("input_tokens") or 0),
             int(usage.get("output_tokens") or 0),
+        )
+
+    def _record_response(self, operation: str, data: dict[str, Any], content: str) -> None:
+        if self.diagnostics_path is None:
+            return
+        record = {
+            "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "operation": operation,
+            "model": self.model,
+            "status": data.get("status"),
+            "incomplete_details": data.get("incomplete_details"),
+            "usage": data.get("usage"),
+            "response_content": content,
+        }
+        self.diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+        with _DIAGNOSTIC_WRITE_LOCK, self.diagnostics_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _boundary_instruction(self) -> str:
+        return (
+                    "Task: refine every supplied coarse editorial boundary in a long video. Each boundary has two ordered probes "
+                    "at one-third and two-thirds between a known left scene and right scene. Classify each probe "
+                    "as left, right, or new when it belongs to a genuinely different intermediate scene. Reuse "
+                    "the same short scene_id for two probes showing the same new scene. Different new scenes "
+                    "must receive different scene_id values. Use broad editorial role and content type, not "
+                    "incidental objects, and preserve continuous footage as one scene. For new scenes include "
+                    "a concise editorial description, category, suitability, retrieval tags, and an "
+                    "observed_label. observed_label must name only the concrete visible state within that scene "
+                    "in one short phrase; exclude interpretation, importance, and other time ranges. Completion "
+                    "means one decision exists for every labeled probe and the response matches the provided schema. "
+                    + output_language_instruction(self.output_locale)
         )
 
 
@@ -349,6 +484,8 @@ def analyze_media(
     start_sec: float = 0.0,
     end_sec: float | None = None,
     sampling_scale: float = 1.0,
+    max_ranges: int | None = None,
+    include_frame_differences: bool = True,
 ) -> MediaAnalysisResult:
     if not media_path.is_file():
         raise SubtitlerError(f"Media asset no longer exists: {media_path}")
@@ -368,22 +505,24 @@ def analyze_media(
             end_sec=analysis_end,
             sampling_scale=sampling_scale,
         )
+        range_limit = max(1, int(max_ranges)) if max_ranges is not None else plan.max_boundaries + 1
         description, tags, ranges, input_tokens, output_tokens = provider.analyze(
             samples,
             media_kind,
             media_path.stem,
-            plan.max_boundaries + 1,
+            range_limit,
         )
-        try:
-            frame_differences = compare_visual_samples(
-                samples, ffmpeg=ffmpeg, output_dir=output_dir
-            )
-        except (OSError, subprocess.SubprocessError, SubtitlerError) as exc:
-            print(f"Warning: deterministic frame comparison was unavailable: {exc}", flush=True)
-            frame_differences = []
+        frame_differences: list[dict[str, Any]] = []
+        if include_frame_differences:
+            try:
+                frame_differences = compare_visual_samples(
+                    samples, ffmpeg=ffmpeg, output_dir=output_dir
+                )
+            except (OSError, subprocess.SubprocessError, SubtitlerError) as exc:
+                print(f"Warning: deterministic frame comparison was unavailable: {exc}", flush=True)
         if not description:
             raise SubtitlerError("Media analysis returned no overall description")
-        ranges = ranges[:plan.max_boundaries + 1]
+        ranges = ranges[:range_limit]
         refined_boundaries: list[RefinedBoundary] = []
         refined_sample_count = 0
         if media_kind == "video" and plan.adaptive and len(ranges) > 1:
@@ -848,6 +987,11 @@ def _range_for_classification(
         motion_level=classification.motion_level,
         visual_category=category,
         suitability=classification.suitability,
+        observed_label=(
+            classification.observed_label
+            or classification.description
+            or category.replace("_", " ")
+        )[:80],
     )
     cache[key] = discovered
     return discovered
@@ -859,11 +1003,17 @@ def _same_scene(left: AnalyzedRange, right: AnalyzedRange) -> bool:
     return (
         left.visual_category.casefold(),
         left.description.casefold(),
+        left.observed_label.casefold(),
         left.suitability.casefold(),
+        left.handoff_required,
+        left.handoff_reason.casefold(),
     ) == (
         right.visual_category.casefold(),
         right.description.casefold(),
+        right.observed_label.casefold(),
         right.suitability.casefold(),
+        right.handoff_required,
+        right.handoff_reason.casefold(),
     )
 
 
@@ -924,6 +1074,9 @@ def _segments_from_ranges(
                 motion_level=analyzed_range.motion_level,
                 visual_category=analyzed_range.visual_category,
                 suitability=analyzed_range.suitability,
+                observed_label=analyzed_range.observed_label,
+                handoff_required=analyzed_range.handoff_required,
+                handoff_reason=analyzed_range.handoff_reason,
             )
         )
     return result
@@ -982,6 +1135,12 @@ def _parse_ranges(value: Any, sample_count: int) -> list[AnalyzedRange]:
                 motion_level=motion,
                 visual_category=str(item.get("visual_category") or "").strip()[:100],
                 suitability=str(item.get("suitability") or "").strip()[:1000],
+                observed_label=(
+                    str(item.get("observed_label") or item.get("description") or "")
+                    .strip()[:80]
+                ),
+                handoff_required=bool(item.get("handoff_required")),
+                handoff_reason=str(item.get("handoff_reason") or "").strip()[:500],
             )
         )
     return result
@@ -998,6 +1157,26 @@ def _response_text(data: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _structured_response_text(data: dict[str, Any], operation: str) -> str:
+    if data.get("status") == "incomplete":
+        details = data.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else "unknown"
+        raise MediaAnalysisResponseError(f"{operation} returned incomplete output ({reason})")
+    refusals = []
+    for output in data.get("output") or []:
+        if not isinstance(output, dict) or output.get("type") != "message":
+            continue
+        for content in output.get("content") or []:
+            if isinstance(content, dict) and content.get("type") == "refusal":
+                refusals.append(str(content.get("refusal") or "model refusal"))
+    if refusals:
+        raise MediaAnalysisResponseError(f"{operation} was refused: {' '.join(refusals)[:500]}")
+    text = _response_text(data)
+    if not text.strip():
+        raise MediaAnalysisResponseError(f"{operation} returned no structured output")
+    return text
+
+
 def _json_object(raw: str) -> dict[str, Any]:
     value = raw.strip()
     if value.startswith("```"):
@@ -1007,9 +1186,9 @@ def _json_object(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value.strip())
     except json.JSONDecodeError as exc:
-        raise SubtitlerError("Media analysis returned malformed JSON") from exc
+        raise MediaAnalysisResponseError("Media analysis returned malformed JSON") from exc
     if not isinstance(parsed, dict):
-        raise SubtitlerError("Media analysis response must be a JSON object")
+        raise MediaAnalysisResponseError("Media analysis response must be a JSON object")
     return parsed
 
 

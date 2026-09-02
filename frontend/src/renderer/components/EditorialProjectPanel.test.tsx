@@ -18,14 +18,14 @@ describe("Editorial project setup", () => {
         titleOrGame: "Challenge run",
         objective: "Complete the game with a restriction",
         targetDurationMinSeconds: 2700,
-        targetDurationMaxSeconds: 4500,
-        mustKeepNotes: ["Final encounter"],
-        deEmphasizeNotes: []
+        targetDurationMaxSeconds: 4500
       }}
       resumeCheckpoint=""
       resumeRestartFrom="compatible"
       extensionCheckpoint=""
       extensionBaseCount={0}
+      reviewedProject=""
+      cutApplication={null}
       onChange={vi.fn()}
       onRecoverProject={vi.fn()}
       onPrimarySource={vi.fn()}
@@ -33,6 +33,7 @@ describe("Editorial project setup", () => {
       onBeginExtension={vi.fn()}
       onCancelExtension={vi.fn()}
       onDeclineReuse={vi.fn()}
+      onReviewedProject={vi.fn()}
     />);
 
     expect(markup).toContain("Sources in chronological order");
@@ -50,11 +51,13 @@ describe("Editorial project setup", () => {
 
   it("keeps the empty multi-video drop target compact and explicit", () => {
     const markup = renderPanel(<EditorialProjectPanel
-      value={{ sources: [], titleOrGame: "", objective: "", targetDurationMinSeconds: 60, targetDurationMaxSeconds: 60, mustKeepNotes: [], deEmphasizeNotes: [] }}
+      value={{ sources: [], titleOrGame: "", objective: "", targetDurationMinSeconds: 60, targetDurationMaxSeconds: 60 }}
       resumeCheckpoint=""
       resumeRestartFrom="compatible"
       extensionCheckpoint=""
       extensionBaseCount={0}
+      reviewedProject=""
+      cutApplication={null}
       onChange={vi.fn()}
       onRecoverProject={vi.fn()}
       onPrimarySource={vi.fn()}
@@ -62,11 +65,12 @@ describe("Editorial project setup", () => {
       onBeginExtension={vi.fn()}
       onCancelExtension={vi.fn()}
       onDeclineReuse={vi.fn()}
+      onReviewedProject={vi.fn()}
     />);
 
     expect(markup).toContain("editorial-drop-zone");
     expect(markup).toContain("Drop video recordings here");
-    expect(markup).toContain("multiple chronological parts");
+    expect(markup).toContain("reviewed editorial EXO");
     expect(markup).not.toContain("Editorial checkpoints");
   });
 });

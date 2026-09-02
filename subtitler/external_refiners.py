@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
@@ -15,6 +16,7 @@ from .errors import ModelLoadError, StructuredOutputIncompleteError
 from .external_transcribers import require_api_key, verify_gemini_model_available, verify_openai_model_available
 from .glossary import GlossaryEntry, format_glossary
 from .hosted_http import request_json
+from .model_prompts import model_system_prompt
 from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 from .text_refiner import (
     TextRefiner,
@@ -28,6 +30,41 @@ from .text_refiner import (
     cleanup_base_rules,
     mistranscription_review_prompt,
 )
+
+
+YOUTUBE_CHAPTER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "chapters": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                    "title": {"type": "string"},
+                },
+                "required": ["start_line", "end_line", "title"],
+                "additionalProperties": False,
+            },
+        },
+        "cuts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "after_line": {"type": "integer"},
+                    "previous_topic": {"type": "string"},
+                    "next_topic": {"type": "string"},
+                },
+                "required": ["after_line", "previous_topic", "next_topic"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["chapters", "cuts"],
+    "additionalProperties": False,
+}
 
 
 class HostedTextRefiner(TextRefiner):
@@ -189,7 +226,12 @@ class HostedTextRefiner(TextRefiner):
             return []
         prompt = self._youtube_chapters_prompt(numbered_subtitles)
         try:
-            raw = self._chat(prompt, max_tokens=2048, operation="youtube_chapters")
+            raw = self._chat(
+                prompt,
+                max_tokens=2048,
+                operation="youtube_chapters",
+                response_schema=YOUTUBE_CHAPTER_RESPONSE_SCHEMA,
+            )
         except Exception as exc:
             print(f"Warning: YouTube chapter generation failed; continuing without chapter markers. {exc}", flush=True)
             self.last_youtube_chapters_raw = ""
@@ -262,16 +304,8 @@ class HostedTextRefiner(TextRefiner):
             "- Titles must be short phrases suitable for YouTube chapter names.\n"
             "- Prefer meaningful topic changes over frequent small cuts.\n"
             "- Do not translate unless the transcript itself changes language.\n"
-            "- Output strict JSON only. No markdown, comments, or explanations.\n\n"
-            "Required JSON shape:\n"
-            "{\n"
-            "  \"chapters\": [\n"
-            "    {\"start_line\": 1, \"end_line\": 12, \"title\": \"Intro\"}\n"
-            "  ],\n"
-            "  \"cuts\": [\n"
-            "    {\"after_line\": 12, \"previous_topic\": \"Intro\", \"next_topic\": \"History\"}\n"
-            "  ]\n"
-            "}\n\n"
+            "- Complete coverage means every supplied line belongs to one ordered chapter span.\n"
+            "- Return only the JSON object required by the response schema.\n\n"
             "Subtitle lines are tab-separated as line_number, start_seconds, end_seconds, text:\n"
             f"{lines}"
         )
@@ -486,6 +520,7 @@ class OpenAITextRefiner(HostedTextRefiner):
         response_schema: dict[str, Any] | None = None,
     ) -> str:
         structured_operation = operation.startswith("editorial_")
+        structured_request = response_schema is not None or structured_operation
         payload = {
             "model": self.model,
             "messages": [
@@ -544,18 +579,116 @@ class OpenAITextRefiner(HostedTextRefiner):
             usage=usage,
             schema_enabled=response_schema is not None,
         )
-        if structured_operation and refusal:
+        if structured_request and refusal:
             raise StructuredOutputIncompleteError(
                 "OpenAI editorial response was refused",
                 reason="refusal",
             )
-        if structured_operation and finish_reason != "stop":
+        if structured_request and finish_reason != "stop":
             reason = "max_output_tokens" if finish_reason == "length" else finish_reason
             raise StructuredOutputIncompleteError(
                 f"OpenAI editorial response ended before completion ({reason})",
                 reason=reason,
             )
+        if structured_request and not content.strip():
+            raise StructuredOutputIncompleteError(
+                "OpenAI structured response returned no output",
+                reason="empty_output",
+            )
         return content
+
+    def complete_structured_with_images(
+        self,
+        prompt: str,
+        images: list[tuple[Path, str]],
+        *,
+        max_tokens: int,
+        operation: str,
+        response_schema: dict[str, Any],
+    ) -> str:
+        """Run one bounded structured Responses request with labeled frame evidence."""
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        for path, label in images:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            content.extend(
+                (
+                    {"type": "input_text", "text": label},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{encoded}",
+                        "detail": "low",
+                    },
+                )
+            )
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "instructions": _openai_system_prompt(operation),
+            "input": [{"role": "user", "content": content}],
+            "max_output_tokens": max_tokens,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": _response_schema_name(operation),
+                    "strict": True,
+                    "schema": response_schema,
+                }
+            },
+        }
+        if self.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        data = _request_json_with_retries(
+            "POST",
+            "https://api.openai.com/v1/responses",
+            payload,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            timeout_sec=_hosted_text_timeout(prompt, max_tokens, operation),
+            message=f"OpenAI hosted visual {operation} request failed",
+        )
+        if data.get("status") == "incomplete":
+            details = data.get("incomplete_details")
+            reason = details.get("reason") if isinstance(details, dict) else "unknown"
+            raise StructuredOutputIncompleteError(
+                f"OpenAI editorial visual response ended before completion ({reason})",
+                reason=str(reason),
+            )
+        parts: list[str] = []
+        for output in data.get("output", []) if isinstance(data.get("output"), list) else []:
+            if not isinstance(output, dict):
+                continue
+            for item in output.get("content", []) if isinstance(output.get("content"), list) else []:
+                if isinstance(item, dict) and item.get("type") == "refusal":
+                    raise StructuredOutputIncompleteError(
+                        "OpenAI editorial visual response was refused",
+                        reason="refusal",
+                    )
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+        response_text = "".join(parts)
+        if not response_text.strip():
+            raise StructuredOutputIncompleteError(
+                "OpenAI editorial visual response returned no output",
+                reason="empty_output",
+            )
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        self.usage.add(
+            provider=self.provider,
+            model=self.model,
+            operation=operation,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=int(usage.get("total_tokens") or input_tokens + output_tokens),
+        )
+        self._record_structured_response(
+            operation=operation,
+            max_tokens=max_tokens,
+            finish_reason=str(data.get("status") or "completed"),
+            content=response_text,
+            usage=usage,
+            schema_enabled=True,
+        )
+        return response_text
 
 
 class GeminiTextRefiner(HostedTextRefiner):
@@ -584,6 +717,9 @@ class GeminiTextRefiner(HostedTextRefiner):
         response_schema: dict[str, Any] | None = None,
     ) -> str:
         generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
+        if response_schema is not None:
+            generation_config["responseMimeType"] = "application/json"
+            generation_config["responseJsonSchema"] = response_schema
         if self.model.startswith("gemini-3"):
             if operation == "split":
                 generation_config["thinkingConfig"] = {
@@ -596,7 +732,7 @@ class GeminiTextRefiner(HostedTextRefiner):
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "systemInstruction": {
-                "parts": [{"text": "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."}]
+                "parts": [{"text": _openai_system_prompt(operation)}]
             },
             "generationConfig": generation_config,
         }
@@ -620,34 +756,33 @@ class GeminiTextRefiner(HostedTextRefiner):
             output_tokens=output_tokens,
             total_tokens=int(usage.get("totalTokenCount") or input_tokens + output_tokens),
         )
-        parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        return "".join(str(part.get("text", "")) for part in parts)
+        candidate = data.get("candidates", [{}])[0]
+        parts = candidate.get("content", {}).get("parts", [])
+        content = "".join(str(part.get("text", "")) for part in parts)
+        finish_reason = str(candidate.get("finishReason") or "")
+        self._record_structured_response(
+            operation=operation,
+            max_tokens=max_tokens,
+            finish_reason=finish_reason,
+            content=content,
+            usage=usage,
+            schema_enabled=response_schema is not None,
+        )
+        if response_schema is not None and finish_reason in {"MAX_TOKENS", "MALFORMED_FUNCTION_CALL"}:
+            raise StructuredOutputIncompleteError(
+                f"Gemini hosted text {operation} returned incomplete structured output",
+                reason="max_output_tokens" if finish_reason == "MAX_TOKENS" else finish_reason.casefold(),
+            )
+        if response_schema is not None and not content.strip():
+            raise StructuredOutputIncompleteError(
+                f"Gemini hosted text {operation} returned no structured output",
+                reason="empty_output",
+            )
+        return content
 
 
 def _openai_system_prompt(operation: str) -> str:
-    if operation == "editorial_map":
-        return (
-            "You are a senior long-form video editor creating a suggestion-only editorial map. "
-            "Judge spoken and visual evidence together, preserve meaningful quiet gameplay, and return "
-            "only the requested JSON structure without markdown or commentary."
-        )
-    if operation == "editorial_global":
-        return (
-            "You are the supervising editor for a long-form video project. Reconcile the supplied local "
-            "findings into a coherent suggestion-only plan and return only the requested JSON structure."
-        )
-    if operation == "editorial_director":
-        return (
-            "You are the final director reviewing a complete long-form video plan. Judge pacing, intrigue, "
-            "information density, continuity, and emotional escalation as one viewer experience. Return "
-            "only the requested JSON structure without markdown or commentary."
-        )
-    if operation.startswith("editorial_"):
-        return (
-            "You are an evidence-driven long-form video editorial analyst. Return only valid JSON in the "
-            "requested structure without markdown or commentary."
-        )
-    return "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."
+    return model_system_prompt(operation)
 
 
 def _response_schema_name(operation: str) -> str:

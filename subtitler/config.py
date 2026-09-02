@@ -90,17 +90,6 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _int_min(backend.get("spec_draft_n_max"), 1, "backend.spec_draft_n_max")
     _int_min(audio.get("track"), 0, "audio.track")
     _choice(workflow_cfg.get("mode"), {"full", "long-stream"}, "workflow.mode")
-    _choice(
-        workflow_cfg.get("transcription_scope"),
-        {"full", "high-activity"},
-        "workflow.transcription_scope",
-    )
-    _int_min(workflow_cfg.get("long_stream_min_chunks"), 0, "workflow.long_stream_min_chunks")
-    ratio = workflow_cfg.get("long_stream_selection_ratio")
-    if ratio is not None:
-        numeric_ratio = _finite_number(ratio, "workflow.long_stream_selection_ratio")
-        if not 0.0 <= numeric_ratio <= 1.0:
-            raise SubtitlerError("workflow.long_stream_selection_ratio must be between 0 and 1")
     _positive(vad.get("max_chunk_sec"), "vad.max_chunk_sec")
     _positive(vad.get("min_speech_sec"), "vad.min_speech_sec")
     _int_min(vad.get("min_silence_ms"), 1, "vad.min_silence_ms")
@@ -171,16 +160,6 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     _non_empty_string(broll.get("analysis_model"), "broll.analysis_model")
     _boolean(broll.get("discover_web_assets"), "broll.discover_web_assets")
     _boolean(additional_settings.get("render_cut_video"), "additional_settings.render_cut_video")
-    _choice(
-        additional_settings.get("editorial_map_mode"),
-        {"off", "suggestions"},
-        "additional_settings.editorial_map_mode",
-    )
-    _choice(
-        additional_settings.get("editorial_subtitle_mode"),
-        {"full", "emphasis"},
-        "additional_settings.editorial_subtitle_mode",
-    )
     _choice(
         additional_settings.get("broll_mode"),
         {"off", "automatic"},
@@ -304,9 +283,6 @@ def _defaults() -> dict[str, Any]:
         "audio": {"track": 1},
         "workflow": {
             "mode": "full",
-            "transcription_scope": "full",
-            "long_stream_selection_ratio": None,
-            "long_stream_min_chunks": 1,
         },
         "vad": {
             "max_chunk_sec": 30.0,
@@ -372,8 +348,6 @@ def _defaults() -> dict[str, Any]:
             "youtube_chapters": False,
             "cut_silence_mode": "off",
             "render_cut_video": False,
-            "editorial_map_mode": "off",
-            "editorial_subtitle_mode": "full",
             "broll_mode": "off",
         },
         "broll": {

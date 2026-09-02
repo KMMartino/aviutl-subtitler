@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { chooseDirectory, chooseExecutable, chooseFile, chooseGlossaryFile, chooseInputFile, chooseInputFiles, chooseOutputFile } from "./fileDialogs";
 import { getEnvStatus } from "./envStatus";
@@ -28,13 +29,13 @@ import { createManagedPythonEnv, deleteManagedPythonEnv, getPythonRuntimeStatus,
 import { deleteManagedFfmpeg, downloadManagedFfmpeg, getFfmpegStatus, managedFfmpegBinDir } from "./ffmpegManager";
 import { ALIGNMENT_MODEL, deleteAlignmentModel, downloadAlignmentModel, getAlignmentModelStatus } from "./alignmentModelManager";
 import { CoalescedWriter } from "./coalescedWriter";
-import type { AppSettings, EditorialSourceSelection, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetKind, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
+import type { AppSettings, EditorialSourceSelection, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetKind, RunEvent, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 import { userDataOverride } from "./userDataOverride";
 import { probeCutSilenceEncoders } from "./cutSilenceManager";
 import { registerSilenceMediaScheme, SilencePreviewManager } from "./silencePreviewManager";
 import { MediaLibraryService } from "./mediaLibraryService";
 import { deleteManagedYtDlp, getYtDlpStatus, installOrUpdateYtDlp } from "./ytDlpManager";
-import { findMatchingEditorialCheckpoint, inspectEditorialCheckpoint } from "./editorialCheckpoint";
+import { applyReviewedEditorialCuts, findMatchingEditorialCheckpoint, inspectEditorialCheckpoint } from "./editorialCheckpoint";
 import { listEditorialCheckpoints, registerEditorialCheckpoint, removeEditorialCheckpoint } from "./editorialCheckpointRegistry";
 import { listEditorialGames, rememberEditorialGame } from "./editorialGameRegistry";
 
@@ -355,6 +356,41 @@ function registerIpc(): void {
     return listEditorialCheckpoints(paths(), appState.settings.lastInputPath);
   });
   handle("editorial:remove-checkpoint", (_event, checkpoint: string) => removeEditorialCheckpoint(paths(), checkpoint));
+  handle("editorial:apply-reviewed-cuts", async (_event, reviewProject: string) => {
+    const appState = loadAppState();
+    const python = await getPythonRuntimeStatus(appState.settings.pythonPath);
+    if (!python.ready) throw new Error(python.error || "Python runtime is not ready");
+    const runId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const target = requireWindow();
+    const send = (event: RunEvent) => {
+      if (!target.isDestroyed() && !target.webContents.isDestroyed()) {
+        target.webContents.send("run:event", event);
+      }
+    };
+    send({
+      type: "started",
+      runId,
+      commandPreview: `Apply reviewed editorial project: ${reviewProject}`,
+      startedAt: new Date(startedAt).toISOString(),
+    });
+    try {
+      const result = await applyReviewedEditorialCuts(
+        paths(),
+        python.resolvedPath,
+        reviewProject,
+        (stream, text) => send({ type: stream, runId, text }),
+      );
+      send({ type: "stdout", runId, text: `Narration report: ${result.reportPath}\nApplied EXO: ${result.outputPath}\n` });
+      send({ type: "exit", runId, code: 0, signal: null, elapsedMs: Date.now() - startedAt, cancelled: false });
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      send({ type: "error", runId, message });
+      send({ type: "exit", runId, code: 1, signal: null, elapsedMs: Date.now() - startedAt, cancelled: false });
+      throw error;
+    }
+  });
   handle("editorial:list-games", () => listEditorialGames(paths()));
   handle("editorial:remember-game", (_event, title: string) => rememberEditorialGame(paths(), title));
   handle("run:start", async (_event, request) => {

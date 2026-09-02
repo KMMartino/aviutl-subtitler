@@ -97,6 +97,19 @@ class SubtitleLeftMergeTests(unittest.TestCase):
         self.assertEqual(merged, 0)
         self.assertEqual([sub.text for sub in subtitles], ["文末。", "次"])
 
+    def test_left_merge_respects_the_display_duration_limit(self) -> None:
+        subtitles = [
+            _sub("短い", 0.0, 3.5, 0, 0),
+            _sub("字幕", 3.5, 7.0, 0, 1),
+        ]
+
+        merged = _left_merge_adjacent_subtitles(
+            subtitles, max_chars=10, max_duration=6.0
+        )
+
+        self.assertEqual(merged, 0)
+        self.assertEqual(len(subtitles), 2)
+
     def test_strip_standard_sentence_periods_is_programmatic(self) -> None:
         subtitles = [
             _sub("文末。", 0.0, 0.5, 0, 0, "structural_sentence+sentence_terminal"),

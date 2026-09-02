@@ -1,63 +1,33 @@
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from subtitler.editorial_enrichment import (
-    _burst_samples,
-    _sample_labels,
-    _vision_request,
-)
-from subtitler.media_analysis import VisualSample
+from subtitler.editorial_enrichment import _spaced_events
 
 
 class EditorialEnrichmentTests(unittest.TestCase):
-    def test_targeted_burst_uses_five_ordered_frames(self) -> None:
-        centers = [{"index": 0, "timestamp_ms": 10_000, "burst_radius_ms": 2_000}]
-        observed: list[float] = []
+    def test_acoustic_events_keep_first_candidate_within_each_spacing_window(self) -> None:
+        events = [
+            {"start_ms": 1_000, "score": 0.9},
+            {"start_ms": 1_400, "score": 0.6},
+            {"start_ms": 5_000, "score": 0.7},
+        ]
 
-        def extract(_media_path, *, timestamps, **_kwargs):
-            observed.extend(timestamps)
-            return [VisualSample(index, value, Path(f"{index}.jpg")) for index, value in enumerate(timestamps)]
+        result = _spaced_events(events, minimum_gap_ms=1_000, limit=10)
 
-        with patch("subtitler.editorial_enrichment._extract_samples", side_effect=extract):
-            result = _burst_samples(
-                Path("video.mp4"), centers, 30_000, Path("."), "ffmpeg"
-            )
-
-        self.assertEqual(observed, [8.0, 9.0, 10.0, 11.0, 12.0])
-        self.assertEqual(len(result), 5)
         self.assertEqual(
-            [label.split()[2].rstrip(",") for label in _sample_labels(centers)],
-            ["before", "approaching", "at", "leaving", "after"],
+            [(item["start_ms"], item["score"]) for item in result],
+            [(1_000, 0.9), (5_000, 0.7)],
         )
 
-    def test_editorial_vision_request_uses_requested_reasoning_effort(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            frame = Path(directory) / "frame.jpg"
-            frame.write_bytes(b"jpeg")
-            captured = {}
+    def test_acoustic_event_limit_keeps_first_candidates(self) -> None:
+        events = [
+            {"start_ms": 1_000, "score": 0.8},
+            {"start_ms": 3_000, "score": 0.6},
+            {"start_ms": 5_000, "score": 0.4},
+        ]
 
-            def request(_method, _url, payload, *_args, **_kwargs):
-                captured.update(payload)
-                return {
-                    "output": [{"content": [{"text": "{}"}]}],
-                    "usage": {"input_tokens": 10, "output_tokens": 2},
-                }
+        result = _spaced_events(events, minimum_gap_ms=500, limit=2)
 
-            with (
-                patch("subtitler.editorial_enrichment.require_api_key", return_value="key"),
-                patch("subtitler.editorial_enrichment.request_json", side_effect=request),
-            ):
-                _vision_request(
-                    "gpt-5.6-luna",
-                    "Review",
-                    [VisualSample(0, 1.0, frame)],
-                    ["frame"],
-                    reasoning_effort="medium",
-                )
-
-        self.assertEqual(captured["reasoning"], {"effort": "medium"})
+        self.assertEqual([item["start_ms"] for item in result], [1_000, 3_000])
 
 
 if __name__ == "__main__":

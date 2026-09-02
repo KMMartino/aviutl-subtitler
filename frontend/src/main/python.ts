@@ -102,7 +102,7 @@ function buildEditorialArgs(paths: RuntimePaths, request: RunRequest): string[] 
     "--target-max-sec",
     String(project.targetDurationMaxSeconds),
     "--subtitle-mode",
-    project.subtitleMode ?? "full",
+    "full",
     "--output-locale",
     project.outputLocale ?? "en",
     "--config",
@@ -117,8 +117,6 @@ function buildEditorialArgs(paths: RuntimePaths, request: RunRequest): string[] 
     path.join(paths.stateRoot, "editorial-game-knowledge.json"),
   ];
   for (const source of project.sources) args.push("--source-spec", JSON.stringify(source));
-  for (const note of project.mustKeepNotes) args.push("--must-keep", note);
-  for (const note of project.deEmphasizeNotes) args.push("--de-emphasize", note);
   if (request.sidecarDir) args.push("--workspace", request.sidecarDir);
   if (fs.existsSync(paths.glossaryFile)) args.push("--glossary", paths.glossaryFile);
   return args;

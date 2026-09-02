@@ -13,6 +13,7 @@ from .api_usage import ApiUsageLedger
 from .errors import ModelLoadError
 from .external_transcribers import require_api_key
 from .hosted_http import request_json
+from .model_prompts import WEB_DISCOVERY_SYSTEM_PROMPT
 
 
 @dataclass(frozen=True)
@@ -42,15 +43,18 @@ def discover_web_assets(
         "https://api.openai.com/v1/responses",
         {
             "model": model,
+            "instructions": WEB_DISCOVERY_SYSTEM_PROMPT,
             "reasoning": {"effort": "low"},
             "tools": [{"type": "web_search", "search_context_size": "low"}],
             "tool_choice": "required",
             "include": ["web_search_call.action.sources"],
             "input": (
-                "Find legitimate source pages for video-game trailers, official gameplay, press assets, "
+                "Task: find legitimate source pages for each supplied B-roll need. Search for video-game "
+                "trailers, official gameplay, press assets, "
                 "or other footage matching these B-roll needs. Prefer official developer/publisher channels "
-                "and pages with explicit reuse terms. Do not claim that a source is licensed for reuse; "
-                "rights must remain unverified. Give a short cited result for each need.\n\n"
+                "and pages with explicit reuse terms. Record reuse rights as unverified pending human review. "
+                "Completion means every need has been searched, each supported result cites its source page, "
+                "and needs without a grounded result remain unanswered rather than receiving a guessed URL.\n\n"
                 + need_lines
             ),
         },

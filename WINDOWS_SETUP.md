@@ -42,7 +42,7 @@ python -m venv .venv-win
 
 Install FFmpeg and make sure `ffmpeg` and `ffprobe` are available on `PATH`.
 
-The Settings screen can instead download the pinned managed FFmpeg build and required forced-alignment model. Complete the Python requirements step first, then download the alignment model (about 1.18 GiB). The app does not enable offline model loading until the managed snapshot has been verified.
+The Settings screen can instead download the pinned managed FFmpeg build and required forced-alignment model. Complete the Python requirements step first, then download the alignment model (about 1.18 GiB). The app does not enable offline model loading until the managed snapshot has been verified. On Windows, `alignment.device: auto` uses DirectML on a compatible DirectX 12 GPU. The first GPU alignment converts and validates a reusable mixed-FP16 ONNX copy beside the model (about another 0.60 GiB), retaining numerically sensitive operations in FP32; later runs reuse it. The app releases its transcription process before measuring the live DXGI memory budget. DirectML uses batch size 1 and may run two isolated model processes when there are two alignment jobs of at least 120 seconds, at least 12 GiB dedicated VRAM, at least 8 GiB available in the current DXGI budget, and at least 6 GiB available system RAM. Otherwise it uses one process. If DirectML is unavailable or validation fails, alignment retains the CPU backend.
 
 ```powershell
 ffmpeg -version

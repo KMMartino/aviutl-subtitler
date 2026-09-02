@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
+import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,7 +20,8 @@ from .config import openai_model_available
 from .errors import ModelLoadError, TranscriptionError
 from .glossary import GlossaryEntry
 from .hosted_http import request_json, request_json_bytes
-from .models import AudioChunk, TranscriptChunk
+from .models import AlignedToken, AudioChunk, TranscriptChunk
+from .model_prompts import TRANSCRIPTION_SYSTEM_PROMPT
 from .transcriber import (
     UNTRANSCRIBABLE_AUDIO_TOKEN,
     _is_suspect_transcript,
@@ -100,6 +105,7 @@ class GeminiTranscriber:
             write_wav_segment(chunk.samples, 16000, wav_path)
         audio_data = base64.b64encode(wav_path.read_bytes()).decode("ascii")
         payload = {
+            "systemInstruction": {"parts": [{"text": TRANSCRIPTION_SYSTEM_PROMPT}]},
             "contents": [
                 {
                     "role": "user",
@@ -158,6 +164,207 @@ class GeminiTranscriber:
             audio_input_tokens=audio_tokens,
             total_tokens=total_tokens,
         )
+
+
+class Gemini35TranscribeAdapter(GeminiTranscriber):
+    """Experimental adapter for Gemini's dedicated Files + Interactions transcription API."""
+
+    def __init__(self, *args: Any, language: str = "ja", **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.language = language
+        self.native_timestamps = os.environ.get("GEMINI_35_NATIVE_TIMESTAMPS") == "1"
+        self._native_tokens: dict[int, list[AlignedToken]] = {}
+        self._native_tokens_lock = threading.Lock()
+
+    def transcribe(self, chunk: AudioChunk, previous_transcript: str | None = None) -> TranscriptChunk:
+        text = self._transcribe_once(chunk, previous_transcript)
+        with self._native_tokens_lock:
+            tokens = self._native_tokens.pop(chunk.index, [])
+        return TranscriptChunk(chunk=chunk, text=text, tokens=tokens)
+
+    def _transcribe_once(self, chunk: AudioChunk, previous_transcript: str | None = None) -> str:
+        wav_path = chunk.wav_path or self.temp_dir / f"gemini35_transcribe_{chunk.index:05d}.wav"
+        if chunk.wav_path is None:
+            write_wav_segment(chunk.samples, 16000, wav_path)
+        file_name = _upload_gemini_file(wav_path, self.api_key, chunk.index, self.timeout_scale)
+        try:
+            transcription_config = {
+                "language_codes": [_gemini_language_code(self.language)],
+                "mode": (
+                    {"type": "verbatim", "timestamp_granularities": ["word"]}
+                    if self.native_timestamps
+                    else {"type": "verbatim"}
+                ),
+            }
+            # The Interactions API currently rejects custom vocabulary combined
+            # with timestamp annotations.  Native-timestamp experiments must
+            # therefore assess timing independently of glossary support.
+            if not self.native_timestamps:
+                transcription_config["custom_vocabulary"] = [
+                    entry.term for entry in self.glossary or [] if entry.term.strip()
+                ][:100]
+            payload = {
+                "model": self.model,
+                "input": [{"type": "audio", "uri": file_name, "mime_type": "audio/wav"}],
+                "generation_config": {
+                    "transcription_config": transcription_config
+                },
+            }
+            data = _request_json(
+                "POST",
+                "https://generativelanguage.googleapis.com/v1beta/interactions",
+                payload,
+                TranscriptionError,
+                f"Gemini 3.5 Transcribe failed for chunk {chunk.index}",
+                timeout_sec=_hosted_transcription_timeout(chunk, self.model, self.timeout_scale),
+                headers={"x-goog-api-key": self.api_key},
+                malformed_error_type=MalformedTranscriptionResponse,
+                dead_request_error_type=DeadTranscriptionRequest,
+            )
+        finally:
+            _delete_gemini_file(file_name, self.api_key)
+        text = clean_transcript(_gemini_interaction_text(data))
+        if self.native_timestamps:
+            tokens = _gemini_interaction_tokens(data, chunk)
+            if not tokens:
+                raise MalformedTranscriptionResponse(
+                    f"Gemini 3.5 Transcribe returned no word timestamps for chunk {chunk.index}"
+                )
+            with self._native_tokens_lock:
+                self._native_tokens[chunk.index] = tokens
+        self._record_interaction_usage(data, chunk)
+        if _is_untranscribable_audio_response(text):
+            print(f"Warning: Gemini reported untranscribable audio for chunk {chunk.index}; skipping.", flush=True)
+            return ""
+        if not text:
+            raise MalformedTranscriptionResponse(f"Gemini 3.5 Transcribe returned an empty transcript for chunk {chunk.index}")
+        if _is_external_suspect(text, chunk, allow_sparse=self.allow_sparse_transcript):
+            raise MalformedTranscriptionResponse(f"Gemini 3.5 Transcribe returned a suspect transcript for chunk {chunk.index}")
+        return text
+
+    def _record_interaction_usage(self, data: dict[str, Any], chunk: AudioChunk) -> None:
+        usage = data.get("usageMetadata") or data.get("usage") or {}
+        input_tokens = int(usage.get("promptTokenCount") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("candidatesTokenCount") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("totalTokenCount") or usage.get("total_tokens") or input_tokens + output_tokens)
+        audio_tokens = _gemini_audio_tokens(usage)
+        if not audio_tokens:
+            audio_tokens = int(round(max(0.0, chunk.end - chunk.start) * GEMINI_AUDIO_TOKENS_PER_SECOND))
+        if not input_tokens:
+            input_tokens = audio_tokens
+        fallback_cost = None
+        if not output_tokens:
+            fallback_cost = estimate_transcription_cost(self.provider, self.model, max(0.0, chunk.end - chunk.start))
+        self.usage.add(
+            provider=self.provider,
+            model=self.model,
+            operation="transcription",
+            chunk_index=chunk.index,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            audio_input_tokens=audio_tokens,
+            total_tokens=total_tokens,
+            cost_usd=fallback_cost,
+        )
+
+
+def _gemini_language_code(language: str) -> str:
+    return {"ja": "ja-JP", "en": "en-US", "ko": "ko-KR", "zh": "zh-CN"}.get(language.lower(), language)
+
+
+def _gemini_interaction_text(data: dict[str, Any]) -> str:
+    direct = data.get("output_text")
+    if isinstance(direct, str):
+        return direct
+    parts: list[str] = []
+    for step in data.get("steps") or []:
+        for content in step.get("content") or []:
+            if content.get("type") == "text":
+                parts.append(str(content.get("text") or ""))
+    return "".join(parts)
+
+
+def _gemini_interaction_tokens(data: dict[str, Any], chunk: AudioChunk) -> list[AlignedToken]:
+    tokens: list[AlignedToken] = []
+    for step in data.get("steps") or []:
+        for content in step.get("content") or []:
+            for annotation in content.get("annotations") or []:
+                if annotation.get("type") != "word_info":
+                    continue
+                text = str(annotation.get("text") or "").strip()
+                start = _gemini_offset_seconds(annotation.get("start_offset"))
+                end = _gemini_offset_seconds(annotation.get("end_offset"))
+                if text and start is not None and end is not None and end > start:
+                    tokens.append(AlignedToken(text, chunk.start + start, chunk.start + end, "word"))
+    return tokens
+
+
+def _gemini_offset_seconds(value: Any) -> float | None:
+    try:
+        return float(str(value).removesuffix("s"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _upload_gemini_file(wav_path: Path, api_key: str, chunk_index: int, timeout_scale: float) -> str:
+    body = json.dumps({"file": {"display_name": f"subtitler-gemini35-{chunk_index:05d}"}}).encode("utf-8")
+    start = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/upload/v1beta/files",
+        data=body,
+        headers={
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(wav_path.stat().st_size),
+            "X-Goog-Upload-Header-Content-Type": "audio/wav",
+        },
+        method="POST",
+    )
+    timeout_sec = max(30.0, 60.0 * max(1.0, timeout_scale))
+    try:
+        with urllib.request.urlopen(start, timeout=timeout_sec) as response:
+            upload_url = response.headers.get("x-goog-upload-url")
+        if not upload_url:
+            raise MalformedTranscriptionResponse("Gemini Files API did not return an upload URL")
+        upload = urllib.request.Request(
+            upload_url,
+            data=wav_path.read_bytes(),
+            headers={
+                "Content-Length": str(wav_path.stat().st_size),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(upload, timeout=timeout_sec) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise TranscriptionError(f"Gemini Files API upload failed for chunk {chunk_index}: HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise DeadTranscriptionRequest(f"Gemini Files API upload failed for chunk {chunk_index}") from exc
+    uri = str((data.get("file") or {}).get("uri") or "")
+    if not uri:
+        raise MalformedTranscriptionResponse(f"Gemini Files API returned no URI for chunk {chunk_index}")
+    return uri
+
+
+def _delete_gemini_file(file_uri: str, api_key: str) -> None:
+    name = file_uri.removeprefix("https://generativelanguage.googleapis.com/v1beta/")
+    if not name.startswith("files/"):
+        return
+    try:
+        _request_json(
+            "DELETE",
+            f"https://generativelanguage.googleapis.com/v1beta/{name}",
+            None,
+            TranscriptionError,
+            "Gemini Files API cleanup failed",
+            headers={"x-goog-api-key": api_key},
+            timeout_sec=30.0,
+        )
+    except TranscriptionError:
+        print("Warning: could not delete a temporary Gemini transcription upload.", flush=True)
 
 
 class OpenAITranscriber:

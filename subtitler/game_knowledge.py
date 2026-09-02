@@ -13,7 +13,7 @@ from .errors import SubtitlerError
 from .editorial_locale import editorial_locale, output_language_instruction
 
 
-GAME_KNOWLEDGE_SCHEMA_VERSION = 1
+GAME_KNOWLEDGE_SCHEMA_VERSION = 2
 GAME_KNOWLEDGE_FIELDS = (
     "visual_signatures",
     "locations",
@@ -21,15 +21,33 @@ GAME_KNOWLEDGE_FIELDS = (
     "menus_and_upgrade_states",
     "retry_patterns",
     "objectives_and_mechanics",
+    "progress_and_result_cues",
     "terminology",
 )
 MAX_GAMES = 80
 MAX_ITEMS_PER_FIELD = 16
 MAX_ITEM_LENGTH = 240
+GAME_KNOWLEDGE_MAX_OUTPUT_TOKENS = 8_192
+GAME_KNOWLEDGE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        field: {"type": "array", "items": {"type": "string"}}
+        for field in GAME_KNOWLEDGE_FIELDS
+    },
+    "required": list(GAME_KNOWLEDGE_FIELDS),
+    "additionalProperties": False,
+}
 
 
 class StructuredProvider(Protocol):
-    def complete_structured(self, prompt: str, *, max_tokens: int, operation: str) -> str: ...
+    def complete_structured(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        operation: str,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str: ...
 
 
 def normalize_game_key(title: str) -> str:
@@ -80,18 +98,27 @@ Temporal transition bursts:
 Bounded public reference context (may be unavailable or imperfect; prefer recording evidence on conflict):
 {json.dumps(reference_context or {}, ensure_ascii=False, separators=(',', ':'))[:6000]}
 
-Return strict JSON with exactly these arrays:
-{{"visual_signatures":[],"locations":[],"bosses_enemies":[],"menus_and_upgrade_states":[],"retry_patterns":[],"objectives_and_mechanics":[],"terminology":[]}}
-
 Rules:
 - Merge useful existing knowledge with supported new findings.
-- Learn recurring HUD/state cues, named places and enemies, retry/reset patterns, menus/upgrades, objectives, mechanics, and terminology.
+- Actively remove or replace existing claims contradicted by stronger new evidence; do not preserve a claim merely because it was already stored.
+- Learn recurring HUD/state cues, named places and enemies, retry/reset patterns, menus/upgrades, objectives, mechanics, stable progress/result cues, and terminology.
 - Each entry must be a concise standalone fact useful to a later editorial analysis.
 - Mark uncertainty in the text instead of presenting guesses as facts.
 - Prefer stable, reusable knowledge over a chronological recap of this recording.
-- Return at most {MAX_ITEMS_PER_FIELD} entries per array and no prose outside JSON.
+- Do not store the outcome of this particular recording as game knowledge. In bosses_enemies, retain stable identity, mechanics, phases, and visible signatures, never whether this run won, lost, survived, or returned to a menu afterward.
+- Put stable result-screen semantics in progress_and_result_cues: record what recurring epilogue, statistics, clear, game-over, unlock, credits, or title-return cues mean when combined evidence establishes that meaning. Name the visible or spoken evidence that distinguishes a clear from a failure or an ordinary transition. Keep the general cue; omit what happened in this recording.
+- Never infer victory or defeat from empty HUD/party slots, a dark transition, a statistics screen, or a title/menu return alone. Explicit transcript statements and later continuity outweigh an earlier visual guess; omit a disputed outcome instead of choosing one.
+- Complete all schema arrays, including progress_and_result_cues. An empty array is correct when no stable cue is established; never fill it with a run-specific guess.
+- Return at most {MAX_ITEMS_PER_FIELD} entries per array.
+
+Completion: every existing claim has been retained, revised, or removed based on the combined evidence; return only the JSON object required by the response schema.
 """
-    raw = provider.complete_structured(prompt, max_tokens=4096, operation="editorial_game_learning")
+    raw = provider.complete_structured(
+        prompt,
+        max_tokens=GAME_KNOWLEDGE_MAX_OUTPUT_TOKENS,
+        operation="editorial_game_learning",
+        response_schema=GAME_KNOWLEDGE_RESPONSE_SCHEMA,
+    )
     parsed = _json_object(raw)
     knowledge = {
         field: _bounded_strings(parsed.get(field))

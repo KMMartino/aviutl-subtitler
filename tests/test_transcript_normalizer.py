@@ -1,7 +1,13 @@
 import unittest
 
 from subtitler.transcript_normalizer import backend_result_to_aligned_chunks, speech_regions_to_markers
-from subtitler.transcription_backend import BackendTranscriptResult, SpeechRegion, TranscriptSegment, TranscriptToken
+from subtitler.transcription_backend import (
+    BackendTranscriptResult,
+    RawVadSpeechInterval,
+    SpeechRegion,
+    TranscriptSegment,
+    TranscriptToken,
+)
 
 
 class TranscriptNormalizerTests(unittest.TestCase):
@@ -41,6 +47,78 @@ class TranscriptNormalizerTests(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertTrue(chunks[0].fallback)
         self.assertEqual(chunks[0].tokens, [])
+
+    def test_silence_aligned_trailing_punctuation_uses_spoken_endpoint(self):
+        result = BackendTranscriptResult(
+            backend_name="test",
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    text="ナイス。",
+                    start=7060.600,
+                    end=7064.698,
+                    tokens=[
+                        TranscriptToken("ナ", 7060.600, 7060.798, "char"),
+                        TranscriptToken("イ", 7060.798, 7060.918, "char"),
+                        TranscriptToken("ス", 7060.918, 7064.698, "char"),
+                        TranscriptToken("。", 7064.698, 7064.698, "char"),
+                    ],
+                )
+            ],
+            raw_vad_speech_intervals=[RawVadSpeechInterval(7060.600, 7061.384)],
+        )
+
+        chunks = backend_result_to_aligned_chunks(result)
+
+        self.assertEqual(chunks[0].tokens[-2].end, 7061.384)
+        self.assertEqual(
+            (chunks[0].tokens[-1].start, chunks[0].tokens[-1].end),
+            (7061.384, 7061.384),
+        )
+
+    def test_leading_unsupported_punctuation_uses_following_spoken_boundary(self):
+        result = BackendTranscriptResult(
+            backend_name="test",
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    text="…続く",
+                    start=1.0,
+                    end=5.0,
+                    tokens=[
+                        TranscriptToken("…", 1.0, 1.1, "char"),
+                        TranscriptToken("続く", 5.0, 5.8, "word"),
+                    ],
+                )
+            ],
+            raw_vad_speech_intervals=[RawVadSpeechInterval(5.0, 5.8)],
+        )
+
+        chunks = backend_result_to_aligned_chunks(result)
+
+        self.assertEqual((chunks[0].tokens[0].start, chunks[0].tokens[0].end), (5.0, 5.0))
+
+    def test_acoustically_supported_punctuation_keeps_its_alignment(self):
+        result = BackendTranscriptResult(
+            backend_name="test",
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    text="はい！",
+                    start=1.0,
+                    end=2.0,
+                    tokens=[
+                        TranscriptToken("はい", 1.0, 1.8, "word"),
+                        TranscriptToken("！", 1.8, 2.0, "char"),
+                    ],
+                )
+            ],
+            raw_vad_speech_intervals=[RawVadSpeechInterval(1.0, 2.0)],
+        )
+
+        chunks = backend_result_to_aligned_chunks(result)
+
+        self.assertEqual((chunks[0].tokens[-1].start, chunks[0].tokens[-1].end), (1.8, 2.0))
 
     def test_segment_group_metadata_overrides_same_index_fine_region(self):
         result = BackendTranscriptResult(

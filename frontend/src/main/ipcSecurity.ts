@@ -104,7 +104,7 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
       return;
     case "editorial:find-checkpoint":
       exact(args, 1); validateEditorialSources(args[0]); return;
-    case "editorial:remove-checkpoint": return absolutePathArg(args);
+    case "editorial:remove-checkpoint": case "editorial:apply-reviewed-cuts": return absolutePathArg(args);
     case "editorial:remember-game": return shortStringArg(args);
     case "run:start": exact(args, 1); validateRunRequest(args[0]); return;
     default: throw new Error(`No IPC validation policy for ${channel}`);
@@ -167,6 +167,7 @@ function validateRunRequest(value: unknown): void {
   const allowed = new Set(["workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps", "editorialProject", "editorialCheckpoint", "editorialCheckpointSources", "editorialRestartFrom", "editorialExtend"]);
   if (Object.keys(request).some((key) => !allowed.has(key))) fail();
   assertEnum(request.workflow, workflows);
+  if (request.workflow === "local-long-stream") fail();
   for (const key of ["inputPath", "outputPath", "configPath", "envFile"]) assertAbsolutePath(request[key]);
   if (request.sidecarDir !== undefined) assertAbsolutePath(request.sidecarDir);
   if (request.audioTrack !== undefined && (!Number.isSafeInteger(request.audioTrack) || Number(request.audioTrack) < 0)) fail();
@@ -180,7 +181,7 @@ function validateRunRequest(value: unknown): void {
   }
   if (request.editorialRestartFrom !== undefined) {
     if (request.editorialCheckpoint === undefined) fail();
-    assertEnum(request.editorialRestartFrom, new Set(["compatible", "source_probe", "transcription", "visual_learning", "semantic_spans", "local_reconciliation", "global_reconciliation", "editorial_assets"]));
+    assertEnum(request.editorialRestartFrom, new Set(["compatible", "source_probe", "transcription", "visual_learning", "semantic_spans", "local_reconciliation", "global_reconciliation", "action_planning", "editorial_assets"]));
   }
   if (request.editorialCheckpointSources !== undefined) {
     if (request.editorialCheckpoint === undefined) fail();
@@ -193,7 +194,7 @@ function validateRunRequest(value: unknown): void {
 function validateEditorialProjectRequest(workflow: unknown, value: unknown): void {
   if (workflow !== "hosted-long-stream") fail();
   assertPlainObject(value);
-  const allowed = new Set(["sources", "titleOrGame", "objective", "targetDurationMinSeconds", "targetDurationMaxSeconds", "mustKeepNotes", "deEmphasizeNotes", "subtitleMode", "outputLocale"]);
+  const allowed = new Set(["sources", "titleOrGame", "objective", "targetDurationMinSeconds", "targetDurationMaxSeconds", "outputLocale"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) fail();
   const totalSeconds = validateEditorialSources(value.sources);
   for (const key of ["titleOrGame", "objective"] as const) {
@@ -203,13 +204,6 @@ function validateEditorialProjectRequest(workflow: unknown, value: unknown): voi
   const maximum = value.targetDurationMaxSeconds;
   if (typeof minimum !== "number" || !Number.isFinite(minimum) || minimum <= 0
     || typeof maximum !== "number" || !Number.isFinite(maximum) || maximum < minimum || maximum > totalSeconds + 1) fail();
-  for (const key of ["mustKeepNotes", "deEmphasizeNotes"] as const) {
-    if (!Array.isArray(value[key]) || value[key].length > 1000) fail();
-    for (const note of value[key]) {
-      if (typeof note !== "string" || !note.trim() || note.length > 4000 || note.includes("\0")) fail();
-    }
-  }
-  if (value.subtitleMode !== undefined) assertEnum(value.subtitleMode, new Set(["full", "emphasis"]));
   if (value.outputLocale !== undefined) assertEnum(value.outputLocale, new Set(["en", "ja"]));
 }
 function validateEditorialSources(value: unknown): number {

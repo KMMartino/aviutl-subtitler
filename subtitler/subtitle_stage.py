@@ -19,8 +19,7 @@ from .run_artifacts import (
     write_final_subtitle_text,
 )
 from .run_context import RunContext
-from .splitter import build_subtitles
-from .subtitle_planner import build_grouped_subtitles, write_subtitle_timing_artifact
+from .subtitle_planner import build_grouped_subtitles
 from .text_refiner import LlamaServerTextRefiner, TextRefiner
 
 
@@ -54,22 +53,44 @@ def run_subtitle_stage(
     artifacts = context.artifacts
     cleanup_cfg = config["cleanup"]
     subtitle_cfg = config["subtitles"]
-    subtitle_mode = config.get("additional_settings", {}).get("editorial_subtitle_mode", "full")
-    if context.args.workflow == "hosted-long-stream" and subtitle_mode == "emphasis":
+    if context.args.workflow == "hosted-long-stream":
         print(
-            "Partial subtitles: preserving deterministic transcript timing and deferring cleanup "
-            "to selected emphasized phrases.",
+            "Long-stream editorial: retaining the full raw aligned transcript and skipping full subtitle cleanup.",
             flush=True,
         )
-        subtitles = build_subtitles(
+        subtitles = build_grouped_subtitles(
             aligned,
             max_chars=int(subtitle_cfg["max_chars"]),
             min_duration=float(subtitle_cfg["min_duration"]),
             max_duration=float(subtitle_cfg["max_duration"]),
             gap_threshold=float(subtitle_cfg["gap_threshold"]),
+            regroup_gap_sec=float(subtitle_cfg["regroup_gap_sec"]),
+            refiner=None,
+            llm_splitter=None,
+            regroup_profile_path=(
+                artifacts.regroup_profile if context.diagnostics_enabled else None
+            ),
+            llm_split_profile_path=None,
+            llm_split_console=False,
+            subtitle_timing_profile_path=(
+                artifacts.subtitle_timing_profile if context.diagnostics_enabled else None
+            ),
+            boundary_timing_profile_path=(
+                artifacts.boundary_timing_profile if context.diagnostics_enabled else None
+            ),
+            cleanup_diff_path=None,
+            chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
+            cleanup_window_subtitles=1,
+            cleanup_workers=1,
+            chain_split_workers=int(
+                subtitle_cfg["chain_split_workers"] or default_chain_split_workers(config)
+            ),
+            progress_callback=count_progress_reporter(),
+            planning_profile_path=(
+                artifacts.planning_profile if context.diagnostics_enabled else None
+            ),
+            strip_sentence_periods=False,
         )
-        if artifacts.subtitle_timing_profile is not None:
-            write_subtitle_timing_artifact(artifacts.subtitle_timing_profile, subtitles)
         if artifacts.final_text is not None:
             write_final_subtitle_text(artifacts.final_text, subtitles)
         return SubtitleStageOutcome(subtitles, [], [])

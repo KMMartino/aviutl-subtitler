@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from subtitler.game_knowledge import (
+    GAME_KNOWLEDGE_MAX_OUTPUT_TOKENS,
     game_profile_context,
     load_game_profile,
     update_game_profile,
@@ -11,9 +12,18 @@ from subtitler.game_knowledge import (
 
 
 class _Provider:
-    def complete_structured(self, prompt: str, *, max_tokens: int, operation: str) -> str:
+    def complete_structured(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        operation: str,
+        response_schema: dict[str, object] | None = None,
+    ) -> str:
         self.prompt = prompt
+        self.max_tokens = max_tokens
         self.operation = operation
+        self.response_schema = response_schema
         return json.dumps({
             "visual_signatures": ["Red health bar in the upper left"],
             "locations": ["The hub contains the upgrade menu"],
@@ -21,6 +31,7 @@ class _Provider:
             "menus_and_upgrade_states": ["Equipment screen shows weapon changes"],
             "retry_patterns": ["Loading screen followed by the same arena indicates a retry"],
             "objectives_and_mechanics": ["Parries create a short damage window"],
+            "progress_and_result_cues": ["A CLEAR banner followed by credits indicates completion"],
             "terminology": ["The creator calls the hub base"],
         })
 
@@ -47,8 +58,13 @@ class GameKnowledgeTests(unittest.TestCase):
             self.assertEqual(loaded["key"], "example game")
             self.assertIn("Red health bar", game_profile_context(loaded))
             self.assertEqual(provider.operation, "editorial_game_learning")
+            self.assertEqual(provider.max_tokens, GAME_KNOWLEDGE_MAX_OUTPUT_TOKENS)
+            self.assertIsNotNone(provider.response_schema)
             self.assertEqual(loaded["output_locale"], "ja")
             self.assertIn("natural, concise Japanese", provider.prompt)
+            self.assertIn("Do not store the outcome of this particular recording", provider.prompt)
+            self.assertIn("Explicit transcript statements and later continuity", provider.prompt)
+            self.assertIn("CLEAR banner", game_profile_context(loaded))
 
 
 if __name__ == "__main__":

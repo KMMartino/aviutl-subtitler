@@ -2,8 +2,66 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from .models import AlignedChunk, AlignedToken, AudioChunk, ExoMarker
-from .transcription_backend import BackendTranscriptResult, SpeechRegion
+from .transcription_backend import BackendTranscriptResult, RawVadSpeechInterval, SpeechRegion
+
+
+def is_non_spoken_text(text: str) -> bool:
+    """Return whether text consists only of punctuation/symbol characters."""
+    visible = [character for character in text if not character.isspace()]
+    return bool(visible) and all(
+        unicodedata.category(character).startswith(("P", "S"))
+        for character in visible
+    )
+
+
+def _speech_overlaps(
+    start: float,
+    end: float,
+    speech_activity: list[RawVadSpeechInterval],
+) -> list[RawVadSpeechInterval]:
+    return [
+        item for item in speech_activity if item.start < end and item.end > start
+    ]
+
+
+def _attach_unsupported_punctuation(
+    chunks: list[AlignedChunk],
+    speech_activity: list[RawVadSpeechInterval],
+) -> None:
+    """Collapse silence-aligned punctuation onto an adjacent spoken boundary."""
+    if not speech_activity:
+        return
+    tokens = [token for chunk in chunks for token in chunk.tokens]
+    spoken_indexes = [
+        index for index, token in enumerate(tokens) if not is_non_spoken_text(token.text)
+    ]
+    for index, token in enumerate(tokens):
+        if (
+            not is_non_spoken_text(token.text)
+            or _speech_overlaps(token.start, token.end, speech_activity)
+        ):
+            continue
+        previous = next((candidate for candidate in reversed(spoken_indexes) if candidate < index), None)
+        following = next((candidate for candidate in spoken_indexes if candidate > index), None)
+        if previous is not None:
+            spoken = tokens[previous]
+            overlaps = _speech_overlaps(spoken.start, spoken.end, speech_activity)
+            if overlaps:
+                spoken.end = min(spoken.end, overlaps[-1].end)
+            boundary = spoken.end
+        elif following is not None:
+            spoken = tokens[following]
+            overlaps = _speech_overlaps(spoken.start, spoken.end, speech_activity)
+            if overlaps:
+                spoken.start = max(spoken.start, overlaps[0].start)
+            boundary = spoken.start
+        else:
+            continue
+        token.start = boundary
+        token.end = boundary
 
 
 def backend_result_to_aligned_chunks(result: BackendTranscriptResult) -> list[AlignedChunk]:
@@ -52,6 +110,7 @@ def backend_result_to_aligned_chunks(result: BackendTranscriptResult) -> list[Al
                 fallback=segment.fallback_timing or not tokens,
             )
         )
+    _attach_unsupported_punctuation(chunks, result.raw_vad_speech_intervals)
     return chunks
 
 

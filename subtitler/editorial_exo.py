@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,11 @@ from .editorial_presentation import (
     category_label,
     presented_editorial_items,
     primary_suggestion,
+)
+from .editorial_locale import locale_label
+from .editorial_cutting import (
+    VOICE_LEADING_HANDLE_MS,
+    VOICE_TRAILING_HANDLE_MS,
 )
 from .errors import SubtitlerError
 from .exo import generate_exo_file, time_to_frame, write_exo
@@ -33,8 +37,7 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
     """Write linked source media, transcript subtitles, and editorial markers."""
     sources = sorted(artifact["sources"], key=lambda item: item["order"])
     settings = _canvas_settings(sources)
-    if artifact.get("subtitle_mode", "full") == "emphasis":
-        settings.y_position = 708.0 * settings.layout_scale
+    settings.y_position = 708.0 * settings.layout_scale
     clips: list[ExoCompositeMediaClip] = []
     subtitles: list[Subtitle] = []
     source_offsets: dict[str, float] = {}
@@ -46,6 +49,9 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
         for item in artifact.get("editorial_map", {}).get("final_actions", [])
         if isinstance(item, dict)
     ]
+    human_information = (
+        artifact.get("editorial_map", {}).get("workflow") == "human_information"
+    )
 
     for source in sources:
         visual_width, visual_height, audio_width, audio_height, wide_layout = (
@@ -68,7 +74,11 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
             )
         duration_seconds = int(source["duration_ms"]) / 1000.0
         source_offsets[source["source_id"]] = offset_seconds
-        boundaries = _source_edit_boundaries(source, final_actions)
+        boundaries = (
+            [0, int(source["duration_ms"])]
+            if human_information
+            else _source_edit_boundaries(source, final_actions)
+        )
         for start_ms, end_ms in zip(boundaries, boundaries[1:]):
             output_start = time_to_frame(offset_seconds + start_ms / 1000.0, settings.rate)
             output_end = max(
@@ -118,18 +128,32 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
                 ):
                     action_group_ids[str(action["action_id"])] = next_group_id
             next_group_id += 1
-        if artifact.get("subtitle_mode", "full") == "full":
-            subtitles.extend(_source_subtitles(source, offset_seconds))
         offset_seconds += duration_seconds
 
-    if artifact.get("subtitle_mode", "full") == "emphasis":
-        subtitles.extend(_emphasized_subtitles(artifact, source_offsets))
+    subtitles.extend(_selected_editorial_subtitles(artifact, source_offsets))
 
     presented = presented_editorial_items(artifact)
-    marker_layers = _editorial_marker_layers(artifact, source_offsets, presented)
-    number_markers = _editorial_number_markers(
-        presented, source_offsets, action_group_ids
+    cutting_assistant = (
+        artifact.get("editorial_map", {}).get("workflow") == "cutting_assistant"
     )
+    event_marker_layers: list[list[ExoMarker]] = []
+    if human_information:
+        marker_layers = _human_information_marker_layers(artifact, source_offsets)
+        utterance_markers = _utterance_reference_markers(artifact, source_offsets)
+        reference_marker_layers = _nonoverlapping_marker_lanes(utterance_markers)
+        event_marker_layers = _event_graph_marker_layers(artifact, source_offsets)
+        number_markers = []
+    elif cutting_assistant:
+        marker_layers = _cutting_assistant_marker_layers(artifact, source_offsets)
+        utterance_markers = _utterance_reference_markers(artifact, source_offsets)
+        reference_marker_layers = _nonoverlapping_marker_lanes(utterance_markers)
+        number_markers = []
+    else:
+        marker_layers = _editorial_marker_layers(artifact, source_offsets, presented)
+        reference_marker_layers = []
+        number_markers = _editorial_number_markers(
+            presented, source_offsets, action_group_ids
+        )
     content = generate_exo_file(
         subtitles,
         settings,
@@ -138,53 +162,496 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
         composite_media_clips=clips,
         subtitle_background=False,
         additional_marker_layers=marker_layers,
+        reference_marker_layers=reference_marker_layers,
+        event_marker_layers=event_marker_layers,
         segment_number_markers=number_markers,
         additional_marker_font_scale=1.2,
     )
     write_exo(path, content)
 
 
-def _source_subtitles(source: dict[str, Any], offset_seconds: float) -> list[Subtitle]:
-    transcription = source.get("stages", {}).get("transcription", {}).get("output")
-    if not isinstance(transcription, dict):
-        return []
-    timing_value = transcription.get("timing_path")
-    text_value = transcription.get("text_path")
-    if not isinstance(timing_value, str) or not isinstance(text_value, str):
-        return []
-    timing_path = Path(timing_value)
-    text_path = Path(text_value)
-    try:
-        numbered_text = text_path.read_text(encoding="utf-8").splitlines()
-        texts = []
-        for line in numbered_text:
-            _, separator, text = line.partition(". ")
-            texts.append(text if separator else line)
-        with timing_path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-    except (OSError, UnicodeError, csv.Error) as exc:
-        raise SubtitlerError(
-            f"Could not load transcript artifacts for editorial EXO: {source['original_name']}: {exc}"
-        ) from exc
-    if len(rows) != len(texts):
-        raise SubtitlerError(
-            f"Transcript timing/text count mismatch for editorial EXO: {source['original_name']}"
+def write_cut_applied_editorial_exo(
+    path: Path, artifact: dict[str, Any], cuts: list[dict[str, Any]]
+) -> None:
+    """Write a compacted editorial EXO after the user has reviewed cut markers."""
+    sources = sorted(artifact["sources"], key=lambda item: item["order"])
+    settings = _canvas_settings(sources)
+    clips: list[ExoCompositeMediaClip] = []
+    output_cursor_frame = 1
+    source_output_offsets_ms: dict[str, int] = {}
+    cuts_by_source = {
+        str(source["source_id"]): sorted(
+            [
+                item
+                for item in cuts
+                if str(item.get("source_id") or "") == str(source["source_id"])
+            ],
+            key=lambda item: int(item["start_ms"]),
         )
-    result = []
-    for row, text in zip(rows, texts):
-        try:
-            start = float(row["start"])
-            end = float(row["end"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SubtitlerError(
-                f"Transcript timing artifact contains an invalid row: {source['original_name']}"
-            ) from exc
-        if text.strip() and end > start:
-            result.append(Subtitle(offset_seconds + start, offset_seconds + end, text.strip()))
-    return result
+        for source in sources
+    }
+    output_cursor_ms = 0
+    next_group_id = 1
+    narration_actions = [
+        item
+        for item in artifact.get("editorial_map", {}).get("final_actions", [])
+        if isinstance(item, dict)
+        and str(item.get("action_type") or "")
+        in {"narrated_summary", "narration_bridge"}
+    ]
+
+    for source in sources:
+        source_id = str(source["source_id"])
+        source_output_offsets_ms[source_id] = output_cursor_ms
+        source_cuts = cuts_by_source[source_id]
+        visual_width, visual_height, audio_width, audio_height, wide_layout = (
+            _source_layout(source)
+        )
+        primary = cover_placement(
+            settings.width, settings.height, visual_width, visual_height
+        )
+        overlay = None
+        overlay_audio_volume = 100.0
+        if wide_layout is not None:
+            primary, overlay = wide_recording_placements(wide_layout)
+            overlay_audio_volume = 0.0
+        elif source.get("media_mode") == "paired":
+            overlay = top_right_overlay_placement(
+                settings.width, settings.height, audio_width, audio_height
+            )
+        duration_ms = int(source["duration_ms"])
+        boundaries = {0, duration_ms}
+        for cut in source_cuts:
+            boundaries.update((int(cut["start_ms"]), int(cut["end_ms"])))
+        for action in narration_actions:
+            if str(action.get("source_id") or "") == source_id:
+                boundaries.update(
+                    (
+                        max(0, min(duration_ms, _integer(action.get("start_ms")))),
+                        max(0, min(duration_ms, _integer(action.get("end_ms")))),
+                    )
+                )
+        ordered = sorted(boundaries)
+        retained_ms = 0
+        for start_ms, end_ms in zip(ordered, ordered[1:]):
+            if end_ms <= start_ms or any(
+                start_ms >= int(cut["start_ms"]) and end_ms <= int(cut["end_ms"])
+                for cut in source_cuts
+            ):
+                continue
+            source_start_frame = time_to_frame(start_ms / 1000.0, settings.rate)
+            source_end_exclusive = time_to_frame(end_ms / 1000.0, settings.rate)
+            frame_count = max(1, source_end_exclusive - source_start_frame)
+            segment = ExoMediaSegment(
+                output_cursor_frame,
+                output_cursor_frame + frame_count - 1,
+                source_start_frame,
+                next_group_id,
+            )
+            clips.append(
+                ExoCompositeMediaClip(
+                    video_path=Path(source["visual_path"]),
+                    audio_path=Path(source["visual_path"]),
+                    segment=segment,
+                    overlay_video_path=(
+                        Path(source["audio_path"])
+                        if source.get("media_mode") == "paired" or wide_layout is not None
+                        else None
+                    ),
+                    overlay_audio_path=(
+                        Path(source["audio_path"])
+                        if source.get("media_mode") == "paired" or wide_layout is not None
+                        else None
+                    ),
+                    video_crop=primary.crop,
+                    video_scale_percent=primary.scale_percent,
+                    video_x=primary.x,
+                    video_y=primary.y,
+                    overlay_crop=overlay.crop if overlay is not None else None,
+                    overlay_scale_percent=(
+                        overlay.scale_percent if overlay is not None else 100.0
+                    ),
+                    overlay_x=overlay.x if overlay is not None else 0.0,
+                    overlay_y=overlay.y if overlay is not None else 0.0,
+                    overlay_audio_volume=overlay_audio_volume,
+                )
+            )
+            output_cursor_frame += frame_count
+            retained_ms += end_ms - start_ms
+            next_group_id += 1
+        output_cursor_ms += retained_ms
+
+    narration_markers: list[ExoMarker] = []
+    locale = str(artifact.get("output_locale") or "en")
+    for action in narration_actions:
+        source_id = str(action.get("source_id") or "")
+        if source_id not in source_output_offsets_ms:
+            continue
+        start_ms = _integer(action.get("start_ms"))
+        end_ms = _integer(action.get("end_ms"))
+        source_cuts = cuts_by_source[source_id]
+        shifted_start = (
+            source_output_offsets_ms[source_id]
+            + start_ms
+            - _removed_before(source_cuts, start_ms)
+        )
+        shifted_end = (
+            source_output_offsets_ms[source_id]
+            + end_ms
+            - _removed_before(source_cuts, end_ms)
+        )
+        if shifted_end > shifted_start:
+            narration_markers.append(
+                ExoMarker(
+                    shifted_start / 1000.0,
+                    shifted_end / 1000.0,
+                    locale_label(locale, "NARRATION", "ナレーション"),
+                )
+            )
+    duration_seconds = max(0.0, (output_cursor_frame - 1) / settings.rate)
+    content = generate_exo_file(
+        [],
+        settings,
+        duration_seconds,
+        insert_initial_empty=False,
+        composite_media_clips=clips,
+        subtitle_background=False,
+        additional_marker_layers=[narration_markers] if narration_markers else [],
+        segment_number_markers=[],
+        additional_marker_font_scale=1.2,
+    )
+    write_exo(path, content)
 
 
-def _emphasized_subtitles(
+def _removed_before(cuts: list[dict[str, Any]], point_ms: int) -> int:
+    return sum(
+        max(0, min(point_ms, int(cut["end_ms"])) - int(cut["start_ms"]))
+        for cut in cuts
+        if int(cut["start_ms"]) < point_ms
+    )
+
+
+def _cutting_assistant_marker_layers(
+    artifact: dict[str, Any], source_offsets: dict[str, float]
+) -> list[list[ExoMarker]]:
+    cuts: list[ExoMarker] = []
+    narration: list[ExoMarker] = []
+    locale = str(artifact.get("output_locale") or "en")
+    for item in artifact.get("editorial_map", {}).get("confirmed_cuts", []):
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        start = source_offsets[source_id] + max(0, _integer(item.get("start_ms"))) / 1000.0
+        end = source_offsets[source_id] + max(
+            _integer(item.get("start_ms")) + 1, _integer(item.get("end_ms"))
+        ) / 1000.0
+        cuts.append(
+            ExoMarker(
+                start,
+                end,
+                f"[CUT] {_cut_kind_label(item.get('candidate_kind'), locale)}",
+            )
+        )
+    for item in artifact.get("editorial_map", {}).get("final_actions", []):
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        start = source_offsets[source_id] + max(0, _integer(item.get("start_ms"))) / 1000.0
+        end = source_offsets[source_id] + max(
+            _integer(item.get("start_ms")) + 1, _integer(item.get("end_ms"))
+        ) / 1000.0
+        if str(item.get("action_type") or "") in {
+            "narrated_summary",
+            "narration_bridge",
+        }:
+            narration.append(
+                ExoMarker(start, end, locale_label(locale, "NARRATION", "ナレーション"))
+            )
+    return [layer for layer in (cuts, narration) if layer]
+
+
+def _human_information_marker_layers(
+    artifact: dict[str, Any], source_offsets: dict[str, float]
+) -> list[list[ExoMarker]]:
+    cuts: list[ExoMarker] = []
+    narration: list[ExoMarker] = []
+    locale = str(artifact.get("output_locale") or "en")
+    editorial_map = artifact.get("editorial_map", {})
+    for item in editorial_map.get("confirmed_cuts", []):
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        start_ms = max(0, _integer(item.get("start_ms")))
+        end_ms = max(start_ms + 1, _integer(item.get("end_ms")))
+        cuts.append(
+            ExoMarker(
+                source_offsets[source_id] + start_ms / 1000.0,
+                source_offsets[source_id] + end_ms / 1000.0,
+                "[CUT]",
+            )
+        )
+    for item in editorial_map.get("final_actions", []):
+        if not isinstance(item, dict) or str(item.get("action_type") or "") not in {
+            "narrated_summary",
+            "narration_bridge",
+        }:
+            continue
+        source_id = str(item.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        start_ms = max(0, _integer(item.get("start_ms")))
+        end_ms = max(start_ms + 1, _integer(item.get("end_ms")))
+        direction = " ".join(str(item.get("instruction") or "").split())[:240]
+        marker_text = locale_label(locale, "NARRATION", "ナレーション")
+        if direction:
+            marker_text += "\n" + "\n".join(
+                textwrap.wrap(
+                    direction,
+                    width=40,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+        narration.append(
+            ExoMarker(
+                source_offsets[source_id] + start_ms / 1000.0,
+                source_offsets[source_id] + end_ms / 1000.0,
+                marker_text,
+            )
+        )
+    return [layer for layer in (cuts, narration) if layer]
+
+
+def _event_graph_marker_layers(
+    artifact: dict[str, Any], source_offsets: dict[str, float]
+) -> list[list[ExoMarker]]:
+    """Project rich stored context into two restrained editor-facing rows."""
+    locale = str(artifact.get("output_locale") or "en")
+    local_states: list[ExoMarker] = []
+    primary_activities: list[ExoMarker] = []
+
+    for source in sorted(artifact.get("sources", []), key=lambda item: item.get("order", 0)):
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        offset = source_offsets[source_id]
+        result = source.get("result") if isinstance(source.get("result"), dict) else {}
+        graph = result.get("event_graph") if isinstance(result.get("event_graph"), dict) else {}
+        for item in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            label = _context_marker_label(
+                item.get("observed_label")
+                or item.get("visual_state")
+                or item.get("visual_category")
+            )
+            if not label or label.casefold() in {"unknown", "unobserved"}:
+                continue
+            start_ms = max(0, _integer(item.get("start_ms")))
+            end_ms = max(start_ms + 1, _integer(item.get("end_ms")))
+            local_states.append(
+                ExoMarker(
+                    offset + start_ms / 1000.0,
+                    offset + end_ms / 1000.0,
+                    f'{locale_label(locale, "[State]", "[状況]")} {label}',
+                )
+            )
+        primary_activities.extend(
+            _primary_activity_markers(
+                result.get("activity_episodes"),
+                offset_seconds=offset,
+                prefix=locale_label(locale, "[Activity]", "[活動]"),
+            )
+        )
+    return [
+        layer
+        for layer in (
+            _merge_adjacent_context_markers(local_states),
+            _merge_adjacent_context_markers(primary_activities),
+        )
+        if layer
+    ]
+
+
+def _context_marker_label(value: Any) -> str:
+    label = " ".join(str(value or "").split())
+    for separator in ("。", ". ", "！", "! ", "？", "? "):
+        if separator in label:
+            label = label.split(separator, 1)[0]
+            break
+    return label[:64]
+
+
+def _primary_activity_markers(
+    values: Any, *, offset_seconds: float, prefix: str
+) -> list[ExoMarker]:
+    episode_values = values if isinstance(values, list) else []
+    episodes = [
+        item
+        for item in episode_values
+        if isinstance(item, dict)
+        if _integer(item.get("level") or 1) == 1
+        and _integer(item.get("end_ms")) > _integer(item.get("start_ms"))
+        and _context_marker_label(item.get("label"))
+    ]
+    boundaries = sorted(
+        {
+            point
+            for item in episodes
+            for point in (
+                max(0, _integer(item.get("start_ms"))),
+                max(0, _integer(item.get("end_ms"))),
+            )
+        }
+    )
+    markers: list[ExoMarker] = []
+    for start_ms, end_ms in zip(boundaries, boundaries[1:]):
+        active = [
+            item
+            for item in episodes
+            if _integer(item.get("start_ms")) < end_ms
+            and _integer(item.get("end_ms")) > start_ms
+        ]
+        if not active:
+            continue
+        chosen = max(
+            active,
+            key=lambda item: (
+                float(item.get("confidence") or 0.0),
+                _integer(item.get("end_ms")) - _integer(item.get("start_ms")),
+            ),
+        )
+        markers.append(
+            ExoMarker(
+                offset_seconds + start_ms / 1000.0,
+                offset_seconds + end_ms / 1000.0,
+                f"{prefix} {_context_marker_label(chosen.get('label'))}",
+            )
+        )
+    return _merge_adjacent_context_markers(markers)
+
+
+def _merge_adjacent_context_markers(markers: list[ExoMarker]) -> list[ExoMarker]:
+    merged: list[ExoMarker] = []
+    for marker in sorted(markers, key=lambda item: (item.start_time, item.end_time)):
+        if (
+            merged
+            and merged[-1].text == marker.text
+            and marker.start_time <= merged[-1].end_time + 0.001
+        ):
+            merged[-1].end_time = max(merged[-1].end_time, marker.end_time)
+        else:
+            merged.append(ExoMarker(marker.start_time, marker.end_time, marker.text))
+    return merged
+
+
+def _cut_kind_label(value: Any, locale: str) -> str:
+    labels = {
+        "silence": ("Silence", "無音"),
+        "filler": ("Filler speech", "フィラー"),
+        "unnecessary_speech": ("Unnecessary speech", "不要な発話"),
+        "irrelevant_topic": ("Irrelevant topic", "無関係な話題"),
+        "idle_or_admin": ("Waiting / administration", "待機・事務操作"),
+    }
+    english, japanese = labels.get(str(value or ""), ("Cut", "カット"))
+    return locale_label(locale, english, japanese)
+
+
+def _utterance_reference_markers(
+    artifact: dict[str, Any], source_offsets: dict[str, float]
+) -> list[ExoMarker]:
+    markers: list[ExoMarker] = []
+    locale = str(artifact.get("output_locale") or "en")
+    ordinal = 1
+    for source in sorted(artifact.get("sources", []), key=lambda item: item.get("order", 0)):
+        if not isinstance(source, dict):
+            continue
+        source_id = str(source.get("source_id") or "")
+        if source_id not in source_offsets:
+            continue
+        result = source.get("result") if isinstance(source.get("result"), dict) else {}
+        utterances = result.get("utterance_groups", [])
+        cut_ranges = sorted(
+            (
+                max(0, _integer(cut.get("start_ms"))),
+                max(0, _integer(cut.get("end_ms"))),
+            )
+            for cut in artifact.get("editorial_map", {}).get("confirmed_cuts", [])
+            if isinstance(cut, dict)
+            and str(cut.get("source_id") or "") == source_id
+            and _integer(cut.get("end_ms")) > _integer(cut.get("start_ms"))
+        )
+        for item in utterances if isinstance(utterances, list) else []:
+            if not isinstance(item, dict):
+                continue
+            start_ms = max(0, _integer(item.get("start_ms")))
+            end_ms = max(start_ms + 1, _integer(item.get("end_ms")))
+            # A generated cut preserves a short audio handle around speech. Make
+            # that handle visibly belong to the adjacent utterance instead of
+            # leaving an unexplained sliver between its guide and [CUT]. Stored
+            # transcript timing remains untouched.
+            for cut_start_ms, cut_end_ms in cut_ranges:
+                if start_ms - VOICE_LEADING_HANDLE_MS <= cut_end_ms < start_ms:
+                    start_ms = cut_end_ms
+                if end_ms < cut_start_ms <= end_ms + VOICE_TRAILING_HANDLE_MS:
+                    end_ms = cut_start_ms
+            excerpt = " ".join(str(item.get("text") or "").split())
+            prefix = locale_label(locale, f"Utterance {ordinal:04d}", f"発話 {ordinal:04d}")
+            chunks = [excerpt[index : index + 850] for index in range(0, len(excerpt), 850)]
+            if not chunks:
+                chunks = [""]
+            for chunk_index, chunk in enumerate(chunks, 1):
+                chunk_prefix = (
+                    prefix
+                    if len(chunks) == 1
+                    else f"{prefix} ({chunk_index}/{len(chunks)})"
+                )
+                full_text = f"{chunk_prefix}: {chunk}" if chunk else chunk_prefix
+                wrapped = "\n".join(
+                    textwrap.wrap(
+                        full_text,
+                        width=80,
+                        break_long_words=True,
+                        break_on_hyphens=False,
+                    )
+                )
+                markers.append(
+                    ExoMarker(
+                        source_offsets[source_id] + start_ms / 1000.0,
+                        source_offsets[source_id] + end_ms / 1000.0,
+                        wrapped,
+                    )
+                )
+            ordinal += 1
+    return markers
+
+
+def _nonoverlapping_marker_lanes(markers: list[ExoMarker]) -> list[list[ExoMarker]]:
+    lanes: list[list[ExoMarker]] = []
+    lane_ends: list[float] = []
+    for marker in sorted(
+        markers, key=lambda item: (item.start_time, item.end_time, item.text)
+    ):
+        for index, occupied_until in enumerate(lane_ends):
+            if marker.start_time >= occupied_until:
+                lanes[index].append(marker)
+                lane_ends[index] = marker.end_time
+                break
+        else:
+            lanes.append([marker])
+            lane_ends.append(marker.end_time)
+    return lanes
+
+
+def _selected_editorial_subtitles(
     artifact: dict[str, Any], source_offsets: dict[str, float]
 ) -> list[Subtitle]:
     result: list[Subtitle] = []
@@ -202,14 +669,13 @@ def _emphasized_subtitles(
             continue
         text = str(item.get("text") or "").strip()
         if text and end > start:
+            text = " ".join(text.split())
             result.append(
                 Subtitle(
                     start,
                     end,
                     text,
-                    outline_color=_emphasis_outline_color(
-                        item.get("emphasis_energy")
-                    ),
+                    outline_color=_emphasis_outline_color(item.get("emphasis_energy")),
                 )
             )
     return sorted(result, key=lambda item: (item.start_time, item.end_time))
@@ -315,6 +781,13 @@ def _source_edit_boundaries(
         end_ms = max(0, min(duration_ms, _integer(action.get("end_ms"))))
         if end_ms > start_ms:
             values.update((start_ms, end_ms))
+        for operation in action.get("operation_ranges", []):
+            if not isinstance(operation, dict) or str(operation.get("source_id") or "") != source_id:
+                continue
+            operation_start = max(0, min(duration_ms, _integer(operation.get("start_ms"))))
+            operation_end = max(0, min(duration_ms, _integer(operation.get("end_ms"))))
+            if operation_end > operation_start:
+                values.update((operation_start, operation_end))
     return sorted(values)
 
 
@@ -328,7 +801,21 @@ def _human_marker_text(presented: PresentedEditorialItem, locale: str = "en") ->
         max_lines=2,
         placeholder="...",
     )
-    return "\n".join((presented.label, category_label(presented.category, locale), *wrapped))
+    return "\n".join((presented.label, _marker_action_label(presented, locale), *wrapped))
+
+
+def _marker_action_label(presented: PresentedEditorialItem, locale: str) -> str:
+    """Describe the exact timeline operation rather than its parent strategy."""
+    operation_role = str(presented.item.get("operation_role") or "")
+    if operation_role == "keep":
+        return locale_label(locale, "KEEP RANGE", "残す区間")
+    if operation_role == "remove":
+        return locale_label(locale, "CUT", "カット")
+    if operation_role == "reference":
+        return locale_label(locale, "REFERENCE VISUAL", "参照映像")
+    if operation_role == "move":
+        return locale_label(locale, "MOVE RANGE", "移動区間")
+    return category_label(presented.category, locale)
 
 
 def _canvas_settings(sources: list[dict[str, Any]]) -> ExoSettings:

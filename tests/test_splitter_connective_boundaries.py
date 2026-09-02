@@ -46,6 +46,23 @@ class ConnectiveBoundaryTests(unittest.TestCase):
 
         self.assertTrue(_is_legal_boundary(tokens, 5))
 
+    def test_boundary_inside_desu_kedomo_is_illegal(self) -> None:
+        tokens = _tokens("短い前置きですけども次の話です")
+
+        self.assertFalse(_is_legal_boundary(tokens, len("短い前置きです")))
+        self.assertTrue(_is_legal_boundary(tokens, len("短い前置きですけども")))
+
+    def test_boundary_inside_masu_question_is_illegal(self) -> None:
+        tokens = _tokens("ここで終わりますか、次の話です")
+
+        self.assertFalse(_is_legal_boundary(tokens, len("ここで終わります")))
+        self.assertTrue(_is_legal_boundary(tokens, len("ここで終わりますか、")))
+
+    def test_boundary_before_bare_kedomo_is_illegal(self) -> None:
+        tokens = _tokens("前の話けども次の話です")
+
+        self.assertFalse(_is_legal_boundary(tokens, len("前の話")))
+
     def test_deterministic_split_places_mo_phrase_on_previous_tail(self) -> None:
         subtitles = split_token_chain(
             _tokens("前の話も、続きですさらに続く"),
@@ -83,6 +100,55 @@ class ConnectiveBoundaryTests(unittest.TestCase):
 
         self.assertEqual([_tokens_to_text(segment.tokens) for segment in repaired], ["あいうえ", "も、続き"])
         self.assertIn("connective_head_unrepaired", repaired[1].source)
+
+    def test_bare_kedomo_head_moves_to_previous_subtitle(self) -> None:
+        segments = [
+            TokenSegment(_tokens("前の話"), "left"),
+            TokenSegment(_tokens("けども次の話"), "right"),
+        ]
+
+        repaired = _assert_or_repair_connective_heads(segments, max_chars=20)
+
+        self.assertEqual(
+            [_tokens_to_text(segment.tokens) for segment in repaired],
+            ["前の話けども", "次の話"],
+        )
+
+    def test_question_particle_head_moves_to_previous_subtitle(self) -> None:
+        segments = [
+            TokenSegment(_tokens("ここで終わります"), "left"),
+            TokenSegment(_tokens("か、次の話"), "right"),
+        ]
+
+        repaired = _assert_or_repair_connective_heads(segments, max_chars=20)
+
+        self.assertEqual(
+            [_tokens_to_text(segment.tokens) for segment in repaired],
+            ["ここで終わりますか、", "次の話"],
+        )
+
+    def test_over_limit_kedomo_boundary_does_not_strand_clause_ending(self) -> None:
+        subtitles = split_token_chain(
+            _tokens("あ" * 37 + "ですけども" + "次の話を詳しく説明する内容" * 4),
+            max_chars=40,
+            max_duration=6.0,
+        )
+
+        self.assertFalse(any(subtitle.text == "ですけども" for subtitle in subtitles))
+        self.assertFalse(any(subtitle.text == "けども" for subtitle in subtitles))
+        continued = next(subtitle.text for subtitle in subtitles if subtitle.text.startswith("ですけども"))
+        self.assertGreater(len(continued), len("ですけども"))
+
+    def test_over_limit_question_boundary_does_not_strand_particle(self) -> None:
+        subtitles = split_token_chain(
+            _tokens("あ" * 37 + "ますか、" + "次の話を詳しく説明する内容" * 4),
+            max_chars=40,
+            max_duration=6.0,
+        )
+
+        self.assertFalse(any(subtitle.text in {"か", "か、", "、"} for subtitle in subtitles))
+        continued = next(subtitle.text for subtitle in subtitles if subtitle.text.startswith("ますか、"))
+        self.assertGreater(len(continued), len("ますか、"))
 
     def test_subtitle_text_and_timing_match_token_slice(self) -> None:
         subtitles = split_token_chain(

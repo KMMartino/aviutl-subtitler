@@ -9,13 +9,13 @@ import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Literal, Sequence
 from uuid import uuid4
 
 from .errors import SubtitlerError
 
 
-EDITORIAL_SCHEMA_VERSION = 3
+EDITORIAL_SCHEMA_VERSION = 4
 FINGERPRINT_ALGORITHM = "sha256-sampled-v1"
 CHECKPOINT_STAGES = (
     "source_probe",
@@ -25,25 +25,30 @@ CHECKPOINT_STAGES = (
     "local_reconciliation",
 )
 GLOBAL_CHECKPOINT_STAGE = "global_reconciliation"
+ACTION_CHECKPOINT_STAGE = "action_planning"
 ASSET_CHECKPOINT_STAGE = "editorial_assets"
-PROJECT_CHECKPOINT_STAGES = (GLOBAL_CHECKPOINT_STAGE, ASSET_CHECKPOINT_STAGE)
+PROJECT_CHECKPOINT_STAGES = (
+    GLOBAL_CHECKPOINT_STAGE,
+    ACTION_CHECKPOINT_STAGE,
+    ASSET_CHECKPOINT_STAGE,
+)
 EDITORIAL_PIPELINE_STAGES = (*CHECKPOINT_STAGES, *PROJECT_CHECKPOINT_STAGES)
 SOURCE_DERIVED_EDITORIAL_FIELDS = (
     "recommendations",
     "narration_briefs",
     "creative_suggestions",
-    "emphasized_phrases",
     "timeline_coverage",
 )
 # Increment the matching boundary version whenever its artifact contract or
 # behavior changes. See AGENTS.md for the mandatory maintenance rule.
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
     "source_probe": 2,
-    "transcription": 5,
-    "visual_learning": 6,
-    "semantic_spans": 4,
+    "transcription": 11,
+    "visual_learning": 15,
+    "semantic_spans": 10,
     "local_reconciliation": 1,
-    "global_reconciliation": 5,
+    "global_reconciliation": 10,
+    "action_planning": 11,
     "editorial_assets": 1,
 }
 LEGACY_EDITORIAL_STAGE_VERSIONS = {stage: 1 for stage in EDITORIAL_PIPELINE_STAGES}
@@ -213,9 +218,9 @@ def create_editorial_project(
         "objective": options.objective.strip(),
         "target_duration_min_ms": options.target_duration_min_ms,
         "target_duration_max_ms": options.target_duration_max_ms,
-        "must_keep_notes": _clean_notes(options.must_keep_notes),
-        "de_emphasize_notes": _clean_notes(options.de_emphasize_notes),
-        "subtitle_mode": options.subtitle_mode,
+        "must_keep_notes": [],
+        "de_emphasize_notes": [],
+        "subtitle_mode": "full",
         "output_locale": options.output_locale,
         "pipeline_versions": dict(EDITORIAL_STAGE_VERSIONS),
         "sources": source_records,
@@ -223,6 +228,7 @@ def create_editorial_project(
         "editorial_map": {
             "status": "pending",
             "global_reconciliation": _new_stage_checkpoint(GLOBAL_CHECKPOINT_STAGE),
+            "action_planning": _new_stage_checkpoint(ACTION_CHECKPOINT_STAGE),
             "editorial_assets": _new_stage_checkpoint(ASSET_CHECKPOINT_STAGE),
             "global_threads": [],
             "recommendations": [],
@@ -240,6 +246,15 @@ def create_editorial_project(
             "final_actions": [],
             "supporting_edits": [],
             "editorial_threads": [],
+            "payoff_threads": [],
+            "story_actions": [],
+            "workflow": None,
+            "protected_zones": [],
+            "cut_candidates": [],
+            "confirmed_cuts": [],
+            "removed_ms": 0,
+            "narration_replaced_ms": 0,
+            "prompt_version": None,
             "assets": [],
         },
         "run_provenance": {
@@ -263,9 +278,9 @@ def extend_editorial_project(
         artifact["objective"] = options.objective.strip()
         artifact["target_duration_min_ms"] = options.target_duration_min_ms
         artifact["target_duration_max_ms"] = options.target_duration_max_ms
-        artifact["must_keep_notes"] = _clean_notes(options.must_keep_notes)
-        artifact["de_emphasize_notes"] = _clean_notes(options.de_emphasize_notes)
-        artifact["subtitle_mode"] = options.subtitle_mode
+        artifact["must_keep_notes"] = []
+        artifact["de_emphasize_notes"] = []
+        artifact["subtitle_mode"] = "full"
         return
     temporary = create_editorial_project(sources, options)
     existing_paths = {
@@ -299,9 +314,9 @@ def extend_editorial_project(
     artifact["objective"] = options.objective.strip()
     artifact["target_duration_min_ms"] = options.target_duration_min_ms
     artifact["target_duration_max_ms"] = options.target_duration_max_ms
-    artifact["must_keep_notes"] = _clean_notes(options.must_keep_notes)
-    artifact["de_emphasize_notes"] = _clean_notes(options.de_emphasize_notes)
-    artifact["subtitle_mode"] = options.subtitle_mode
+    artifact["must_keep_notes"] = []
+    artifact["de_emphasize_notes"] = []
+    artifact["subtitle_mode"] = "full"
 
 
 def write_editorial_checkpoint(path: Path, artifact: dict[str, Any]) -> None:
@@ -336,6 +351,7 @@ def load_editorial_checkpoint(path: Path) -> dict[str, Any]:
         raise SubtitlerError("Editorial checkpoint must contain a JSON object")
     _upgrade_legacy_checkpoint(value)
     _upgrade_output_locale(value)
+    _upgrade_action_planning_stage(value)
     _upgrade_versionless_boundaries(value)
     _upgrade_editorial_map_fields(value)
     _repair_source_derived_editorial_fields(value)
@@ -567,6 +583,30 @@ def _upgrade_output_locale(artifact: dict[str, Any]) -> None:
     if artifact.get("schema_version") != 2:
         return
     artifact["output_locale"] = "en"
+    artifact["schema_version"] = 3
+
+
+def _upgrade_action_planning_stage(artifact: dict[str, Any]) -> None:
+    """Add the separately resumable executable-planning boundary."""
+    if artifact.get("schema_version") != 3:
+        return
+    versions = artifact.get("pipeline_versions")
+    action_version = 1
+    if isinstance(versions, dict):
+        action_version = int(versions.setdefault(ACTION_CHECKPOINT_STAGE, 1))
+    editorial_map = artifact.get("editorial_map")
+    if isinstance(editorial_map, dict):
+        # Schema 3 predates this boundary. Treat any stray value as non-durable
+        # rather than pairing it with a synthetic version and accepting it.
+        editorial_map[ACTION_CHECKPOINT_STAGE] = {
+            "version": action_version,
+            "status": "pending",
+            "attempts": 0,
+            "started_at_utc": None,
+            "completed_at_utc": None,
+            "error": "",
+            "output": None,
+        }
     artifact["schema_version"] = EDITORIAL_SCHEMA_VERSION
 
 
@@ -603,12 +643,25 @@ def _upgrade_versionless_boundaries(artifact: dict[str, Any]) -> None:
 
 
 def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
-    artifact.setdefault("subtitle_mode", "full")
+    # The old user-selectable subtitle mode was experimental. Existing
+    # checkpoints remain readable; editorial selection now happens after planning.
+    artifact["subtitle_mode"] = "full"
+    artifact["must_keep_notes"] = []
+    artifact["de_emphasize_notes"] = []
     editorial_map = artifact.get("editorial_map")
     if not isinstance(editorial_map, dict):
         return
     editorial_map.setdefault("creative_suggestions", [])
     editorial_map.setdefault("emphasized_phrases", [])
+    if isinstance(editorial_map["emphasized_phrases"], list):
+        unique_phrases: list[Any] = []
+        seen_phrases: set[str] = set()
+        for phrase in editorial_map["emphasized_phrases"]:
+            identity = json.dumps(phrase, ensure_ascii=False, sort_keys=True)
+            if identity not in seen_phrases:
+                seen_phrases.add(identity)
+                unique_phrases.append(phrase)
+        editorial_map["emphasized_phrases"] = unique_phrases
     editorial_map.setdefault("timeline_coverage", [])
     editorial_map.setdefault("director_review", None)
     editorial_map.setdefault("director_model", None)
@@ -617,6 +670,15 @@ def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
     editorial_map.setdefault("final_actions", [])
     editorial_map.setdefault("supporting_edits", [])
     editorial_map.setdefault("editorial_threads", [])
+    editorial_map.setdefault("payoff_threads", [])
+    editorial_map.setdefault("story_actions", [])
+    editorial_map.setdefault("workflow", None)
+    editorial_map.setdefault("protected_zones", [])
+    editorial_map.setdefault("cut_candidates", [])
+    editorial_map.setdefault("confirmed_cuts", [])
+    editorial_map.setdefault("removed_ms", 0)
+    editorial_map.setdefault("narration_replaced_ms", 0)
+    editorial_map.setdefault("prompt_version", None)
     editorial_map.setdefault("assets", [])
 
 
@@ -661,21 +723,9 @@ def _validate_options(options: EditorialProjectOptions) -> None:
     if options.target_duration_max_ms < options.target_duration_min_ms:
         raise SubtitlerError("Editorial target duration range is invalid")
     if options.subtitle_mode not in {"full", "emphasis"}:
-        raise SubtitlerError("Editorial subtitle mode must be full or emphasis")
+        raise SubtitlerError("Editorial subtitle mode is invalid")
     if options.output_locale not in {"en", "ja"}:
         raise SubtitlerError("Editorial output locale must be English or Japanese")
-
-
-def _clean_notes(notes: Iterable[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for note in notes:
-        cleaned = note.strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            result.append(cleaned)
-            seen.add(key)
-    return result
 
 
 def _new_stage_checkpoint(stage: str) -> dict[str, Any]:

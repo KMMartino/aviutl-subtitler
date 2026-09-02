@@ -11,9 +11,7 @@
     "track": 1
   },
   "workflow": {
-    "mode": "long-stream",
-    "transcription_scope": "full",
-    "long_stream_min_chunks": 1
+    "mode": "long-stream"
   },
   "alignment": {
     "max_split_depth": 4,
@@ -33,7 +31,6 @@
   "additional_settings": {
     "youtube_chapters": false,
     "cut_silence_mode": "off",
-    "render_cut_video": false,
-    "editorial_map_mode": "off"
+    "render_cut_video": false
   }
 }

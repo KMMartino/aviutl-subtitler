@@ -24,6 +24,7 @@ class TranscriptChunk:
     chunk: AudioChunk
     text: str
     error: str = ""
+    tokens: list["AlignedToken"] = field(default_factory=list)
 
 
 @dataclass

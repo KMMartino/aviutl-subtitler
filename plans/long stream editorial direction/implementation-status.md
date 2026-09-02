@@ -1,59 +1,90 @@
 # Implementation status
 
-## First vertical slice
+## Active product contract
 
-Implemented and covered by automated tests:
+The hosted long-stream workflow is a human editing assistant. It analyzes the complete
+recording, but it does not decide what gameplay or speech should be removed. Its current
+contract is defined in [`human-information-baseline.md`](human-information-baseline.md).
 
-- Full detected-speech transcription is the default for local and hosted long-stream workflows.
-- High-activity-only transcription remains available as an optional additional setting.
-- Hosted long-stream projects can enable suggestion-only editorial mapping.
-- Multi-file selection, chronological reordering, total-duration display, required title/objective fields, optional must-keeps and de-emphasis notes, and a dual-ended final-duration control are available in the UI.
-- A logical source may be one normal recording or a synchronized facecam/gameplay pair. Matching `xyz-role` and `xyz.role` names are classified with loose face/camera/game terms, then resolution; unresolved equal-resolution roles require user confirmation.
-- Paired files must be within ten gameplay frames in duration. Otherwise they remain ordinary single-file sources. Confirmed pairs transcribe voice audio from the facecam file and sample vision from the gameplay file.
-- Pair roles, the inference basis, durations, frame rate, paths, and independent fingerprints are stored in the checkpoint. Resume therefore does not rerun filename or resolution inference, and either moved member can be relinked independently.
-- Sources are processed serially with a persistent cumulative context. Source-file boundaries receive no special editorial treatment.
-- Source fingerprints are independent of names and timestamps. Resume verifies the original content and refuses mismatched replacements.
-- Transcription, visual learning, semantic spans, local reconciliation, global reconciliation, and final editorial-asset lookup have separate atomic checkpoints.
-- Every durable boundary now carries a manually maintained integer version: source probe, transcription, visual learning, semantic spans, local reconciliation, global suggestion generation, and reference-asset lookup. Resume compares the ordered vector and invalidates from the first mismatch through the end of the pipeline.
-- Failed runs default to continuing at the exact incomplete source/stage. Successful compatible runs default to regenerating only global suggestions, while the user may deliberately restart any earlier boundary.
-- Selecting the same fingerprinted media automatically offers reuse when its default sibling checkpoint exists. The manual checkpoint picker provides the same restart-boundary choice. Matching files moved to new paths are relinked before execution.
-- `AGENTS.md` requires every future boundary behavior or artifact-contract change to review and increment the earliest affected version.
-- Restart from checkpoint is exposed in the UI. Completed model stages are not repeated.
-- The per-source semantic prompt records continuity, subtraction, selection, and context-dependency evidence separately. Silence is explicitly neutral.
-- The project-wide pass selects one optimal proposal within the requested duration range and resolves redundant overlapping candidates instead of presenting competing upper- and lower-bound plans. Per-action duration estimates remain internal rather than asking the editor to hit numerical clip lengths.
-- A separate authoritative director pass may accept, revise, merge, split, or reject preliminary recommendations. It emits one operational primary action per editorial problem, explicitly linked supporting edits, and colored long-range threads. Timestamp overlap alone never attaches narration or an effect.
-- Final actions use a finite canonical catalog spanning timeline operations, narration treatments, accents, continuity edits, and manual review. Each type records the concrete dispatch method and automation readiness needed by a future automatic editor.
-- Narration is a primary treatment used sparingly. A preserve action cannot carry a narration brief, and a mixed range must be trimmed or split rather than described as “keep” with a shorter target length.
-- The authoritative primary plan is normalized into complete, non-overlapping timeline coverage. Unselected gaps become explicit preserve actions, adjacent preserves are merged, and concrete interventions take precedence over conflicting preserve ranges.
-- Reference-dependent final suggestions trigger a separate bounded vision pass. It searches existing visual-learning ranges, presents a small frame set to vision, stores a selected timecode and crop, and marks unsupported claims for manual verification.
-- The HTML report uses a chronological three-column timeline/action/support layout. Opening direction numbers link to the same numbered cards, action families and distant threads have separate color channels, and verified reference crops appear beside their exact supporting edit.
-- The EXO uses the same canonical final plan without repeating primary editorial prose. Source media is pre-split at primary-action boundaries; each linked chunk carries a grouped top-left direction number matching the HTML plan, while only concrete local supporting edits such as punch-ins retain text markers. It does not expose internal IDs or per-action duration targets.
-- Partial subtitle mode is semantically selected by the Luna editorial pass, with acoustic activation treated only as supporting evidence. Selected phrases carry a -1 to +1 delivery/meaning score that styles both outline filters from blue through black to red, and they are placed at Y=708.
-- Canonical JSON and a self-contained readable HTML report are written throughout the run, including on interruption.
-- Actual hosted costs are accumulated in the artifact and report, with an initial project safety policy of $10 per source hour. Existing transcription estimates and approval guards remain active.
+The active pipeline provides:
 
-Production code and tests contain no reference to the FF16 example, its paths, its terminology, or creator-specific detectors.
+- full transcription and aligned spoken evidence;
+- dense visual and acoustic observations;
+- persistent, bounded knowledge associated with the user-selected game or title;
+- factual semantic spans, atomic events, longer activity phases, and cross-file context;
+- project-wide factual synthesis, long-horizon threads, and selective narration possibilities;
+- selected, cleaned on-screen subtitles plus visible full-utterance guides;
+- deterministic `[CUT]` markers for voice-free gaps of at least two seconds; and
+- JSON, HTML, and EXO artifacts with resumable, versioned checkpoints.
 
-## Deliberately incomplete
+The user-edited EXO is authoritative. A user may move, resize, duplicate, or delete an exact
+`[CUT]` object on the reserved cut layer. Reimport applies those reviewed ranges directly.
+Retained narration markers invalidate overlapping cuts only during that reviewed reimport.
+Narration review creates a separate two-column HTML report with factual events and illustrated
+candidate footage; it does not replace narration markers with large EXO text dumps.
 
-- The HTML timeline is readable and navigable but does not yet provide interactive filters.
-- Matching a complete selected source set can relink moved files automatically. A partial per-source relinking dialog for projects whose remaining files are unavailable is not yet implemented; the backend relink command remains available.
-- Global reconciliation uses the collected per-source recommendations and summaries. Retrieval over very large projects and refinement of cross-file thread matching will need real evaluation data.
-- Cost accounting is durable, but vision and reasoning requests do not yet expose a complete preflight estimate alongside transcription before the run begins.
-- No automatic edits, rearrangement, montage construction, chat processing, OCR, or diarization are implemented.
+## Source and checkpoint handling
 
-## Recommended next validation
+- A project may contain multiple chronological source files. Each source is processed and
+  checkpointed independently, then carried into the next source as ordinary context.
+- A logical source may be a normal recording or a synchronized gameplay/facecam pair. Paired
+  projects analyze gameplay video, transcribe facecam audio, and emit both media streams in the
+  correct AviUtl layer order.
+- Fingerprints verify source identity independently of filenames and timestamps. Compatible
+  artifacts can be resumed from the earliest matching boundary.
+- The durable boundaries remain source probe, transcription, visual learning, semantic spans,
+  local reconciliation, global reconciliation, action planning, and editorial assets. The last
+  boundary is retained for checkpoint compatibility and now represents dashboard/output
+  preparation for ordinary human-information runs.
+- The semantic boundary stores factual observations only. It no longer generates provisional
+  edit recommendations, narration, effects, or targeted visual adjudication.
+- Partial semantic-window progress includes the prompt version, preventing an interrupted run
+  from reusing windows produced under a different semantic contract.
 
-Build the desktop app and use a small, non-reference project containing two or three short source files. Verify:
+## Output structure
 
-1. source selection, ordering, and duration-range interaction;
-2. filename-, resolution-, and manually resolved facecam/gameplay pairing, including the ten-frame fallback;
-3. full-transcript default and optional high-activity setting;
-4. interruption during vision or semantic analysis followed by restart from checkpoint;
-5. cross-file continuation in the HTML/JSON result;
-6. whether the single selected plan lands within the requested duration range without redundant local suggestions;
-7. whether narration is sparse, preserve/narration contradictions are absent, and long-range thread colors make connections legible;
-8. whether reference-dependent ideas select a truthful, useful crop or clearly fall back to manual verification;
-9. actual cost, timeline readability, and concise EXO marker placement.
+- Selected subtitles use the stream-oriented compact style and remain aligned to source speech.
+- Utterance objects expose the complete aligned thought for human reference and may extend into
+  the small 50 ms leading and 100 ms trailing speech handles adjacent to generated cuts.
+- Event objects use concise factual labels at multiple scales. Machine IDs, confidence values,
+  reasoning, and causal arrows are not displayed.
+- Narration possibilities are intentionally sparse. The portable guidance is documented in
+  [`narration-practices.md`](narration-practices.md); runtime behavior never depends on the
+  downloaded reference videos or any earlier FF16 example.
+- The HTML dashboard summarizes factual progression, threads, phases, narration possibilities,
+  selected subtitle counts, source state, and end-to-end hosted cost without listing every VAD
+  gap or presenting retired editorial recommendations.
 
-Do not use the FF16 example as a required fixture or implementation dependency.
+## Retired experiments
+
+The following are not active product behavior and should not be reintroduced through stale
+configuration, prompts, or tests:
+
+- high-activity-only long-stream transcription;
+- optional long-stream editorial analysis;
+- transcript-based automatic cut nomination;
+- visual veto/adjudication of proposed cuts;
+- canonical automatic edit actions, duration-target planning, montage recommendations, creative
+  accents, or final director reconciliation;
+- automatic B-roll/reference-image selection during the initial run; and
+- EXO narration markers replaced by generated brief text.
+
+Older checkpoints may still contain fields from these experiments. Readers tolerate those
+fields so existing projects remain recoverable, but regenerated active artifacts do not depend
+on them.
+
+## Remaining product validation
+
+Use ordinary projects rather than reference-specific fixtures to verify:
+
+1. single-file, multi-file, and paired gameplay/facecam source handling;
+2. interruption and compatible restart at every paid boundary;
+3. factual event accuracy at opening, middle, ending, and cross-file transitions;
+4. selected subtitle density, timing, cleanup, wrapping, and utterance-guide readability;
+5. exact initial `[CUT]` placement and authoritative reviewed-EXO reimport;
+6. narration marker compatibility for both `ナレーション` and `[ナレーション]`;
+7. narration-review HTML timing, two-column layout, and representative images; and
+8. final EXO encoding, contractual layer order, dashboard rendering, and reported hosted cost.
+
+The future horizontal AviUtl-shaped event timeline and other deferred concepts remain in
+`plans/future ideas/`.

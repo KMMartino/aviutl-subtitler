@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowUp, ChevronDown, FilePlus2, LoaderCircle, Plus, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState, type DragEvent } from "react";
 import { buildEditorialSources, setPairedAudioRole, type EditorialMediaCandidate } from "../lib/editorialPairing";
-import type { EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialGameSummary, EditorialProjectRequest, EditorialRestartMode, EditorialSourceSelection, MediaAnalysis } from "../lib/types";
+import type { EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialCutApplicationResult, EditorialGameSummary, EditorialProjectRequest, EditorialRestartMode, EditorialSourceSelection, MediaAnalysis } from "../lib/types";
 import { useI18n } from "../i18n";
 import type { TranslationKey, TranslationParameters } from "../../shared/i18n";
 
@@ -14,6 +14,8 @@ type Props = {
   resumeRestartFrom: EditorialRestartMode;
   extensionCheckpoint: string;
   extensionBaseCount: number;
+  reviewedProject: string;
+  cutApplication: EditorialCutApplicationResult | null;
   onChange(value: EditorialProjectRequest): void;
   onRecoverProject(value: EditorialProjectRequest): void;
   onPrimarySource(path: string): void;
@@ -21,9 +23,10 @@ type Props = {
   onBeginExtension(path: string, analyzedSourceCount: number): void;
   onCancelExtension(path: string): void;
   onDeclineReuse(path: string): void;
+  onReviewedProject(path: string): void;
 };
 
-export default function EditorialProjectPanel({ value, disabled = false, resumeCheckpoint, resumeRestartFrom, extensionCheckpoint, extensionBaseCount, onChange, onRecoverProject, onPrimarySource, onResumeCheckpoint, onBeginExtension, onCancelExtension, onDeclineReuse }: Props) {
+export default function EditorialProjectPanel({ value, disabled = false, resumeCheckpoint, resumeRestartFrom, extensionCheckpoint, extensionBaseCount, reviewedProject, cutApplication, onChange, onRecoverProject, onPrimarySource, onResumeCheckpoint, onBeginExtension, onCancelExtension, onDeclineReuse, onReviewedProject }: Props) {
   const { locale, t } = useI18n();
   const [inspecting, setInspecting] = useState(false);
   const [error, setError] = useState("");
@@ -155,6 +158,20 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
   }
 
   async function addSources(paths: string[]) {
+    const projectFiles = paths.filter((path) => /\.(?:exo|aup)$/i.test(path));
+    if (projectFiles.length) {
+      if (paths.length !== 1) {
+        setError(t("editorial.reviewOneProject"));
+        return;
+      }
+      setError("");
+      if (/\.aup$/i.test(projectFiles[0])) {
+        setError(t("editorial.aupUnsupported"));
+        return;
+      }
+      onReviewedProject(projectFiles[0]);
+      return;
+    }
     const existingCandidates = value.sources.flatMap(sourceCandidates);
     const existing = new Set(existingCandidates.map((candidate) => candidate.path.toLocaleLowerCase()));
     const additions: EditorialMediaCandidate[] = [];
@@ -295,6 +312,7 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
     </>}
     {resumeCheckpoint && <div className="editorial-resume-row"><span title={resumeCheckpoint}><strong>{t("editorial.usingPrior")}</strong><small>{fileName(resumeCheckpoint)} · {restartLabel(resumeRestartFrom, t)}</small></span><button className="icon-button" aria-label={t("editorial.newInstead")} disabled={disabled} onClick={() => onResumeCheckpoint("", "compatible")}><X size={16} /></button></div>}
     {extensionCheckpoint && <div className="editorial-resume-row"><span title={extensionCheckpoint}><strong>{t("editorial.addingPrior")}</strong><small>{t("editorial.preservedSources", { count: extensionBaseCount, noun: locale === "ja" ? "件が" : extensionBaseCount === 1 ? "source is" : "sources are" })}</small></span><button className="icon-button" aria-label={t("editorial.cancelFollowups")} disabled={disabled} onClick={() => onCancelExtension(extensionCheckpoint)}><X size={16} /></button></div>}
+    {reviewedProject && <div className="editorial-resume-row"><span title={reviewedProject}><strong>{t("editorial.reviewReady")}</strong><small>{fileName(reviewedProject)} · {t("editorial.reviewReadyDetail")}</small></span><button className="icon-button" aria-label={t("editorial.clearReviewedProject")} disabled={disabled} onClick={() => onReviewedProject("")}><X size={16} /></button></div>}
     <fieldset disabled={disabled || Boolean(resumeCheckpoint)} className="editorial-new-project-fields">
     <div className="editorial-project-fields">
       <label><span className="field-label">{t("editorial.titleOrGame")}</span><div className="editorial-game-picker">
@@ -315,11 +333,8 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
       </div>
       <small>{t("editorial.durationSummary", { count: value.sources.length, noun: locale === "ja" ? "件 " : value.sources.length === 1 ? "source" : "sources", duration: formatDuration(totalSeconds, t) })}</small>
     </div>
-    <div className="editorial-project-fields optional">
-      <label><span className="field-label">{t("editorial.mustKeep")}</span><textarea disabled={disabled} rows={3} value={value.mustKeepNotes.join("\n")} onChange={(event) => onChange({ ...value, mustKeepNotes: lines(event.target.value) })} /></label>
-      <label><span className="field-label">{t("editorial.deemphasize")}</span><textarea disabled={disabled} rows={3} value={value.deEmphasizeNotes.join("\n")} onChange={(event) => onChange({ ...value, deEmphasizeNotes: lines(event.target.value) })} /></label>
-    </div>
     {error && <div className="field-error" role="alert">{error}</div>}
+    {cutApplication && <div className="editorial-cut-result" role="status"><span><strong>{t("editorial.cutsApplied")}</strong><small>{t("editorial.cutsAppliedSummary", { count: cutApplication.cutCount, duration: formatDuration(cutApplication.removedMs / 1000, t), ignored: cutApplication.ignoredShortCount })}</small><small>{t("editorial.narrationReviewSummary", { briefs: cutApplication.narrationBriefCount, references: cutApplication.narrationReferenceCount, cost: cutApplication.apiCostUsd.toFixed(4) })}</small><small title={cutApplication.outputPath}>{fileName(cutApplication.outputPath)}</small></span><div className="button-row"><button type="button" onClick={() => void window.subtitler.openPath(cutApplication.reportPath)}>{t("editorial.showNarrationReport")}</button><button type="button" onClick={() => void window.subtitler.showItemInFolder(cutApplication.outputPath)}>{t("editorial.showAppliedExo")}</button></div></div>}
     </fieldset>
     {checkpointPickerOpen && <div className="editorial-checkpoint-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCheckpointPickerOpen(false); }}>
       <section className="editorial-checkpoint-modal" role="dialog" aria-modal="true" aria-label={t("editorial.checkpointDialog")}>
@@ -340,10 +355,6 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
       </section>
     </div>}
   </section>;
-}
-
-function lines(value: string): string[] {
-  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function fileName(path: string): string {

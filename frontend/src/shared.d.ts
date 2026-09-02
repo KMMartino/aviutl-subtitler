@@ -1,4 +1,4 @@
-import type { AlignmentModelStatus, AppSettings, AppState, BrollReviewDecision, CurrentLlamaServerState, EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialGameSummary, EditorialSourceSelection, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetAnalysisEstimate, MediaAssetAnalysisResult, MediaAssetDetail, MediaAssetKind, MediaAssetListRequest, MediaAssetListResult, MediaBulkAnalysisPlan, MediaLibraryDirectory, MediaLibraryRoot, MediaLibraryScanResult, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WebAssetAcquireRequest, WebAssetProbe, WorkflowConfig, WorkflowName, YtDlpStatus } from "./renderer/lib/types";
+import type { AlignmentModelStatus, AppSettings, AppState, BrollReviewDecision, CurrentLlamaServerState, EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialCutApplicationResult, EditorialGameSummary, EditorialSourceSelection, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetAnalysisEstimate, MediaAssetAnalysisResult, MediaAssetDetail, MediaAssetKind, MediaAssetListRequest, MediaAssetListResult, MediaBulkAnalysisPlan, MediaLibraryDirectory, MediaLibraryRoot, MediaLibraryScanResult, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WebAssetAcquireRequest, WebAssetProbe, WorkflowConfig, WorkflowName, YtDlpStatus } from "./renderer/lib/types";
 
 export {};
 
@@ -72,6 +72,7 @@ declare global {
       findEditorialCheckpoint(sources: EditorialSourceSelection[]): Promise<{ path: string; inspection: EditorialCheckpointInspection } | null>;
       listEditorialCheckpoints(): Promise<EditorialCheckpointSummary[]>;
       removeEditorialCheckpoint(checkpoint: string): Promise<void>;
+      applyReviewedEditorialCuts(reviewProject: string): Promise<EditorialCutApplicationResult>;
       listEditorialGames(): Promise<EditorialGameSummary[]>;
       rememberEditorialGame(title: string): Promise<EditorialGameSummary>;
       startRun(request: RunRequest): Promise<{ runId: string }>;

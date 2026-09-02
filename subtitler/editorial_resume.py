@@ -12,6 +12,7 @@ from .editorial_project import (
     EDITORIAL_PIPELINE_STAGES,
     EDITORIAL_STAGE_VERSIONS,
     GLOBAL_CHECKPOINT_STAGE,
+    ACTION_CHECKPOINT_STAGE,
     fingerprint_source,
     unresolved_editorial_sources,
 )
@@ -25,6 +26,7 @@ ResumeBoundary = Literal[
     "semantic_spans",
     "local_reconciliation",
     "global_reconciliation",
+    "action_planning",
     "editorial_assets",
 ]
 ResumeMode = Literal["compatible", *EDITORIAL_PIPELINE_STAGES]
@@ -52,7 +54,7 @@ def inspect_editorial_resume(
     if required is not None:
         recommended = required
     elif complete:
-        recommended = GLOBAL_CHECKPOINT_STAGE
+        recommended = ACTION_CHECKPOINT_STAGE
     else:
         recommended = "compatible"
     if required is None:
@@ -89,9 +91,6 @@ def inspect_editorial_resume(
             "objective": artifact["objective"],
             "targetDurationMinSeconds": artifact["target_duration_min_ms"] / 1000.0,
             "targetDurationMaxSeconds": artifact["target_duration_max_ms"] / 1000.0,
-            "mustKeepNotes": list(artifact["must_keep_notes"]),
-            "deEmphasizeNotes": list(artifact["de_emphasize_notes"]),
-            "subtitleMode": artifact.get("subtitle_mode", "full"),
             "outputLocale": artifact.get("output_locale", "en"),
         },
     }
@@ -165,6 +164,7 @@ def relink_matching_editorial_prefix(
 def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary) -> None:
     boundary_index = _stage_index(boundary)
     now = datetime.now(timezone.utc).isoformat()
+    _discard_invalidated_stage_costs(artifact, boundary_index)
     for stage in EDITORIAL_PIPELINE_STAGES[boundary_index:]:
         artifact["pipeline_versions"][stage] = EDITORIAL_STAGE_VERSIONS[stage]
     if boundary in CHECKPOINT_STAGES:
@@ -191,7 +191,9 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
                 "conflicts",
             ):
                 artifact["editorial_map"][field] = []
-    if boundary != "editorial_assets":
+    global_index = _stage_index(GLOBAL_CHECKPOINT_STAGE)
+    action_index = _stage_index(ACTION_CHECKPOINT_STAGE)
+    if boundary_index <= global_index:
         for field in (
             "global_threads",
             "connections",
@@ -204,15 +206,48 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
             "final_actions",
             "supporting_edits",
             "editorial_threads",
+            "payoff_threads",
+            "story_actions",
+            "emphasized_phrases",
+            "workflow",
+            "protected_zones",
+            "cut_candidates",
+            "confirmed_cuts",
+            "removed_ms",
+            "narration_replaced_ms",
+            "prompt_version",
         ):
             artifact["editorial_map"][field] = [] if field in {
                 "global_threads", "connections", "conflicts", "optimal_plan",
                 "final_actions", "supporting_edits", "editorial_threads",
+                "payoff_threads", "story_actions", "emphasized_phrases",
+                "protected_zones", "cut_candidates", "confirmed_cuts",
+            } else None
+    elif boundary_index <= action_index:
+        for field in (
+            "director_review",
+            "director_model",
+            "final_actions",
+            "supporting_edits",
+            "editorial_threads",
+            "story_actions",
+            "emphasized_phrases",
+            "workflow",
+            "protected_zones",
+            "cut_candidates",
+            "confirmed_cuts",
+            "removed_ms",
+            "narration_replaced_ms",
+            "prompt_version",
+        ):
+            artifact["editorial_map"][field] = [] if field in {
+                "final_actions", "supporting_edits", "editorial_threads", "story_actions",
+                "emphasized_phrases", "protected_zones", "cut_candidates", "confirmed_cuts",
             } else None
     else:
-        global_output = artifact["editorial_map"].get(GLOBAL_CHECKPOINT_STAGE, {}).get("output")
-        if isinstance(global_output, dict):
-            artifact["editorial_map"]["supporting_edits"] = list(global_output.get("supporting_edits", []))
+        action_output = artifact["editorial_map"].get(ACTION_CHECKPOINT_STAGE, {}).get("output")
+        if isinstance(action_output, dict):
+            artifact["editorial_map"]["supporting_edits"] = list(action_output.get("supporting_edits", []))
     artifact["editorial_map"]["assets"] = []
     for stage in PROJECT_CHECKPOINT_STAGES:
         if _stage_index(stage) < boundary_index:
@@ -229,6 +264,36 @@ def invalidate_editorial_from(artifact: dict[str, Any], boundary: ResumeBoundary
             "restart_from": boundary,
             "pipeline_versions": dict(EDITORIAL_STAGE_VERSIONS),
         }
+    )
+
+
+def _discard_invalidated_stage_costs(
+    artifact: dict[str, Any], boundary_index: int
+) -> None:
+    """Keep only costs belonging to the currently reusable pipeline prefix."""
+    provenance = artifact.setdefault("run_provenance", {})
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in provenance.get("runs", []):
+        if not isinstance(raw, dict):
+            continue
+        source_id = str(raw.get("source_id") or "")
+        stage = str(raw.get("stage") or "")
+        if not source_id or stage not in EDITORIAL_PIPELINE_STAGES:
+            continue
+        if _stage_index(cast(ResumeBoundary, stage)) >= boundary_index:
+            continue
+        try:
+            cost = max(0.0, float(raw.get("actual_cost_usd", 0.0)))
+        except (TypeError, ValueError):
+            cost = 0.0
+        latest[(source_id, stage)] = {
+            "source_id": source_id,
+            "stage": stage,
+            "actual_cost_usd": cost,
+        }
+    provenance["runs"] = list(latest.values())
+    provenance["actual_cost_usd"] = sum(
+        float(row["actual_cost_usd"]) for row in provenance["runs"]
     )
 
 

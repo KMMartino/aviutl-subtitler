@@ -12,7 +12,11 @@ from subtitler.editorial_project import (
     load_editorial_checkpoint,
     write_editorial_checkpoint,
 )
-from subtitler.editorial_runner import EditorialRunInterrupted, run_editorial_project
+from subtitler.editorial_runner import (
+    EditorialRunInterrupted,
+    _record_stage_cost,
+    run_editorial_project,
+)
 
 
 class _RecordingExecutor:
@@ -53,6 +57,16 @@ class _RecordingExecutor:
             "optimal_plan": [],
         }
 
+    def plan_actions(self, project):
+        return {
+            "director_review": {},
+            "director_model": "test",
+            "final_actions": [],
+            "supporting_edits": [],
+            "editorial_threads": [],
+            "story_actions": [],
+        }
+
     def resolve_assets(self, project):
         return {"supporting_edits": [], "editorial_assets": []}
 
@@ -86,12 +100,13 @@ class EditorialRunnerTests(unittest.TestCase):
             self.assertEqual([(order, stage) for order, stage, _ in executor.calls], expected)
             self.assertEqual(result["editorial_map"]["status"], "complete")
             self.assertEqual(result["editorial_map"]["global_reconciliation"]["status"], "complete")
+            self.assertEqual(result["editorial_map"]["action_planning"]["status"], "complete")
             self.assertEqual(len(result["editorial_map"]["recommendations"]), 2)
             self.assertTrue(checkpoint.with_suffix(".html").is_file())
             self.assertTrue(checkpoint.with_suffix(".exo").is_file())
             self.assertEqual(result["outputs"]["exo_path"], str(checkpoint.with_suffix(".exo")))
-            self.assertIn("Editorial stage 1/7", log.getvalue())
-            self.assertIn("Project-wide synthesis", log.getvalue())
+            self.assertIn("Editorial stage 1/8", log.getvalue())
+            self.assertIn("Factual story synthesis", log.getvalue())
             self.assertEqual(result["editorial_map"]["editorial_assets"]["status"], "complete")
             self.assertIn("Editorial run complete", log.getvalue())
 
@@ -148,6 +163,26 @@ class EditorialRunnerTests(unittest.TestCase):
             result = run_editorial_project(checkpoint, retry)
             self.assertEqual(retry.calls, [])
             self.assertEqual(result["editorial_map"]["global_reconciliation"]["status"], "complete")
+
+    def test_stage_cost_replaces_the_prior_attempt_in_end_to_end_total(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = self._project(Path(directory))
+            project = load_editorial_checkpoint(checkpoint)
+            source_id = project["sources"][0]["source_id"]
+
+            with redirect_stdout(StringIO()):
+                _record_stage_cost(
+                    project, source_id, "transcription", {"api_cost_usd": 1.25}
+                )
+                _record_stage_cost(
+                    project, source_id, "transcription", {"api_cost_usd": 0.75}
+                )
+                _record_stage_cost(
+                    project, "project", "action_planning", {"api_cost_usd": 2.0}
+                )
+
+            self.assertEqual(project["run_provenance"]["actual_cost_usd"], 2.75)
+            self.assertEqual(len(project["run_provenance"]["runs"]), 2)
 
 
 if __name__ == "__main__":

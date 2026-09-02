@@ -44,6 +44,12 @@ def presented_editorial_items(artifact: dict[str, Any]) -> list[PresentedEditori
     editorial_map = artifact.get("editorial_map", {})
     final_actions = editorial_map.get("final_actions") if isinstance(editorial_map, dict) else None
     if isinstance(final_actions, list) and final_actions:
+        if editorial_map.get("workflow") == "cutting_assistant":
+            final_actions = [
+                item for item in final_actions
+                if isinstance(item, dict)
+                and str(item.get("action_type")) in {"narrated_summary", "narration_bridge"}
+            ]
         return _presented_final_actions(final_actions, editorial_map, source_by_id, source_order)
     selected_recommendations = _selected_recommendation_plan(editorial_map)
     for kind, field in (
@@ -114,6 +120,7 @@ def _presented_final_actions(
         )
     )
     action_labels: dict[str, str] = {}
+    action_items: dict[str, dict[str, Any]] = {}
     result: list[PresentedEditorialItem] = []
     counters: dict[str, int] = {}
     for direction_number, item in enumerate(actions, 1):
@@ -126,6 +133,7 @@ def _presented_final_actions(
         item["id"] = action_id
         item["direction_number"] = direction_number
         action_labels[action_id] = label
+        action_items[action_id] = item
         result.append(
             PresentedEditorialItem(
                 key=f"recommendation:{action_id}",
@@ -136,6 +144,53 @@ def _presented_final_actions(
                 item=item,
             )
         )
+    for action_id, action in action_items.items():
+        parent_label = action_labels[action_id]
+        parent_type = str(action.get("action_type") or "manual_review")
+        for range_index, value in enumerate(action.get("operation_ranges", []), 1):
+            if not isinstance(value, dict):
+                continue
+            source_id = str(value.get("source_id") or "")
+            if source_id not in source_by_id:
+                continue
+            role = str(value.get("role") or "reference")
+            role_action = {
+                "remove": "cut",
+                "reference": "insert_reference_visual",
+                "move": "connect_ranges",
+            }.get(role, "manual_review")
+            if role == "keep":
+                role_action = {
+                    "montage": "montage",
+                    "extract_highlights": "extract_highlights",
+                    "narrated_summary": "insert_reference_visual",
+                    "narration_bridge": "insert_reference_visual",
+                }.get(parent_type, "preserve")
+            item = {
+                "id": f"{action_id}-range-{range_index}",
+                "edit_id": f"{action_id}-range-{range_index}",
+                "parent_action_id": action_id,
+                "parent_action_type": parent_type,
+                "operation_role": role,
+                "source_id": source_id,
+                "start_ms": value.get("start_ms"),
+                "end_ms": value.get("end_ms"),
+                "action_type": role_action,
+                "instruction": value.get("note") or role.replace("_", " "),
+                "rationale": "",
+                "thread_ids": list(action.get("thread_ids", [])),
+                "evidence_request": False,
+            }
+            result.append(
+                PresentedEditorialItem(
+                    key=f"creative:{item['id']}",
+                    kind="creative",
+                    label=f"{parent_label}-{range_index}",
+                    category=editorial_category("creative", item),
+                    source=source_by_id[source_id],
+                    item=item,
+                )
+            )
     support_counts: dict[str, int] = {}
     for item_value in editorial_map.get("supporting_edits", []):
         if not isinstance(item_value, dict):

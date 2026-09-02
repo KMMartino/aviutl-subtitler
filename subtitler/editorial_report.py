@@ -23,7 +23,11 @@ from .editorial_project import validate_editorial_project
 def write_editorial_html(path: Path, artifact: dict[str, Any]) -> None:
     validate_editorial_project(artifact)
     path.parent.mkdir(parents=True, exist_ok=True)
-    presented = presented_editorial_items(artifact)
+    presented = (
+        []
+        if artifact.get("editorial_map", {}).get("workflow") == "human_information"
+        else presented_editorial_items(artifact)
+    )
     screenshots = _write_editorial_screenshots(path, presented, artifact)
     path.write_text(render_editorial_html(artifact, screenshots), encoding="utf-8")
 
@@ -33,6 +37,10 @@ def render_editorial_html(
 ) -> str:
     validate_editorial_project(artifact)
     locale = editorial_locale(artifact.get("output_locale"))
+    if artifact.get("editorial_map", {}).get("workflow") == "human_information":
+        return _render_human_information_html(artifact, screenshot_urls or {}, locale)
+    if artifact.get("editorial_map", {}).get("workflow") == "cutting_assistant":
+        return _render_cutting_assistant_html(artifact, screenshot_urls or {}, locale)
     sources = sorted(artifact["sources"], key=lambda item: item["order"])
     recommendations = artifact.get("editorial_map", {}).get("recommendations", [])
     presented = presented_editorial_items(artifact)
@@ -100,30 +108,33 @@ h1, h2, h3, h4 {{ line-height: 1.2; }} h1 {{ margin-bottom: 8px; font-size: 2.35
 .directions {{ display: grid; gap: 12px; }}
 .direction {{ border-left: 3px solid #667d99; padding-left: 10px; }} .direction strong {{ display: block; margin-bottom: 4px; }}
 .narration {{ border-left: 4px solid #b786d9; }}
-.editorial-pair {{ display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(0, 1fr); column-gap: 16px; row-gap: 24px; padding-left: 14px; border-left: 5px solid var(--action-color, #667d99); }}
+.editorial-pair {{ display: grid; grid-template-columns: 36px minmax(0, 2fr) minmax(0, 3fr); column-gap: 16px; row-gap: 24px; padding-left: 14px; border-left: 5px solid var(--action-color, #667d99); }}
 .timeline-rail {{ position: relative; z-index: 2; width: 108px; min-height: 260px; display: flex; flex-direction: column; justify-content: space-between; color: #aeb9c6; font-variant-numeric: tabular-nums; font-size: .82rem; pointer-events: none; }}
 .timeline-rail::before {{ content: ""; position: absolute; top: 28px; bottom: 28px; left: 12px; width: 3px; border-radius: 2px; background: #303946; }}
 .timeline-progress {{ position: absolute; left: 12px; width: 3px; min-height: 4px; border-radius: 2px; background: var(--action-color, #667d99); top: var(--start); height: max(4px, calc(var(--end) - var(--start))); }}
 .timeline-rail span {{ padding-left: 24px; position: relative; z-index: 1; white-space: nowrap; }}
 .editorial-primary {{ min-width: 0; padding-bottom: 72px; }}
-.editorial-primary > .recommendation-head {{ margin-left: 16px; }}
+.editorial-primary > .recommendation-head {{ margin: 18px 0 0 16px; }}
 .editorial-primary .editorial-card-body {{ grid-template-columns: minmax(0, 1fr); gap: 14px; }}
 .linked-editorial {{ min-width: 0; border-left: 1px solid #303946; padding-left: 24px; }}
 .linked-editorial > h3 {{ margin-top: 0; font-size: 1.15rem; color: #b8c3d0; }}
 .linked-stack {{ display: grid; gap: 14px; }}
 .linked-card {{ border: 1px solid #303946; border-radius: 9px; padding: 16px; background: #141a21; }}
 .linked-card h4 {{ margin: 0 0 6px; }}
-.linked-card .editorial-frame {{ max-width: 480px; margin: 12px 0; }}
+.linked-card-body {{ position: relative; display: grid; grid-template-columns: minmax(140px, 190px) minmax(0, 1fr); gap: 14px; align-items: start; margin-top: 12px; }}
+.linked-card .editorial-frame {{ width: 100%; margin: 0; position: relative; z-index: 1; cursor: zoom-in; transform-origin: top left; transition: transform 160ms ease, box-shadow 160ms ease; }}
+.linked-card img.editorial-frame:hover {{ z-index: 5; transform: scale(2.4); box-shadow: 0 12px 32px rgba(0,0,0,.55); }}
 .linked-card ul {{ margin-bottom: 0; }}
 .thread-chips {{ display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0; }}
 .thread-chip {{ border: 1px solid var(--thread-color); border-left-width: 7px; border-radius: 999px; padding: 2px 9px; font-size: .78rem; color: #d7e0ea; }}
 .narration-brief {{ border-left: 4px solid #bf83ff; margin-top: 14px; padding: 12px 14px; background: #141a21; border-radius: 7px; }}
 .reference-proof {{ margin-top: 12px; padding-top: 12px; border-top: 1px solid #303946; }}
-.reference-proof img {{ width: 100%; max-width: 620px; border-radius: 8px; background: #0b0e12; }}
+.reference-proof img {{ width: min(260px, 100%); border-radius: 8px; background: #0b0e12; cursor: zoom-in; transition: width 160ms ease; }}
+.reference-proof img:hover {{ width: min(620px, 100%); }}
 .verification {{ font-size: .82rem; color: #9da8b5; }}
 .director-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
 @media (max-width: 1100px) {{ .editorial-pair {{ grid-template-columns: 36px minmax(0, 1fr); }} .linked-editorial {{ grid-column: 2; border-left: 0; border-top: 1px solid #303946; padding: 20px 0 0; }} .director-grid {{ grid-template-columns: 1fr; }} }}
-@media (max-width: 720px) {{ .editorial-card-body {{ grid-template-columns: 1fr; }} }}
+@media (max-width: 720px) {{ .editorial-card-body, .linked-card-body {{ grid-template-columns: 1fr; }} .linked-card img.editorial-frame:hover {{ transform: none; }} }}
 @media (prefers-color-scheme: light) {{ body {{ background:#f5f7fa; color:#18202a; }} .metric,.card,.linked-card {{ background:white; border-color:#d9e0e8; }} .muted,.empty,.subtitle {{ color:#596776; }} .badge {{ background:#e8eef5; }} }}
 </style>
 </head>
@@ -133,7 +144,7 @@ h1, h2, h3, h4 {{ line-height: 1.2; }} h1 {{ margin-bottom: 8px; font-size: 2.35
   <div class="metric">{_tr(locale, 'Target duration', '目標時間')}<strong>{_duration_range(artifact['target_duration_min_ms'], artifact['target_duration_max_ms'], locale)}</strong></div>
   <div class="metric">{_tr(locale, 'Source duration', '素材時間')}<strong>{_duration(sum(item['duration_ms'] for item in sources), locale)}</strong></div>
   <div class="metric">{_tr(locale, 'Sources', '素材数')}<strong>{len(sources)}</strong></div>
-  <div class="metric">{_tr(locale, 'Cumulative hosted API cost', 'ホスト API 累計費用')}<strong>${float(artifact.get('run_provenance', {}).get('actual_cost_usd', 0.0)):.2f}</strong></div>
+  <div class="metric">{_tr(locale, 'End-to-end hosted API cost', '処理全体のホスト API 費用')}<strong>${float(artifact.get('run_provenance', {}).get('actual_cost_usd', 0.0)):.2f}</strong></div>
   <div class="metric">{_tr(locale, 'Project status', 'プロジェクト状態')}<strong>{_escape(_status_label(artifact.get('editorial_map', {}).get('status', 'pending'), locale))}</strong></div>
   <div class="metric">{_tr(locale, 'Timeline assumption', 'タイムラインの前提')}<strong>{coverage}</strong></div>
 </section>
@@ -145,6 +156,167 @@ h1, h2, h3, h4 {{ line-height: 1.2; }} h1 {{ margin-bottom: 8px; font-size: 2.35
 {f'<section><h2>{_tr(locale, "Standalone narration and creative notes", "独立したナレーション・演出メモ")}</h2><p class="muted">{_tr(locale, "These items did not overlap a specific recommendation and remain available for manual placement.", "特定の提案と重ならなかった項目です。手動配置用として利用できます。")}</p><div class="cards">{unmatched_cards}</div></section>' if unmatched_cards else ''}
 </main></body></html>
 """
+
+
+def _render_human_information_html(
+    artifact: dict[str, Any], screenshots: dict[str, str], locale: str
+) -> str:
+    editorial_map = artifact.get("editorial_map", {})
+    sources = sorted(artifact["sources"], key=lambda item: item["order"])
+    total_ms = sum(int(item.get("duration_ms", 0)) for item in sources)
+    phase_cards = "".join(
+        f'''<article class="card"><div class="source-head"><h3>{_escape(item.get("label") or _tr(locale,"Progression","展開"))}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><p>{_escape(item.get("summary"))}</p></article>'''
+        for item in editorial_map.get("event_phases", [])
+        if isinstance(item, dict)
+    )
+    thread_cards = "".join(
+        f'''<article class="card thread"><h3>{index}. {_escape(item.get("title") or _tr(locale,"Story thread","ストーリーのつながり"))}</h3><p>{_escape(item.get("summary"))}</p><p class="muted">{_tr(locale,"Anchors","関連地点")}: {len(item.get("anchors", []))}</p></article>'''
+        for index, item in enumerate(editorial_map.get("global_threads", []), 1)
+        if isinstance(item, dict)
+    )
+    narration_cards = "".join(
+        f'''<article class="card"><div class="source-head"><h3>{_tr(locale,"Narration possibility","ナレーション候補")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><p>{_escape(item.get("instruction") or _tr(locale,"Use the reviewed range to generate a factual narration brief.","採用した範囲から事実ベースのナレーション資料を作成します。"))}</p></article>'''
+        for item in editorial_map.get("final_actions", [])
+        if isinstance(item, dict)
+        and str(item.get("action_type") or "")
+        in {"narrated_summary", "narration_bridge"}
+    )
+    source_cards = "".join(_source_card(source, locale) for source in sources)
+    selected_count = len(editorial_map.get("emphasized_phrases", []))
+    cut_count = len(editorial_map.get("confirmed_cuts", []))
+    direction = editorial_map.get("progression_summary") or editorial_map.get(
+        "editorial_direction_summary", ""
+    )
+    return f'''<!doctype html>
+<html lang="{locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_escape(artifact["title_or_game"])} — {_tr(locale,"Editing information dashboard","編集情報ダッシュボード")}</title>
+<style>
+:root {{ color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;font-size:18px }}
+body {{ margin:0;background:#11151b;color:#e8edf3;line-height:1.58 }} main {{ max-width:1280px;margin:auto;padding:36px 28px 80px }}
+h1,h2,h3,h4 {{ line-height:1.25 }} .subtitle,.muted {{ color:#9da8b5 }}
+.summary {{ display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:24px 0 }}
+.metric,.card {{ border:1px solid #303946;border-radius:12px;background:#181e26;padding:20px }} .metric strong {{ display:block;margin-top:6px;font-size:1.15rem }}
+.sources,.cards {{ display:grid;gap:14px }} .source-head {{ display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap }}
+.badge {{ border-radius:999px;background:#293544;padding:4px 10px;font-size:.82rem }}
+.thread {{ border-left:4px solid #55ccff }}
+@media(prefers-color-scheme:light) {{ body {{ background:#f5f7fa;color:#18202a }} .metric,.card {{ background:#fff;border-color:#d9e0e8 }} .muted,.subtitle {{ color:#596776 }} }}
+</style></head><body><main>
+<header><h1>{_escape(artifact["title_or_game"])}</h1><p class="subtitle">{_escape(artifact["objective"])}</p></header>
+<section class="summary">
+<div class="metric">{_tr(locale,"Source duration","素材時間")}<strong>{_duration(total_ms,locale)}</strong></div>
+<div class="metric">{_tr(locale,"Selected display subtitles","選択表示字幕")}<strong>{selected_count}</strong></div>
+<div class="metric">{_tr(locale,"Voice-free review markers","無音確認マーカー")}<strong>{cut_count}</strong></div>
+<div class="metric">{_tr(locale,"End-to-end hosted API cost","処理全体のホスト API 費用")}<strong>${float(artifact.get("run_provenance",{}).get("actual_cost_usd",0)):.2f}</strong></div>
+</section>
+<section><h2>{_tr(locale,"Factual progression","事実ベースの進行")}</h2><article class="card"><p>{_escape(direction)}</p></article></section>
+<section><h2>{_tr(locale,"Story threads","ストーリーのつながり")}</h2><div class="cards">{thread_cards or f'<p class="muted">{_tr(locale,"No long-horizon thread was established.","長期的なつながりは特定されませんでした。")}</p>'}</div></section>
+<section><h2>{_tr(locale,"Progression phases","展開フェーズ")}</h2><div class="cards">{phase_cards or f'<p class="muted">{_tr(locale,"No project-wide phases have been generated yet.","プロジェクト全体の展開はまだ生成されていません。")}</p>'}</div></section>
+<section><h2>{_tr(locale,"Narration possibilities","ナレーション候補")}</h2><div class="cards">{narration_cards or f'<p class="muted">{_tr(locale,"No narration span is suggested.","ナレーション範囲の提案はありません。")}</p>'}</div></section>
+<section><h2>{_tr(locale,"Cut-marker workflow","カットマーカーの使い方")}</h2><article class="card"><p>{_tr(locale,"Every initial [CUT] object marks a voice-free gap of at least two seconds after speech handles. Initial cut markers remain visible even underneath narration possibilities. Move, resize, duplicate, or delete markers in AviUtl; reviewed markers may be shorter, and only narration objects retained in the reviewed EXO invalidate overlapping cuts when reapplied.","初期 [CUT] オブジェクトは、発話前後の余白を除いて2秒以上の音声未検出区間を示します。初期カットマーカーはナレーション候補の下にも残ります。AviUtlでマーカーを移動・長さ変更・複製・削除でき、確認後のマーカーは2秒未満でも有効です。再適用時に確認済みEXOへ残されたナレーションだけが重複カットを無効にします。")}</p></article></section>
+<section><h2>{_tr(locale,"Sources","素材")}</h2><div class="sources">{source_cards}</div></section>
+</main></body></html>'''
+
+
+def _render_cutting_assistant_html(
+    artifact: dict[str, Any], screenshots: dict[str, str], locale: str
+) -> str:
+    editorial_map = artifact.get("editorial_map", {})
+    sources = sorted(artifact["sources"], key=lambda item: item["order"])
+    source_by_id = {str(item.get("source_id")): item for item in sources}
+    offsets = _source_offsets(sources)
+    total_ms = sum(int(item.get("duration_ms", 0)) for item in sources)
+    cuts = [
+        item for item in editorial_map.get("confirmed_cuts", [])
+        if isinstance(item, dict)
+    ]
+    narration = [
+        item for item in editorial_map.get("final_actions", [])
+        if isinstance(item, dict)
+        and str(item.get("action_type")) in {"narrated_summary", "narration_bridge"}
+    ]
+    removed_ms = int(editorial_map.get("removed_ms", 0))
+    duration_budget = (
+        editorial_map.get("duration_budget")
+        if isinstance(editorial_map.get("duration_budget"), dict)
+        else {}
+    )
+    estimated_final_ms = int(
+        duration_budget.get(
+            "estimated_final_ms",
+            editorial_map.get("estimated_final_ms", max(0, total_ms - removed_ms)),
+        )
+    )
+    cut_bars = []
+    cut_rows = []
+    for item in cuts:
+        source_id = str(item.get("source_id") or "")
+        start = offsets.get(source_id, 0) + _integer(item.get("start_ms"))
+        end = offsets.get(source_id, 0) + _integer(item.get("end_ms"))
+        left = start / max(1, total_ms) * 100
+        width = max(0.08, (end - start) / max(1, total_ms) * 100)
+        cut_bars.append(
+            f'<i style="left:{left:.4f}%;width:{width:.4f}%" title="{_timecode(start)}–{_timecode(end)}"></i>'
+        )
+        source_name = source_by_id.get(source_id, {}).get("original_name", source_id)
+        cut_rows.append(
+            f'<li><span>{_escape(source_name)}</span><strong>{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</strong></li>'
+        )
+    presented = {
+        str(item.item.get("action_id") or item.item.get("id") or ""): item
+        for item in presented_editorial_items(artifact)
+    }
+    narration_cards = []
+    for item in narration:
+        action_id = str(item.get("action_id") or "")
+        shown = presented.get(action_id)
+        screenshot = _screenshot(
+            screenshots.get(shown.key, "") if shown is not None else "",
+            action_id or "narration",
+            locale,
+        )
+        guidance = item.get("narration_guidance") if isinstance(item.get("narration_guidance"), dict) else {}
+        points = "".join(
+            f"<li>{_escape(value)}</li>" for value in guidance.get("talking_points", [])
+        )
+        visuals = "".join(
+            f"<li>{_escape(value)}</li>" for value in guidance.get("representative_visuals", [])
+        )
+        narration_cards.append(
+            f'''<article class="card narration"><div class="source-head"><h3>{_tr(locale, "Narration brief", "ナレーション案")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><div class="narration-grid">{screenshot}<div><h4>{_escape(guidance.get("purpose") or item.get("instruction"))}</h4><p>{_escape(guidance.get("vision"))}</p>{f"<ul>{points}</ul>" if points else ""}{f'<h4>{_tr(locale, "Suggested source visuals", "使用する素材映像の候補")}</h4><ul>{visuals}</ul>' if visuals else ""}</div></div></article>'''
+        )
+    direction = editorial_map.get("editorial_direction_summary") or ""
+    source_cards = "".join(_source_card(source, locale) for source in sources)
+    return f'''<!doctype html>
+<html lang="{locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_escape(artifact["title_or_game"])} — {_tr(locale, "Cutting dashboard", "カット支援ダッシュボード")}</title>
+<style>
+:root {{ color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;font-size:18px }}
+body {{ margin:0;background:#11151b;color:#e8edf3;line-height:1.55 }} main {{ max-width:1280px;margin:auto;padding:36px 28px 80px }}
+h1,h2,h3,h4 {{ line-height:1.2 }} .subtitle,.muted {{ color:#9da8b5 }}
+.summary {{ display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:24px 0 }}
+.metric,.card {{ border:1px solid #303946;border-radius:12px;background:#181e26;padding:20px }} .metric strong {{ display:block;margin-top:6px;font-size:1.15rem }}
+.sources,.cards {{ display:grid;gap:12px }} .source-head {{ display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap }}
+.badge {{ border-radius:999px;background:#293544;padding:4px 10px;font-size:.82rem }}
+.cut-timeline {{ position:relative;height:34px;border-radius:8px;background:#26303c;overflow:hidden;margin:18px 0 }} .cut-timeline i {{ position:absolute;top:0;bottom:0;background:#ef5350;min-width:2px }}
+.cut-list {{ columns:3;column-gap:28px;padding-left:22px }} .cut-list li {{ break-inside:avoid;display:flex;justify-content:space-between;gap:10px;font-size:.84rem;padding:3px 0 }}
+.narration {{ border-left:4px solid #bf83ff }} .narration-grid {{ display:grid;grid-template-columns:minmax(240px,38%) minmax(0,1fr);gap:24px }}
+.editorial-frame {{ width:100%;aspect-ratio:16/9;border-radius:8px;background:#0b0e12;object-fit:contain }} .placeholder {{ display:grid;place-items:center;color:#7f8b99 }}
+@media(max-width:850px) {{ .cut-list {{ columns:1 }} .narration-grid {{ grid-template-columns:1fr }} }}
+@media(prefers-color-scheme:light) {{ body {{ background:#f5f7fa;color:#18202a }} .metric,.card {{ background:#fff;border-color:#d9e0e8 }} .muted,.subtitle {{ color:#596776 }} }}
+</style></head><body><main>
+<header><h1>{_escape(artifact["title_or_game"])}</h1><p class="subtitle">{_escape(artifact["objective"])}</p></header>
+<section class="summary">
+<div class="metric">{_tr(locale,"Source duration","素材時間")}<strong>{_duration(total_ms,locale)}</strong></div>
+<div class="metric">{_tr(locale,"Proposed cuts","カット候補")}<strong>{len(cuts)}</strong></div>
+<div class="metric">{_tr(locale,"Proposed removal","削除時間")}<strong>{_duration(removed_ms,locale)}</strong></div>
+<div class="metric">{_tr(locale,"Estimated retained duration","推定残存時間")}<strong>{_duration(max(0,estimated_final_ms),locale)}</strong></div>
+<div class="metric">{_tr(locale,"End-to-end hosted API cost","処理全体のホスト API 費用")}<strong>${float(artifact.get("run_provenance",{}).get("actual_cost_usd",0)):.2f}</strong></div>
+</section>
+<section><h2>{_tr(locale,"Overall direction","全体方針")}</h2><article class="card"><p>{_escape(direction)}</p><p class="muted">{_tr(locale,"The duration target is advisory; meaningful speech and visual events take priority.","目標時間は目安です。意味のある発話と映像上の出来事を優先します。")}</p></article></section>
+<section><h2>{_tr(locale,"Narration dashboard","ナレーション・ダッシュボード")}</h2><div class="cards">{"".join(narration_cards) or f'<p class="muted">{_tr(locale,"No narration proposed.","ナレーション提案はありません。")}</p>'}</div></section>
+<section><h2>{_tr(locale,"Cut map","カットマップ")}</h2><article class="card"><div class="cut-timeline">{"".join(cut_bars)}</div><ul class="cut-list">{"".join(cut_rows)}</ul></article></section>
+<section><h2>{_tr(locale,"Sources","素材")}</h2><div class="sources">{source_cards}</div></section>
+</main></body></html>'''
 
 
 def _source_card(source: dict[str, Any], locale: str) -> str:
@@ -198,6 +370,12 @@ def _editorial_group_card(
     ) or f'<p class="empty">{_tr(locale, "No supporting edit is needed here.", "ここには追加の演出は必要ありません。")}</p>'
     direction_number = _integer(item.get("direction_number"))
     number = f"{direction_number}. " if direction_number else ""
+    beat_number = _integer(item.get("story_beat_number"))
+    beat_badge = (
+        f'<span class="badge">{_tr(locale, f"Story beat {beat_number}", f"展開 {beat_number}")}</span>'
+        if beat_number
+        else ""
+    )
     thread_chips = _thread_chips(item.get("thread_ids"), threads_by_id)
     narration = _narration_briefs(item, narration_by_id, locale)
     source_id = str(item.get("source_id") or "")
@@ -208,7 +386,7 @@ def _editorial_group_card(
     action_style = action_color(item.get("action_type"))
     return f"""<article id="direction-{direction_number or recommendation.label}" class="card editorial-pair" style="--action-color:{action_style}">
 <div class="timeline-rail"><span>{_timecode(absolute_start)}</span><i class="timeline-progress" style="--start:{start_percent:.3f}%;--end:{end_percent:.3f}%"></i><span>{_timecode(absolute_end)}</span></div>
-<div class="editorial-primary"><div class="recommendation-head"><h3>{number}{_escape(recommendation.label)}</h3><span class="badge">{_escape(category_label(recommendation.category, locale))}</span></div>
+<div class="editorial-primary"><div class="recommendation-head"><h3>{number}{_escape(recommendation.label)}</h3><span>{beat_badge}<span class="badge">{_escape(category_label(recommendation.category, locale))}</span></span></div>
 <p class="muted">{_escape(recommendation.source.get('original_name', ''))} · {_timecode(item.get('start_ms', 0))}–{_timecode(item.get('end_ms', 0))}</p>
 {thread_chips}<div class="editorial-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Editorial suggestion', '編集提案')}</strong>{_escape(primary_suggestion(recommendation, locale))}</div>{_rationale(item, locale)}</div></div>{narration}</div>
 <aside class="linked-editorial"><h3>{_tr(locale, 'Suggested edits', '追加の編集案')}</h3><div class="linked-stack">{linked_cards}</div></aside>
@@ -229,10 +407,10 @@ def _linked_item_card(
     if presented.kind == "narration":
         points = item.get("talking_points") if isinstance(item.get("talking_points"), list) else []
         bullets = "".join(f"<li>{_escape(point)}</li>" for point in points)
-        return f"""<section class="linked-card narration"><div class="recommendation-head"><h4>{_tr(locale, 'Narration', 'ナレーション')} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{screenshot}<p><strong>{_escape(item.get('purpose') or _tr(locale, 'Narration opportunity', 'ナレーション候補'))}</strong></p><p>{_escape(item.get('memory_jog', ''))}</p>{f'<ul>{bullets}</ul>' if bullets else ''}</section>"""
+        return f"""<section class="linked-card narration"><div class="recommendation-head"><h4>{_tr(locale, 'Narration', 'ナレーション')} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div><div class="linked-card-body">{screenshot}<div><p><strong>{_escape(item.get('purpose') or _tr(locale, 'Narration opportunity', 'ナレーション候補'))}</strong></p><p>{_escape(item.get('memory_jog', ''))}</p>{f'<ul>{bullets}</ul>' if bullets else ''}</div></div></section>"""
     asset = assets_by_id.get(str(item.get("resolved_asset_id") or ""))
     proof = _asset_proof(asset, screenshots, locale) if asset else ""
-    return f"""<section class="linked-card"><div class="recommendation-head"><h4>{_escape(category_label(str(item.get('action_type') or 'creative'), locale))} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{_thread_chips(item.get('thread_ids'), threads_by_id)}{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Suggestion', '提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div>{_rationale(item, locale)}</div>{proof}</section>"""
+    return f"""<section class="linked-card"><div class="recommendation-head"><h4>{_escape(category_label(str(item.get('action_type') or 'creative'), locale))} · {_escape(presented.label)}</h4><span class="badge">{timing}</span></div>{_thread_chips(item.get('thread_ids'), threads_by_id)}<div class="linked-card-body">{screenshot}<div class="directions"><div class="direction"><strong>{_tr(locale, 'Suggestion', '提案')}</strong>{_escape(primary_suggestion(presented, locale))}</div>{_rationale(item, locale)}</div></div>{proof}</section>"""
 
 
 def _standalone_linked_card(
@@ -275,6 +453,7 @@ def _group_linked_editorial_items(
         explicit = str(
             candidate.item.get("recommendation_id")
             or candidate.item.get("parent_recommendation_id")
+            or candidate.item.get("parent_action_id")
             or ""
         )
         matched = by_id.get(explicit) if explicit else None
@@ -366,6 +545,24 @@ def _thread_chips(value: Any, threads_by_id: dict[str, dict[str, Any]]) -> str:
 def _narration_briefs(
     item: dict[str, Any], narration_by_id: dict[str, dict[str, Any]], locale: str
 ) -> str:
+    guidance = item.get("narration_guidance")
+    if isinstance(guidance, dict):
+        points = guidance.get("talking_points") if isinstance(guidance.get("talking_points"), list) else []
+        visuals = guidance.get("representative_visuals") if isinstance(guidance.get("representative_visuals"), list) else []
+        bullets = "".join(f"<li>{_escape(point)}</li>" for point in points[:6])
+        visual_bullets = "".join(f"<li>{_escape(value)}</li>" for value in visuals[:8])
+        visuals_html = (
+            f'<p><strong>{_tr(locale, "Suggested source visuals", "使用する素材映像の候補")}</strong></p>'
+            f"<ul>{visual_bullets}</ul>"
+            if visual_bullets
+            else ""
+        )
+        return (
+            f'<div class="narration-brief"><strong>{_tr(locale, "Narration vision", "ナレーションの狙い")}: '
+            f'{_escape(guidance.get("purpose"))}</strong><p>{_escape(guidance.get("vision"))}</p>'
+            f'{f"<ul>{bullets}</ul>" if bullets else ""}'
+            f"{visuals_html}</div>"
+        )
     ids = item.get("narration_brief_ids")
     if not isinstance(ids, list):
         return ""
@@ -420,7 +617,38 @@ def _director_section(editorial_map: dict[str, Any], recommendations: list[Any],
         for value in review.get("unresolved_questions", [])
         if str(value or "").strip()
     )
-    return f"""<section><h2>{_tr(locale, 'Director’s review', 'ディレクター総評')}</h2><article class="card"><p>{_escape(review.get('executive_direction', ''))}</p><div class="director-grid">{assessment_html}</div>{f'<h3>{_tr(locale, "Questions for the editor", "編集者への確認事項")}</h3><ul>{questions}</ul>' if questions else ''}</article></section>"""
+    contract = review.get("style_contract")
+    contract_html = _style_contract_html(contract, locale) if isinstance(contract, dict) else ""
+    return f"""<section><h2>{_tr(locale, 'Director’s review', 'ディレクター総評')}</h2><article class="card">{contract_html}<p>{_escape(review.get('executive_direction', ''))}</p><div class="director-grid">{assessment_html}</div>{f'<h3>{_tr(locale, "Questions for the editor", "編集者への確認事項")}</h3><ul>{questions}</ul>' if questions else ''}</article></section>"""
+
+
+def _style_contract_html(contract: dict[str, Any], locale: str) -> str:
+    opening_labels = {
+        "live_first": _tr(locale, "Live-first opening", "ライブ主体の導入"),
+        "opening_narration": _tr(
+            locale,
+            "Narrated opening, then live handoff",
+            "ナレーション導入後、ライブ映像へ",
+        ),
+        "narration_led": _tr(locale, "Narration-led structure", "ナレーション主体の構成"),
+    }
+    fields = [
+        (_tr(locale, "Viewer promise", "視聴者への約束"), contract.get("viewer_promise")),
+        (
+            _tr(locale, "Opening", "冒頭構成"),
+            opening_labels.get(str(contract.get("opening_mode") or ""), contract.get("opening_mode")),
+        ),
+        (_tr(locale, "Narration", "ナレーション"), contract.get("narration_policy")),
+        (_tr(locale, "Editing posture", "編集方針"), contract.get("summary")),
+    ]
+    body = "".join(
+        f'<div class="direction"><strong>{_escape(label)}</strong>{_escape(value)}</div>'
+        for label, value in fields
+        if str(value or "").strip()
+    )
+    if not body:
+        return ""
+    return f'<h3>{_tr(locale, "Editorial contract", "編集方針契約")}</h3><div class="director-grid">{body}</div>'
 
 
 def _strategy_section(editorial_map: dict[str, Any], recommendations: list[Any], locale: str) -> str:
@@ -432,8 +660,11 @@ def _strategy_section(editorial_map: dict[str, Any], recommendations: list[Any],
         if isinstance(item, dict) and item.get("id")
     }
     final_actions = editorial_map.get("final_actions")
+    story_actions = editorial_map.get("story_actions")
     plan = (
-        _final_strategy_plan(final_actions, locale)
+        _story_strategy_plan(story_actions, final_actions, locale)
+        if isinstance(story_actions, list) and story_actions
+        else _final_strategy_plan(final_actions, locale)
         if isinstance(final_actions, list) and final_actions
         else _strategy_plan(editorial_map.get("optimal_plan"), by_id, locale)
     )
@@ -474,6 +705,32 @@ def _final_strategy_plan(value: list[Any], locale: str) -> str:
     return f"<ol>{''.join(items)}</ol>" if items else ""
 
 
+def _story_strategy_plan(
+    story_actions: list[Any], final_actions: Any, locale: str
+) -> str:
+    children = [item for item in final_actions if isinstance(item, dict)] if isinstance(final_actions, list) else []
+    items = []
+    for fallback_index, story in enumerate(story_actions, 1):
+        if not isinstance(story, dict):
+            continue
+        beat_number = _integer(story.get("story_beat_number")) or fallback_index
+        instruction = str(story.get("instruction") or "").strip()
+        if not instruction:
+            continue
+        child_index = next(
+            (
+                index
+                for index, child in enumerate(children, 1)
+                if _integer(child.get("story_beat_number")) == beat_number
+            ),
+            0,
+        )
+        label = _tr(locale, f"Story beat {beat_number}", f"展開 {beat_number}")
+        body = f"<strong>{_escape(label)}</strong> — {_escape(instruction)}"
+        items.append(f'<li><a href="#direction-{child_index}">{body}</a></li>' if child_index else f"<li>{body}</li>")
+    return f"<ol>{''.join(items)}</ol>" if items else ""
+
+
 def _estimated_duration_note(budget: dict[str, Any], locale: str) -> str:
     estimated = _integer(budget.get("estimated_final_ms"))
     if estimated <= 0:
@@ -487,10 +744,19 @@ def _estimated_duration_note(budget: dict[str, Any], locale: str) -> str:
 def _write_editorial_screenshots(
     report_path: Path, items: list[PresentedEditorialItem], artifact: dict[str, Any]
 ) -> dict[str, str]:
+    directory = report_path.with_name(f"{report_path.stem}-frames")
+    # The directory is wholly owned by this report. Replacing it prevents
+    # thumbnails from an older action plan surviving a checkpoint replay.
+    try:
+        resolved_parent = report_path.parent.resolve()
+        resolved_directory = directory.resolve()
+        if resolved_directory.parent == resolved_parent and resolved_directory.is_dir():
+            shutil.rmtree(resolved_directory)
+    except OSError:
+        pass
     assets = artifact.get("editorial_map", {}).get("assets", [])
     if not items and not assets:
         return {}
-    directory = report_path.with_name(f"{report_path.stem}-frames")
     urls: dict[str, str] = {}
     for presented in items:
         source_path = Path(str(presented.source.get("visual_path") or ""))
@@ -500,9 +766,8 @@ def _write_editorial_screenshots(
         target = directory / f"{safe_label or 'marker'}.jpg"
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            if not target.is_file() or target.stat().st_size == 0:
-                timestamp = max(0.0, float(presented.item.get("start_ms", 0)) / 1000.0)
-                completed = subprocess.run(
+            timestamp = max(0.0, float(presented.item.get("start_ms", 0)) / 1000.0)
+            completed = subprocess.run(
                     [
                         "ffmpeg",
                         "-hide_banner",
@@ -524,9 +789,9 @@ def _write_editorial_screenshots(
                     check=False,
                     capture_output=True,
                     timeout=30,
-                )
-                if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
-                    continue
+            )
+            if completed.returncode != 0 or not target.is_file() or target.stat().st_size == 0:
+                continue
             urls[presented.key] = f"{directory.name}/{target.name}"
         except (OSError, subprocess.SubprocessError, TypeError, ValueError):
             continue

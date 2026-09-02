@@ -12,6 +12,7 @@ from pathlib import Path
 from .errors import ModelLoadError
 from .glossary import GlossaryEntry
 from .llama_server import LlamaServerProcess
+from .model_prompts import model_system_prompt
 from .models import ChapterSuggestion, MisTranscriptionFlag, SplitPlanResult
 
 
@@ -26,12 +27,10 @@ def cleanup_base_rules(mode: str, *, include_glossary: bool = True) -> str:
     }.get(mode, "Clean the subtitle text conservatively.")
     rules = [
         "Faithfully preserve what was likely spoken.",
-        "Do not change semantic or factual content, including names, titles, products, events, dates, numbers, or negation.",
-        "Do not replace one plausible proper noun or title with a different one based on subject knowledge or surrounding context.",
-        "Keep the same language.",
-        "Do not translate.",
-        "Do not summarize.",
-        "Do not make casual speech more formal or polished.",
+        "Preserve semantic and factual content, including names, titles, products, events, dates, numbers, and negation.",
+        "Keep any plausible proper noun or title instead of substituting a contextual guess.",
+        "Keep the same language and level of formality.",
+        "Retain the speaker's amount of detail rather than translating or summarizing it.",
         "Preserve plausible repetitions, self-corrections, and streamer-style phrasing.",
         mode_line,
         "If the beginning or end looks like a broken partial word caused by an audio cut, remove it only if the remaining text is still grammatical.",
@@ -75,6 +74,7 @@ def boundary_selection_prompt(
         "- Output IDs only, with no explanation, bullets, or labels.\n\n"
         "Transcript with candidate markers:\n"
         f"{annotated_text}\n\n"
+        "Completion: every numbered zone has been considered; output only the selected valid ID(s).\n"
         "Output:"
     )
 
@@ -94,13 +94,14 @@ def mistranscription_review_prompt(numbered_lines: list[tuple[int, str]]) -> str
         "- Severity must be high, medium, or low.\n"
         "- Use high for clear correction candidates, medium for plausible issues worth checking, and low for weak/uncertain candidates.\n"
         "- Output one flagged item per line as: line_number<TAB>severity<TAB>exact copied text segment<TAB>short reason\n"
-        "- If you are unsure, do not flag it.\n"
+        "- Resolve uncertainty in favor of leaving the text unflagged.\n"
         "- Output NONE only if there is truly nothing worth human review in this batch.\n"
         "- Do not output explanations, bullets, JSON, or extra text.\n\n"
         "Examples:\n"
         "12\thigh\tゴッドオブウォートリロジーリメイク\tbroken product/title name\n"
         "38\tmedium\tではでは、こ\tpossible subtitle cut fragment\n\n"
-        f"Transcript lines:\n{lines}"
+        f"Transcript lines:\n{lines}\n\n"
+        "Completion: every supplied line has been checked; return all supported flags or exactly NONE."
     )
 
 
@@ -259,7 +260,7 @@ class LlamaServerTextRefiner(TextRefiner):
             multiple=False,
         )
         try:
-            raw = self._chat(prompt, max_tokens=64)
+            raw = self._chat_for_operation(prompt, max_tokens=64, operation="split")
         except Exception as exc:
             print(f"Warning: LLM split planning failed; using deterministic split. {exc}")
             return SplitPlanResult(
@@ -297,7 +298,9 @@ class LlamaServerTextRefiner(TextRefiner):
             )
             prompt = self._mistranscription_prompt(batch)
             try:
-                raw = self._chat(prompt, max_tokens=1024)
+                raw = self._chat_for_operation(
+                    prompt, max_tokens=1024, operation="mistranscription"
+                )
             except Exception as exc:
                 print(f"Warning: final mistranscription check failed for lines {batch[0][0]}-{batch[-1][0]}; continuing. {exc}")
                 continue
@@ -339,7 +342,7 @@ class LlamaServerTextRefiner(TextRefiner):
             "Answer:"
         )
         try:
-            raw = self._chat(prompt, max_tokens=8)
+            raw = self._chat_for_operation(prompt, max_tokens=8, operation="boundary")
         except Exception as exc:
             print(f"Warning: boundary phrase review failed; keeping subtitle boundary. {exc}")
             return False
@@ -377,16 +380,24 @@ class LlamaServerTextRefiner(TextRefiner):
     def _mistranscription_prompt(self, numbered_lines: list[tuple[int, str]]) -> str:
         return mistranscription_review_prompt(numbered_lines)
 
+    def _chat_for_operation(self, prompt: str, *, max_tokens: int, operation: str) -> str:
+        if not hasattr(self, "_chat_context"):
+            self._chat_context = threading.local()
+        self._chat_context.operation = operation
+        try:
+            return self._chat(prompt, max_tokens=max_tokens)
+        finally:
+            self._chat_context.operation = "cleanup"
+
     def _chat(self, prompt: str, max_tokens: int = 512) -> str:
+        operation = str(getattr(self._chat_context, "operation", "cleanup"))
         payload = {
             "temperature": 0.0,
             "max_tokens": max_tokens,
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a meticulous subtitle QA reviewer. Follow the requested output format exactly."
-                    ),
+                    "content": model_system_prompt(operation),
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -417,7 +428,9 @@ class LlamaServerTextRefiner(TextRefiner):
             self._chat_context = threading.local()
         self._chat_context.metadata = {}
         try:
-            raw = self._chat(self._prompt_one(line))
+            raw = self._chat_for_operation(
+                self._prompt_one(line), max_tokens=512, operation="cleanup"
+            )
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
@@ -435,9 +448,10 @@ class LlamaServerTextRefiner(TextRefiner):
             self._chat_context = threading.local()
         self._chat_context.metadata = {}
         try:
-            raw = self._chat(
+            raw = self._chat_for_operation(
                 self._prompt_many(lines),
                 max_tokens=_cleanup_max_tokens(len(lines), getattr(self, "ctx_size", 4096)),
+                operation="cleanup",
             )
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")

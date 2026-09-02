@@ -72,7 +72,7 @@ For file `N`:
 
 File boundaries are storage and recovery boundaries only. A boss attempt at the end of one file and its successful retry at the start of the next must be linkable exactly like two distant spans in one file.
 
-After all files complete, a global reconciliation pass applies the duration target, resolves competing recommendations, and creates cross-project narration briefs and connections.
+After all files complete, project synthesis applies the duration target, resolves competing recommendations, and searches backward from payoffs for earlier contributing moments. A separately checkpointed action pass then subdivides broad story beats into source-timed child instructions.
 
 ## Persistent state
 
@@ -149,7 +149,9 @@ These learned labels are probabilistic and project-local. There are no hardcoded
 
 ### Stage C: multimodal semantic spans
 
-Combine transcript, visual observations, learned states, and temporal evidence into soft spans. A span may represent an objective, tactic, encounter, attempt, location visit, digression, topic, payoff, or transition.
+First group aligned transcript fragments into complete edit-safe utterances and make a text-only judgment of the spoken material: preserve live, trim repetition, replace with a narrated summary, cut, or defer to visual review. This audio map is the continuity backbone rather than one undifferentiated signal among many.
+
+Then combine that audio-first map with visual observations, learned states, and temporal evidence into soft spans. Vision may revise the audio prior when silent gameplay, dramatic timing, visual comedy, or on-screen information supplies value that speech alone cannot represent. A span may represent an objective, tactic, encounter, attempt, location visit, digression, topic, payoff, or transition.
 
 Spans can overlap. Boundaries carry confidence plus suggested handle ranges rather than pretending to be exact edit points.
 
@@ -179,7 +181,7 @@ Every recommendation includes:
 
 - stable ID and source range(s);
 - content disposition: `keep`, `condense`, `omit`, `connect`, or `review`;
-- presentation mode: `live`, `live_excerpt`, `narration_over_source`, `narration_montage`, or `narration_bridge`;
+- presentation mode: `live`, `live_excerpt`, `narration_over_source`, `narrated_summary`, or `narration_bridge`;
 - reason and expected viewer benefit;
 - confidence and evidence IDs;
 - soft head/tail handles;
@@ -196,9 +198,9 @@ Every analyzed span should additionally retain:
 
 These fields are evidence for planning, not four competing user-facing markers. The HTML can summarize them behind the recommended action.
 
-The final director does not expose these candidate labels directly. It converts selected material into one canonical primary operation—preserve, trim, cut, extract highlights, montage, narrated montage, narration bridge, connect ranges, reorder ranges, or manual review—and may attach explicitly linked canonical accents or continuity edits. Natural-language wording may vary, but the operation type does not.
+The final director does not expose these candidate labels directly. It converts selected material into one canonical primary operation—preserve, trim, cut, extract highlights, montage, narrated summary, narration bridge, connect ranges, reorder ranges, or manual review—and may attach explicitly linked canonical accents or continuity edits. Natural-language wording may vary, but the operation type does not.
 
-After the director pass, the application resolves conflicting primary ranges into a single non-overlapping plan, inserts preserve actions for every uncovered interval, and joins adjacent preserves. This makes “no edit” explicit without asking the model to manufacture routine keep instructions.
+After the broad director pass, bounded child planners evaluate the complete timeline using overlapping context. The application resolves conflicting primary ranges into a single non-overlapping plan. A model-supported preserve means genuinely intact picture and live audio; uncovered intervals become explicit manual-review items instead of being silently assumed to be keeps.
 
 Visually dull but new material defaults to `review`, not `omit`, unless transcript and wider context provide affirmative evidence that it is redundant.
 

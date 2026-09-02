@@ -12,6 +12,18 @@ export type EditorialGameSummary = {
   lastUsedAtUtc: string;
   revision: number;
 };
+export type EditorialCutApplicationResult = {
+  reviewProject: string;
+  checkpoint: string;
+  outputPath: string;
+  reportPath: string;
+  cutCount: number;
+  removedMs: number;
+  ignoredShortCount: number;
+  narrationBriefCount: number;
+  narrationReferenceCount: number;
+  apiCostUsd: number;
+};
 export type ThemeName =
   | "paper"
   | "sage"
@@ -50,9 +62,6 @@ export type AppSettings = {
 
 export type CutSilenceMode = "off" | "automatic" | "review";
 export type BrollMode = "off" | "automatic";
-export type EditorialSubtitleMode = "full" | "emphasis";
-export type LongStreamTranscriptionScope = "full" | "high-activity";
-export type EditorialMapMode = "off" | "suggestions";
 export type CutSilenceEncoderPreset = "unconfigured" | "hevc-amf-cqp21" | "hevc-nvenc-qp21" | "hevc-qsv-q21" | "libx265-crf21";
 export type SilenceCutDecision = "accept_cut" | "reject_cut" | "mark_and_reject";
 export type BrollDecision = "describe" | "use_library" | "reject";
@@ -274,9 +283,6 @@ export type CoreWorkflowSettings = {
   diagnostics: {
     profile: boolean;
   };
-  longStream?: {
-    transcriptionScope: LongStreamTranscriptionScope;
-  };
   cost?: {
     maxEstimatedApiCostUsd: number;
     allowApiSpend: boolean;
@@ -287,8 +293,6 @@ export type CoreWorkflowSettings = {
     cutSilenceMode?: CutSilenceMode;
     renderCutVideo?: boolean;
     brollMode?: BrollMode;
-    editorialMapMode?: EditorialMapMode;
-    editorialSubtitleMode?: EditorialSubtitleMode;
   };
   cleanupGroupPolicy?: CleanupGroupPolicy;
   alignment?: {
@@ -339,6 +343,7 @@ export type EditorialRestartBoundary =
   | "semantic_spans"
   | "local_reconciliation"
   | "global_reconciliation"
+  | "action_planning"
   | "editorial_assets";
 
 export type EditorialRestartMode = "compatible" | EditorialRestartBoundary;
@@ -367,9 +372,6 @@ export type EditorialProjectRequest = {
   objective: string;
   targetDurationMinSeconds: number;
   targetDurationMaxSeconds: number;
-  mustKeepNotes: string[];
-  deEmphasizeNotes: string[];
-  subtitleMode?: EditorialSubtitleMode;
   outputLocale?: AppLocale;
 };
 

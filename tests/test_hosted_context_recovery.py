@@ -87,7 +87,7 @@ class HostedContextRecoveryTests(unittest.TestCase):
         self.assertEqual(backup.calls, [(0, None)])
         self.assertEqual(failed, [])
 
-    def test_aligners_start_before_transcription_and_are_capped_by_segment_count(self) -> None:
+    def test_transcription_releases_before_aligners_start_and_workers_are_capped(self) -> None:
         events: list[str] = []
         pool = mock.Mock()
         pool.close_and_collect.return_value = []
@@ -104,17 +104,24 @@ class HostedContextRecoveryTests(unittest.TestCase):
             events.append("aligners")
             return pool
 
+        alignment_config = mock.Mock()
+
+        def build_plan(_transcripts):
+            events.append("release")
+            return alignment_config, 8
+
         with mock.patch("subtitler.backends.existing_pipeline.AlignmentPool", side_effect=build_pool) as factory:
             transcribe_and_align_hosted(
                 [_chunk(0), _chunk(1)],
                 FallbackTranscriber(primary, _Backup()),
-                mock.Mock(),
+                alignment_config,
                 PipelineProfiler(False, None),
                 workers=2,
                 align_workers=8,
+                alignment_plan_factory=build_plan,
             )
 
-        self.assertEqual(events[0], "aligners")
+        self.assertEqual(events, ["transcribe", "transcribe", "release", "aligners"])
         self.assertEqual(factory.call_args.args[0], 2)
 
     def test_failed_hosted_group_recovers_by_transcribing_smaller_segments(self) -> None:

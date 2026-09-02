@@ -9,11 +9,13 @@ The supported product surface is intentionally small: four workflows, each backe
 ```text
 local                Local Gemma transcription + local cleanup
 hosted               Hosted transcription + tested cloud cleanup
-local-long-stream    Full VAD markers, selected local transcription chunks
-hosted-long-stream   Full VAD markers, selected hosted transcription chunks
+local-long-stream    Reserved; unavailable until suitable local models exist
+hosted-long-stream   Full transcript + factual event map + human editing guides
 ```
 
-The four drag-and-drop launchers map directly to those workflows:
+The launchers map to the available workflows. The desktop UI explains that long-stream
+analysis is hosted-only; the local long-stream configuration is retained as a reserved
+compatibility surface rather than a selectable product mode.
 
 ```text
 run_subtitler_drop.bat
@@ -184,7 +186,7 @@ Python runtime
 
 The frontend can install a managed `llama-server.exe` under `.frontend-state/tools/llama`. Use **Vulkan** for AMD and broad Windows compatibility, or **CUDA 12.4** for NVIDIA. Downloading a new managed server switches the workflow to it. The app keeps the current and previous managed server builds and prunes older ones, so **Revert server** can switch back to the previous retained build. Manual server paths are still supported, and `install_vulkan_llama.ps1` remains available.
 
-Settings also installs the pinned forced-alignment model into the managed model directory. Offline Hugging Face mode is enabled only after that local snapshot passes size and SHA-256 checks. Managed FFmpeg, llama.cpp archives, and model files are verified against upstream size/digest metadata before they are renamed, extracted, or selected; install metadata is retained beside each artifact.
+Settings also installs the pinned forced-alignment model into the managed model directory. Offline Hugging Face mode is enabled only after that local snapshot passes size and SHA-256 checks. On Windows, automatic alignment uses DirectML when a compatible DirectX 12 GPU and runtime are available; its first run converts and validates a reusable mixed-FP16 ONNX model cache, retaining numerically sensitive operations in FP32, while unsupported systems retain CPU alignment. The owned transcription server exits before alignment starts. DirectML uses batch size 1 and can select two isolated model processes for workloads with at least two 120-second jobs when the GPU has at least 12 GiB dedicated VRAM, the live DXGI budget has at least 8 GiB available, and at least 6 GiB system RAM remains available. Managed FFmpeg, llama.cpp archives, and model files are verified against upstream size/digest metadata before they are renamed, extracted, or selected; install metadata is retained beside each artifact.
 
 Each hardware tier also has an experimental **MTP** profile. MTP profiles reuse the standard models and add small matching assistant GGUFs for llama.cpp multi-token prediction. They require a recent llama.cpp build and may not improve every workload or GPU.
 

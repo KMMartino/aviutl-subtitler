@@ -3,11 +3,10 @@ import unittest
 from subtitler.backends.existing_pipeline import (
     CleanupGroupPolicy,
     _cleanup_group_max_sec,
-    long_stream_default_duration_ratio,
     select_transcription_chunks,
 )
 from subtitler.models import AudioChunk
-from subtitler.vad import _speech_timestamps_from_probabilities, assign_vad_groups_by_largest_gaps, select_high_activation_chunks
+from subtitler.vad import _speech_timestamps_from_probabilities, assign_vad_groups_by_largest_gaps
 
 
 def _chunk(index: int, activation: float, peak: float = 0.0) -> AudioChunk:
@@ -19,14 +18,14 @@ class VadSelectionTests(unittest.TestCase):
         chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2)]
 
         selected = select_transcription_chunks(
-            {"mode": "long-stream", "transcription_scope": "full"},
+            {"mode": "long-stream"},
             chunks,
             media_duration_sec=7200.0,
         )
 
         self.assertEqual([chunk.index for chunk in selected], [0, 1, 2])
 
-    def test_high_activity_scope_preserves_existing_selection_behavior(self) -> None:
+    def test_removed_high_activity_keys_cannot_reduce_transcription(self) -> None:
         chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2), _chunk(3, 0.8)]
 
         selected = select_transcription_chunks(
@@ -40,27 +39,7 @@ class VadSelectionTests(unittest.TestCase):
             media_duration_sec=7200.0,
         )
 
-        self.assertEqual([chunk.index for chunk in selected], [1, 3])
-
-    def test_select_high_activation_chunks_targets_active_voice_duration_in_timeline_order(self) -> None:
-        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2), _chunk(3, 0.8), _chunk(4, 0.3)]
-
-        selected = select_high_activation_chunks(chunks, target_duration_ratio=0.4)
-
-        self.assertEqual([chunk.index for chunk in selected], [1, 3])
-
-    def test_select_high_activation_chunks_honors_minimum(self) -> None:
-        chunks = [_chunk(0, 0.1), _chunk(1, 0.9), _chunk(2, 0.2)]
-
-        selected = select_high_activation_chunks(chunks, target_duration_ratio=0.0, min_chunks=1)
-
-        self.assertEqual([chunk.index for chunk in selected], [1])
-
-    def test_long_stream_default_ratio_smoothly_ramps_down_by_media_duration(self) -> None:
-        self.assertAlmostEqual(long_stream_default_duration_ratio(0.0), 0.15)
-        self.assertAlmostEqual(long_stream_default_duration_ratio(5 * 3600.0), 0.07)
-        self.assertGreater(long_stream_default_duration_ratio(2.5 * 3600.0), 0.07)
-        self.assertLess(long_stream_default_duration_ratio(2.5 * 3600.0), 0.15)
+        self.assertEqual([chunk.index for chunk in selected], [0, 1, 2, 3])
 
     def test_cleanup_group_max_sec_is_clamped_from_media_duration(self) -> None:
         self.assertEqual(_cleanup_group_max_sec(90.0), 60.0)
