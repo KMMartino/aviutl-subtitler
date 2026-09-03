@@ -41,8 +41,8 @@ video/audio input
 
 All providers use the same normalized transcript, forced-alignment, and subtitle-planning pipeline. Provider-specific behavior is kept in adapters and segment policy rather than separate backends.
 
-- Hosted OpenAI runs use `gpt-transcribe`. The default fallback selection is the same model, which the backend treats as no distinct fallback; users with Gemini access can select a separate Gemini fallback. GPT Transcribe receives larger continuous VAD groups, which can span several minutes in the short workflow when the cleanup grouping limit permits it.
-- Hosted Gemini transcription defaults to `gemini-3.7-flash` with low thinking and extended request timeouts. `gemini-3.6-flash` is cleanup-only. Gemini cleanup offers 3.6 Flash/minimal as the economy profile and 3.7 Flash/low for stronger duplicate-fragment repair.
+- Hosted transcription defaults to `gemini-3.8-flash` with low thinking and extended request timeouts, with OpenAI `gpt-transcribe` as the distinct fallback. GPT Transcribe receives larger continuous VAD groups, which can span several minutes in the short workflow when the cleanup grouping limit permits it.
+- Hosted cleanup defaults to OpenAI `gpt-5.6-luna` with low reasoning. Gemini cleanup offers 3.6 Flash/minimal as the economy profile and 3.7 Flash/low for stronger duplicate-fragment repair; 3.8 remains transcription-only in the approved catalog.
 - Gemini transcription remains on fine VAD chunks capped at 30 seconds because longer groups failed the quality comparison.
 - Local Gemma is hard-capped at 30-second VAD chunks. The 60-second packing trial was retired after it produced worse long-context substitutions; configuring a larger VAD maximum does not bypass the local cap.
 - Padded VAD chunks can overlap slightly. Each chunk is aligned independently, then exact or fuzzy shared text is reconciled before an aligned-time seam assigns any remaining disagreement to one side.

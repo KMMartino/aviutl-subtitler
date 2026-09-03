@@ -21,6 +21,7 @@ describe("hosted model verification helpers", () => {
       openaiCleanup: "gpt-5.4-mini",
       openaiCleanup56Luna: "gpt-5.6-luna",
       gemini: "gemini-3.5-flash",
+      gemini38Flash: "gemini-3.8-flash",
       gemini37Flash: "gemini-3.7-flash",
       gemini36Flash: "gemini-3.6-flash",
       gemini31Pro: "gemini-3.1-pro-preview",
@@ -42,11 +43,11 @@ describe("hosted model verification helpers", () => {
     expect(hostedCleanupTuning("gemini", "gemini-3.5-flash")).toBeNull();
   });
 
-  it("makes 3.7 the first Gemini transcription option and keeps 3.6 cleanup-only", () => {
+  it("makes 3.8 the first Gemini transcription option and keeps 3.6 cleanup-only", () => {
     const transcriptionModels = hostedOptions("transcription").map(({ model }) => model);
     const cleanupModels = hostedOptions("cleanup").map(({ model }) => model);
 
-    expect(transcriptionModels.filter((model) => model.startsWith("gemini"))[0]).toBe("gemini-3.7-flash");
+    expect(transcriptionModels.filter((model) => model.startsWith("gemini"))[0]).toBe("gemini-3.8-flash");
     expect(transcriptionModels).toContain("gemini-3.5-flash");
     expect(transcriptionModels).not.toContain("gemini-3.6-flash");
     expect(cleanupModels).toContain("gemini-3.6-flash");
@@ -73,13 +74,13 @@ describe("hosted model verification helpers", () => {
   });
 
   it("recommends a distinct Gemini fallback and no distinct OpenAI fallback", () => {
-    expect(recommendedFallbackTranscription("gemini", "gemini-3.7-flash")).toEqual({
-      provider: "gemini",
-      model: "gemini-3.5-flash"
-    });
-    expect(recommendedFallbackTranscription("gemini", "gemini-3.5-flash")).toEqual({
+    expect(recommendedFallbackTranscription("gemini", "gemini-3.8-flash")).toEqual({
       provider: "gemini",
       model: "gemini-3.7-flash"
+    });
+    expect(recommendedFallbackTranscription("gemini", "gemini-3.7-flash")).toEqual({
+      provider: "gemini",
+      model: "gemini-3.8-flash"
     });
     expect(recommendedFallbackTranscription("openai", "gpt-transcribe")).toEqual({
       provider: "openai",
@@ -108,6 +109,7 @@ describe("hosted model verification helpers", () => {
       return new Response(JSON.stringify({
         models: [
           { name: "models/gemini-3.5-flash", supportedGenerationMethods: ["generateContent"] },
+          { name: "models/gemini-3.8-flash", supportedGenerationMethods: ["generateContent"] },
           { name: "models/gemini-3.7-flash", supportedGenerationMethods: ["generateContent"] },
           { name: "models/gemini-3.6-flash", supportedGenerationMethods: ["generateContent"] },
           { name: "models/gemini-3.1-pro-preview", supportedGenerationMethods: ["generateContent"] },
@@ -120,6 +122,7 @@ describe("hosted model verification helpers", () => {
 
     expect(result.openai.transcriptionGpt).toBe(true);
     expect(result.gemini.transcription).toBe(true);
+    expect(result.gemini.transcription38).toBe(true);
     expect(result.gemini.transcription37).toBe(true);
     expect(result.gemini.cleanup).toBe(true);
     expect(result.gemini.cleanup37).toBe(true);

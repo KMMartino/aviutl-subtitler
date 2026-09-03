@@ -7,6 +7,7 @@ export const APPROVED_MODELS = {
   openaiCleanup: "gpt-5.4-mini",
   openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
+  gemini38Flash: "gemini-3.8-flash",
   gemini37Flash: "gemini-3.7-flash",
   gemini36Flash: "gemini-3.6-flash",
   gemini31Pro: "gemini-3.1-pro-preview",
@@ -73,6 +74,14 @@ export const HOSTED_MODELS: HostedModel[] = [
   },
   {
     provider: "gemini",
+    model: APPROVED_MODELS.gemini38Flash,
+    label: "Gemini 3.8 Flash · Low",
+    emphasis: "speed",
+    blurb: "Default transcription profile. Low thinking cleared the production quality bar at lower measured cost than GPT Transcribe.",
+    verification: { transcription: "transcription38" }
+  },
+  {
+    provider: "gemini",
     model: APPROVED_MODELS.gemini36Flash,
     label: "Gemini 3.6 Flash · Minimal",
     emphasis: "balanced",
@@ -84,7 +93,7 @@ export const HOSTED_MODELS: HostedModel[] = [
     model: APPROVED_MODELS.gemini37Flash,
     label: "Gemini 3.7 Flash · Low",
     emphasis: "balanced",
-    blurb: "New default Gemini transcription profile and higher-quality Gemini cleanup option. Low thinking gave the best 3.7 price-to-performance result and repaired duplicate ASR fragments.",
+    blurb: "Previous Gemini transcription profile and the higher-quality Gemini cleanup option. Low thinking repaired duplicate ASR fragments.",
     verification: { transcription: "transcription37", cleanup: "cleanup37" }
   },
   {
@@ -92,7 +101,7 @@ export const HOSTED_MODELS: HostedModel[] = [
     model: APPROVED_MODELS.gemini,
     label: "Gemini 3.5 Flash",
     emphasis: "balanced",
-    blurb: "Previous Gemini transcription baseline. Retained as a proven alternative and distinct fallback for 3.7 Flash.",
+    blurb: "Previous Gemini transcription baseline. Retained as a proven alternative.",
     verification: { transcription: "transcription" }
   },
   {
@@ -126,10 +135,10 @@ export function recommendedFallbackTranscription(
   model: string,
 ): { provider: HostedProvider; model: string } {
   if (provider === "gemini") {
-    if (model === APPROVED_MODELS.gemini37Flash) {
-      return { provider: "gemini", model: APPROVED_MODELS.gemini };
+    if (model === APPROVED_MODELS.gemini38Flash) {
+      return { provider: "gemini", model: APPROVED_MODELS.gemini37Flash };
     }
-    return { provider: "gemini", model: APPROVED_MODELS.gemini37Flash };
+    return { provider: "gemini", model: APPROVED_MODELS.gemini38Flash };
   }
   return { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionGpt };
 }

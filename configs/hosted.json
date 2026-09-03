@@ -1,8 +1,8 @@
 {
   "backend": {
     "name": "existing-pipeline",
-    "transcriber": "openai",
-    "transcription_model": "gpt-transcribe",
+    "transcriber": "gemini",
+    "transcription_model": "gemini-3.8-flash",
     "fallback_transcriber": "openai",
     "fallback_transcription_model": "gpt-transcribe",
     "language": "ja",

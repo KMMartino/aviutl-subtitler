@@ -48,7 +48,7 @@ OPENAI_PRICES: dict[str, TokenPrices] = {
 
 def model_prices(provider: str, model: str, *, as_of: date | None = None) -> TokenPrices:
     if provider == "gemini":
-        if model in {"gemini-3.6-flash", "gemini-3.7-flash"}:
+        if model in {"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"}:
             return (
                 GEMINI_FLASH_PROMOTIONAL_PRICES
                 if (as_of or date.today()) <= GEMINI_FLASH_PROMOTION_END

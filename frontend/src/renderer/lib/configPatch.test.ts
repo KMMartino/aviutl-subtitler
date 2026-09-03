@@ -129,7 +129,7 @@ describe("config patching", () => {
     });
 
     expect(core.hosted?.fallbackTranscriptionProvider).toBe("gemini");
-    expect(core.hosted?.fallbackTranscriptionModel).toBe("gemini-3.7-flash");
+    expect(core.hosted?.fallbackTranscriptionModel).toBe("gemini-3.8-flash");
   });
 
   it.each([

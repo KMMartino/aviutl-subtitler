@@ -139,7 +139,7 @@ describe("config store runtime paths", () => {
     expect(state.configs.hosted.alignment?.split_size).toBe("char");
   });
 
-  it("migrates the previous hosted default to GPT Transcribe without a distinct fallback", () => {
+  it("migrates the legacy Gemini default to Gemini 3.8 with a GPT fallback", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -160,14 +160,14 @@ describe("config store runtime paths", () => {
 
     const state = loadAppState(paths);
 
-    expect(state.configs.hosted.backend.transcriber).toBe("openai");
-    expect(state.configs.hosted.backend.transcription_model).toBe("gpt-transcribe");
+    expect(state.configs.hosted.backend.transcriber).toBe("gemini");
+    expect(state.configs.hosted.backend.transcription_model).toBe("gemini-3.8-flash");
     expect(state.configs.hosted.backend.fallback_transcriber).toBe("openai");
     expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-transcribe");
     expect(state.configs.hosted.cleanup.skip_final_review).toBe(false);
   });
 
-  it("raises the old long-stream transcription default to four concurrent requests", () => {
+  it("migrates the previous overall default and raises long-stream concurrency", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -179,10 +179,19 @@ describe("config store runtime paths", () => {
         fallback_transcription_model: "gpt-transcribe",
         transcription_workers: 2,
       },
+      cleanup: {
+        backend: "openai",
+        api_model: "gpt-5.6-luna",
+        reasoning_effort: "low",
+      },
     }, paths);
 
     const state = loadAppState(paths);
 
+    expect(state.configs["hosted-long-stream"].backend.transcriber).toBe("gemini");
+    expect(state.configs["hosted-long-stream"].backend.transcription_model).toBe("gemini-3.8-flash");
+    expect(state.configs["hosted-long-stream"].backend.fallback_transcriber).toBe("openai");
+    expect(state.configs["hosted-long-stream"].backend.fallback_transcription_model).toBe("gpt-transcribe");
     expect(state.configs["hosted-long-stream"].backend.transcription_workers).toBe(4);
   });
 
@@ -201,11 +210,11 @@ describe("config store runtime paths", () => {
 
     const state = loadAppState(paths);
 
-    expect(state.configs.hosted.backend.transcription_model).toBe("gpt-transcribe");
+    expect(state.configs.hosted.backend.transcription_model).toBe("gemini-3.8-flash");
     expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gpt-transcribe");
   });
 
-  it("migrates an unsupported fallback to Gemini 3.7 while migrating Gemini 3.5 cleanup to 3.6", () => {
+  it("migrates an unsupported fallback to Gemini 3.8 while migrating Gemini 3.5 cleanup to 3.6", () => {
     const paths = makePaths();
     writeWorkflowTemplates(paths);
     ensureFrontendState(paths);
@@ -226,7 +235,7 @@ describe("config store runtime paths", () => {
     const state = loadAppState(paths);
 
     expect(state.configs.hosted.backend.fallback_transcriber).toBe("gemini");
-    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.7-flash");
+    expect(state.configs.hosted.backend.fallback_transcription_model).toBe("gemini-3.8-flash");
     expect(state.configs.hosted.cleanup.backend).toBe("gemini");
     expect(state.configs.hosted.cleanup.api_model).toBe("gemini-3.6-flash");
     expect(state.configs.hosted.cleanup.thinking_level).toBe("minimal");

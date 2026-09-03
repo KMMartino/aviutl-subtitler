@@ -349,7 +349,7 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       (fallbackProvider === "openai" || fallbackProvider === "gemini")
       && isHostedModelApproved(fallbackProvider, fallbackModel, "transcription")
     );
-    const previousHostedDefault = (
+    const legacyGeminiDefault = (
       primaryProvider === "gemini"
       && primaryModel === APPROVED_MODELS.gemini
       && (!fallbackSupported || (
@@ -362,9 +362,23 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       && config.cleanup.api_model === APPROVED_MODELS.openaiCleanup
       && (config.cleanup.window_subtitles === 8 || config.cleanup.window_subtitles === 256 || config.cleanup.window_subtitles === undefined)
     );
-    if (!primarySupported || previousHostedDefault) {
-      config.backend.transcriber = "openai";
-      config.backend.transcription_model = APPROVED_MODELS.openaiTranscriptionGpt;
+    const previousOverallDefaultCleanup = (
+      config.cleanup?.backend === "openai"
+      && config.cleanup.api_model === APPROVED_MODELS.openaiCleanup56Luna
+      && (config.cleanup.reasoning_effort === "low" || config.cleanup.reasoning_effort === undefined)
+    );
+    const previousOverallDefault = (
+      primaryProvider === "openai"
+      && primaryModel === APPROVED_MODELS.openaiTranscriptionGpt
+      && (oldHostedDefaultCleanup || previousOverallDefaultCleanup)
+      && (!fallbackConfigured || (
+        fallbackProvider === "openai"
+        && fallbackModel === APPROVED_MODELS.openaiTranscriptionGpt
+      ))
+    );
+    if (!primarySupported || legacyGeminiDefault || previousOverallDefault) {
+      config.backend.transcriber = "gemini";
+      config.backend.transcription_model = APPROVED_MODELS.gemini38Flash;
       config.backend.fallback_transcriber = "openai";
       config.backend.fallback_transcription_model = APPROVED_MODELS.openaiTranscriptionGpt;
       changed = true;
@@ -374,7 +388,7 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       config.backend.fallback_transcription_model = fallback.model;
       changed = true;
     }
-    if (previousHostedDefault && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
+    if (legacyGeminiDefault && oldHostedDefaultCleanup && config.cleanup?.skip_final_review === true) {
       config.cleanup.skip_final_review = false;
       changed = true;
     }

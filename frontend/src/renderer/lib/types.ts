@@ -252,6 +252,7 @@ export type HostedModelVerification = {
     keyPresent: boolean;
     error: string;
     transcription: boolean;
+    transcription38?: boolean;
     transcription37?: boolean;
     transcription31Pro: boolean;
     transcription31FlashLite: boolean;

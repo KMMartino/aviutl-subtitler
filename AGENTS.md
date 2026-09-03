@@ -32,6 +32,10 @@ EXO-only styling or layout changes:
 
 Write tests for observable program behavior. Use existing implementation and configuration as the source of truth for mechanics.
 
+## Hosted Model Evaluations
+
+When a newly released hosted model may improve transcription or cleanup, read and follow [HOSTED_MODEL_EVALUATION.md](HOSTED_MODEL_EVALUATION.md). It defines the two-stage comparison, current baselines, paid-run authorization, evidence preservation, and promotion criteria.
+
 ## Product Testing
 
 Rebuilds create ignored artifacts under `release/` and require explicit user approval. Propose a rebuild after a significant product change or an accumulation of smaller changes.

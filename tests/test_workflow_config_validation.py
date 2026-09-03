@@ -95,6 +95,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_new_approved_transcription_models_are_allowed(self):
         for backend, model in (
             ("openai", "gpt-transcribe"),
+            ("gemini", "gemini-3.8-flash"),
             ("gemini", "gemini-3.7-flash"),
             ("gemini", "gemini-3.1-pro-preview"),
             ("gemini", "gemini-3.1-flash-lite"),

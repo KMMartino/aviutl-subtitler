@@ -13,8 +13,8 @@ class ApiCostTests(unittest.TestCase):
         cost = token_cost("gemini", "gemini-2.5-flash", input_tokens=1000, output_tokens=500)
         self.assertAlmostEqual(cost, (1000 * 0.30 + 500 * 2.50) / 1_000_000)
 
-    def test_gemini_36_and_37_flash_prices_roll_over_after_promotion(self) -> None:
-        for model in ("gemini-3.6-flash", "gemini-3.7-flash"):
+    def test_gemini_36_through_38_flash_prices_roll_over_after_promotion(self) -> None:
+        for model in ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"):
             with self.subTest(model=model):
                 promotional = token_cost(
                     "gemini", model, input_tokens=1000, output_tokens=500, as_of=date(2026, 12, 31)

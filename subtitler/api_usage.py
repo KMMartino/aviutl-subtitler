@@ -44,6 +44,9 @@ class ApiUsageLedger:
     ) -> None:
         if not total_tokens:
             total_tokens = input_tokens + output_tokens
+        billable_output_tokens = output_tokens
+        if provider == "gemini":
+            billable_output_tokens = max(output_tokens, total_tokens - input_tokens)
         row = ApiUsageRow(
             provider=provider,
             model=model,
@@ -60,7 +63,7 @@ class ApiUsageLedger:
                 provider,
                 model,
                 input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                output_tokens=billable_output_tokens,
                 audio_input_tokens=audio_input_tokens,
             ),
         )
