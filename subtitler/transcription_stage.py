@@ -2,48 +2,105 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .api_usage import ApiUsageLedger
 from .audio import extract_audio, get_media_duration, load_mono_16k_wav
 from .backends.existing_pipeline import ExistingPipelineBackend
 from .errors import SubtitlerError
-from .glossary import GlossaryEntry, find_glossary, load_glossary
+from .glossary import GlossaryEntry
 from .models import AlignedChunk
 from .profiling import PipelineProfiler
-from .run_artifacts import write_aligned_text, write_aligned_tokens
-from .run_context import RunContext
+from .run_artifacts import RunArtifactPaths, write_aligned_text, write_aligned_tokens
+from .transcript_document import create_transcript_document, load_transcript_document, write_transcript_document
 from .transcript_normalizer import backend_result_to_aligned_chunks
-from .transcription_backend import BackendTranscriptResult, TranscriptionBackend, TranscriptionRequest
-from .silence_cut import emit_frontend_event
+from .transcription_backend import BackendTranscriptResult, RawVadSpeechInterval, TranscriptionBackend, TranscriptionRequest
+
+
+@dataclass(frozen=True)
+class TranscriptionStageRequest:
+    """Processing inputs independent of CLI arguments and desktop transport."""
+
+    input_path: Path
+    config: dict[str, Any]
+    artifacts: RunArtifactPaths
+    glossary: list[GlossaryEntry]
+    diagnostics_enabled: bool = False
+    on_speech_activity: Callable[[list[RawVadSpeechInterval]], None] | None = None
+    reuse_document: Path | None = None
 
 
 @dataclass(frozen=True)
 class TranscriptionStageOutcome:
     backend_result: BackendTranscriptResult
     aligned: list[AlignedChunk]
-    glossary: list[GlossaryEntry]
     duration_sec: float
     cost_estimate_only: bool = False
+    document_path: Path | None = None
+    revision_id: str | None = None
+    reused: bool = False
 
 
 def run_transcription_stage(
-    context: RunContext,
+    inputs: TranscriptionStageRequest,
     temp_dir: Path,
     api_usage: ApiUsageLedger,
     profiler: PipelineProfiler,
-    *,
-    project_dir: Path,
 ) -> TranscriptionStageOutcome:
     """Prepare audio, run the configured backend, and normalize its transcript."""
-    config = context.config
+    if inputs.reuse_document is not None:
+        document = load_transcript_document(inputs.reuse_document)
+        document.require_reusable(inputs.input_path, int(inputs.config["audio"]["track"]))
+        print(f"Reusing aligned transcript: {inputs.reuse_document}; transcription and alignment skipped.", flush=True)
+        if inputs.on_speech_activity is not None:
+            inputs.on_speech_activity(document.backend.raw_vad_speech_intervals)
+        result, duration = document.backend, document.duration_sec
+    else:
+        before = inputs.input_path.stat()
+        result, duration = _transcribe_source(inputs, temp_dir, api_usage, profiler)
+        estimate_only = result.status == "partial" and any(item.code == "cost_estimate_only" for item in result.diagnostics)
+        if estimate_only:
+            return TranscriptionStageOutcome(result, [], duration, cost_estimate_only=True)
+        handle_backend_result_status(result)
+        after = inputs.input_path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise SubtitlerError("Source media changed during transcription; retry with the finished recording")
+        document = create_transcript_document(
+            source_path=inputs.input_path,
+            audio_track=int(inputs.config["audio"]["track"]),
+            duration_sec=duration,
+            backend=result,
+            settings={
+                **{key: inputs.config.get(key, {}) for key in ("backend", "audio", "vad", "alignment", "workflow", "cleanup")},
+                "glossary": [asdict(entry) for entry in inputs.glossary],
+            },
+        )
+    document_path = inputs.reuse_document
+    if inputs.artifacts.base is not None:
+        document_path = inputs.artifacts.base.with_suffix(".transcript.json")
+        write_transcript_document(document_path, document)
+    aligned = backend_result_to_aligned_chunks(result)
+    if inputs.diagnostics_enabled and inputs.artifacts.aligned_text is not None:
+        write_aligned_text(inputs.artifacts.aligned_text, aligned)
+    if inputs.artifacts.aligned_tokens is not None:
+        write_aligned_tokens(inputs.artifacts.aligned_tokens, aligned)
+    return TranscriptionStageOutcome(
+        result, aligned, duration, document_path=document_path,
+        revision_id=document.revision_id, reused=inputs.reuse_document is not None,
+    )
+
+
+def _transcribe_source(
+    inputs: TranscriptionStageRequest, temp_dir: Path, api_usage: ApiUsageLedger, profiler: PipelineProfiler,
+) -> tuple[BackendTranscriptResult, float]:
+    config = inputs.config
     wav_path = temp_dir / "input_16k_mono.wav"
-    duration = get_media_duration(context.input_path)
+    duration = get_media_duration(inputs.input_path)
     print("Extracting mono 16 kHz audio...")
     extract_audio(
-        context.input_path,
+        inputs.input_path,
         wav_path,
         int(config["audio"]["track"]),
         duration=duration,
@@ -53,59 +110,28 @@ def run_transcription_stage(
     if duration <= 0:
         duration = len(samples) / sample_rate
 
-    glossary_path = find_glossary(
-        input_path=context.input_path,
-        explicit=Path(context.args.glossary) if context.args.glossary else None,
-        disabled=context.args.no_glossary,
-        project_dir=project_dir,
-    )
-    glossary = load_glossary(glossary_path)
+    glossary = inputs.glossary
     if glossary:
         print(f"Loaded glossary entries: {len(glossary)}")
 
     backend = build_backend(config, api_usage, profiler)
     request = TranscriptionRequest(
-        input_path=context.input_path,
+        input_path=inputs.input_path,
         wav_path=wav_path,
         duration_sec=duration,
         sample_rate=sample_rate,
         language=config["backend"].get("language", "ja"),
         temp_dir=temp_dir,
-        sidecar_base=context.artifacts.base,
+        sidecar_base=inputs.artifacts.base,
         glossary=glossary,
-        profile_enabled=context.diagnostics_enabled,
-        workflow=context.args.workflow,
+        profile_enabled=inputs.diagnostics_enabled,
         metadata={
             "samples": samples,
             "stage_progress_reporter": stage_progress_reporter("VAD"),
-            "control_event": emit_frontend_event if context.args.frontend_protocol == "stdio-v1" else None,
+            "on_speech_activity": inputs.on_speech_activity,
         },
     )
-    backend_result = backend.transcribe(request)
-    cost_estimate_only = backend_result.status == "partial" and any(
-        item.code == "cost_estimate_only" for item in backend_result.diagnostics
-    )
-    if cost_estimate_only:
-        return TranscriptionStageOutcome(
-            backend_result=backend_result,
-            aligned=[],
-            glossary=glossary,
-            duration_sec=duration,
-            cost_estimate_only=True,
-        )
-
-    handle_backend_result_status(backend_result)
-    aligned = backend_result_to_aligned_chunks(backend_result)
-    if context.diagnostics_enabled and context.artifacts.aligned_text is not None:
-        write_aligned_text(context.artifacts.aligned_text, aligned)
-    if context.sidecars_enabled and context.artifacts.aligned_tokens is not None:
-        write_aligned_tokens(context.artifacts.aligned_tokens, aligned)
-    return TranscriptionStageOutcome(
-        backend_result=backend_result,
-        aligned=aligned,
-        glossary=glossary,
-        duration_sec=duration,
-    )
+    return backend.transcribe(request), duration
 
 
 def build_backend(

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -25,4 +26,15 @@ test("changes only package metadata version", () => {
   const updated = updatePackageVersion(original, "2.0.0");
   assert.deepEqual(updated, { ...original, version: "2.0.0" });
   assert.equal(original.version, "0.1.0");
+});
+
+test("committed package and lockfile versions agree", () => {
+  const pkg = JSON.parse(
+    fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  const lock = JSON.parse(
+    fs.readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
+  );
+  assert.equal(pkg.version, lock.version);
+  assert.equal(pkg.version, lock.packages[""].version);
 });

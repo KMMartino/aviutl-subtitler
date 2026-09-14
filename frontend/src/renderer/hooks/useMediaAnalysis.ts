@@ -21,8 +21,13 @@ export function useMediaAnalysis(inputPath: string, requestRevision: number, set
         if (cancelled) return;
         setAnalysis(result);
         setCoreSettings((current) => {
-          if (!current || !result.audioTracks.length || result.audioTracks.some((track) => track.audioIndex === current.audioTrack)) return current;
-          return { ...current, audioTrack: result.audioTracks[0].audioIndex };
+          if (!current || !result.audioTracks.length) return current;
+          const available = (index: number) => result.audioTracks.some((track) => track.audioIndex === index);
+          const audioTrack = available(current.audioTrack) ? current.audioTrack : result.audioTracks[0].audioIndex;
+          const gameAudioTrack = current.editorial?.gameAudioTrack;
+          const invalidGameTrack = gameAudioTrack !== undefined && !available(gameAudioTrack);
+          if (audioTrack === current.audioTrack && !invalidGameTrack) return current;
+          return { ...current, audioTrack, editorial: invalidGameTrack && current.editorial ? { ...current.editorial, gameAudioTrack: undefined } : current.editorial };
         });
       } catch (error) {
         if (cancelled) return;

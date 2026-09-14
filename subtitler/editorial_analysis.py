@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import csv
 import json
 from dataclasses import asdict, dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+from .evidence import TranscriptEvidence, VisualEvidence, load_transcript_evidence
 from .errors import StructuredOutputIncompleteError, SubtitlerError
-from .editorial_locale import locale_label, output_language_instruction
-from .editorial_practices import EDITORIAL_PRACTICES_POLICY
+from .editorial_locale import locale_label, output_language_instruction, processing_language_instruction
+from .editorial_guidance import EDITORIAL_GUIDANCE, project_brief
 
 
 EDITORIAL_PROMPT_VERSION = "editorial-factual-map-v15"
@@ -96,9 +96,9 @@ EDITORIAL_MAP_RESPONSE_SCHEMA = _strict_object(
 )
 
 
-
 HUMAN_INFORMATION_SYNTHESIS_SCHEMA = _strict_object(
     {
+        "editorial_direction": _STRING,
         "progression_summary": _STRING,
         "event_phases": _array(
             _strict_object(
@@ -152,7 +152,10 @@ HUMAN_INFORMATION_SYNTHESIS_SCHEMA = _strict_object(
                     },
                     "purpose": _STRING,
                     "memory_jog": _STRING,
-                    "talking_points": _STRING_ARRAY,
+                    "editor_instruction": _STRING,
+                    "narrator_direction": _STRING,
+                    "added_value": _STRING,
+                    "evidence_notes": _STRING_ARRAY,
                     "representative_visuals": _STRING_ARRAY,
                     "thread_ids": _STRING_ARRAY,
                 }
@@ -161,10 +164,6 @@ HUMAN_INFORMATION_SYNTHESIS_SCHEMA = _strict_object(
         "uncertainties": _STRING_ARRAY,
     }
 )
-
-
-
-
 
 
 SELECTIVE_SUBTITLE_RESPONSE_SCHEMA = _strict_object(
@@ -216,25 +215,6 @@ class EditorialPlanningProvider(Protocol):
         operation: str,
         response_schema: dict[str, Any] | None = None,
     ) -> str: ...
-
-
-@dataclass(frozen=True)
-class TranscriptEvidence:
-    start_ms: int
-    end_ms: int
-    text: str
-
-
-@dataclass(frozen=True)
-class VisualEvidence:
-    start_ms: int
-    end_ms: int
-    description: str
-    tags: tuple[str, ...] = ()
-    confidence: float = 0.0
-    motion_level: float | None = None
-    visual_category: str = "other"
-    observed_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -711,10 +691,6 @@ def _observed_state_label(visual: VisualEvidence | None) -> str:
     return (description or visual.visual_category.replace("_", " "))[:80]
 
 
-
-
-
-
 def analyze_editorial_source(
     *,
     provider: EditorialPlanningProvider,
@@ -1093,8 +1069,6 @@ def stitch_editorial_event_spans(values: Sequence[dict[str, Any]]) -> list[dict[
     return result
 
 
-
-
 def _event_terms(value: Any) -> set[str]:
     return {
         token
@@ -1342,6 +1316,7 @@ def synthesize_human_information_project(
                 "source_id": source_id,
                 "order": source.get("order"),
                 "duration_ms": duration_ms,
+                "game_knowledge": source.get("stages", {}).get("visual_learning", {}).get("output", {}).get("game_knowledge", {}),
                 "window_summaries": [
                     str(item.get("summary") or "")[:1000]
                     for item in windows
@@ -1369,33 +1344,54 @@ def synthesize_human_information_project(
                 ],
             }
         )
-    prompt = f"""Task: synthesize a factual, human-facing information map for a long gameplay recording project.
+    prompt = f"""Task: develop an intent-led editorial account and selective production briefs from gameplay evidence.
 
-Output language: {output_language_instruction(project.get('output_locale', 'en'))}
-Title/game: {project.get('title_or_game', '')}
-Recording objective: {project.get('objective', '')}
+Output language: {processing_language_instruction(project, ('editorial_direction', 'editor_instruction', 'narrator_direction', 'memory_jog'))}
+Project brief (creator-provided; unspecified fields are not permission to invent a format):
+{json.dumps(project_brief(project), ensure_ascii=False)}
 
-The application is an evidence dashboard for a human editor. Build a rich multi-scale account of what
-happened and propose post-recorded narration only where it closes a real viewer knowledge gap. The human
-will decide every cut. Produce no cut, preserve, trim, montage, highlight, duration, or creative-effect
-recommendations.
+Researched editorial guidance (contextual principles, not mandatory content categories):
+{json.dumps(EDITORIAL_GUIDANCE, ensure_ascii=False)}
 
-Narration practice:
-{EDITORIAL_PRACTICES_POLICY}
+The intended video, audience familiarity, and creator's stated priorities govern selection. Factual
+completeness is NOT the goal. The human editor will decide the edit. editorial_direction must state
+the intended viewer experience and selection priorities, not retell the source chronologically.
+Identify the viewer experience this particular brief calls for. Weigh each passage's contribution and
+the cost of omitting it. Relationships such as learning, escalation, contrast, repetition and payoff
+can make similar passages valuable together. Do not adopt a genre or compression policy by default.
+Use existing game knowledge as background, never as evidence that an action happened in this source.
 
 Rules:
+- Audience contracts override generic narration opportunities. editor_instruction tells the EDITOR what
+  to show, compress or join; narrator_direction tells the NARRATOR what useful point to communicate in
+  the creator's voice. narrator_direction is the ONLY viewer-facing narration content; do not duplicate it in bullets.
+  evidence_notes and uncertainties record INTERNAL verification limits. They are not automatic requests
+  for the narrator to explain those limits. Genuine creator uncertainty can be content when it serves
+  the intended experience; distinguish that from the analyst's missing evidence. memory_jog is editor-only.
+- added_value must identify what narration contributes beyond the retained game presentation and live
+  commentary. Return ZERO narration briefs when neither needs supplementing. Explain the specific
+  viewer need and what narration adds; naming an event is not sufficient justification. A source
+  transition need not be explained unless its meaning is unclear for this audience or the planned edit.
+- narrator_direction is a directly recordable draft in the intended narrator's voice; use the creator's
+  first-person voice unless the project requests another perspective. Delivery/edit instructions belong
+  in editor_instruction. Do not turn the narrator into an analyst describing the creator from outside.
+- Choose narration density, placement and scope from the project, not a universal opening-only or
+  frequent-voiceover rule. Consider source audio and presentation before adding an explanation.
+  If narration depends on omission or a planned juxtaposition, make that condition explicit for the editor.
+  These briefs are provisional: adaptive cutting will review them against the actual proposed assembly.
+  Do not invent later footage, outcomes, motivations or prior creator knowledge.
 - Treat the full transcript as the spoken backbone and the event graph as the scene-state backbone.
 - event_phases are factual long-running activities: stages, areas, attempts, character creation, build
   development, boss battles, conversations, interruptions, and outcomes. They may overlap when they describe
   different scales or themes. Use evidence-supported boundaries rather than processing-window edges.
 - story_threads capture long-horizon relationships. Each anchor must identify a concrete setup, development,
   reversal, callback, or payoff. Shared nouns alone do not establish a relationship.
-- Narration is the sole editorial recommendation. Use it selectively for opaque mechanics, consequences,
-  route/session bridges, retry compression, lore synthesis, callbacks, content mediation, or outcome context.
+- At this boundary produce editorial direction and provisional narration briefs; concrete cut decisions
+  belong to the downstream assembly operation. Ground every suggested explanation in source evidence.
 - Preserve discovery-state honesty. Later knowledge may explain an earlier mistake retrospectively but must
   not make the creator appear to know it during the original moment.
 - Each narration brief is one cohesive passage. Merge adjacent ideas that serve one continuous explanation.
-  State specific factual talking points and evidence-bearing representative visuals; avoid generic prompts.
+  State a specific viewer-facing point and evidence-bearing representative visuals; avoid generic prompts.
 - Prefer source audio for reactions, jokes, uncertainty, discovery, and payoff. End a narration passage where
   retained source audio can carry the moment itself.
 - Opening context depends on title familiarity, series context, and the stated run objective. An obscure first
@@ -1483,6 +1479,10 @@ Return only the required JSON object.
                 "kind": str(item.get("kind") or "causal_bridge"),
                 "purpose": _text(item.get("purpose")),
                 "memory_jog": _text(item.get("memory_jog")),
+                "editor_instruction": _text(item.get("editor_instruction")),
+                "narrator_direction": _text(item.get("narrator_direction")),
+                "added_value": _text(item.get("added_value")),
+                "evidence_notes": _string_list(item.get("evidence_notes")),
                 "talking_points": _string_list(item.get("talking_points"))[:12],
                 "representative_visuals": _string_list(
                     item.get("representative_visuals")
@@ -1493,7 +1493,7 @@ Return only the required JSON object.
     return {
         "workflow": "human_information",
         "progression_summary": _text(parsed.get("progression_summary")),
-        "editorial_direction_summary": _text(parsed.get("progression_summary")),
+        "editorial_direction_summary": _text(parsed.get("editorial_direction")),
         "event_phases": sorted(
             phases,
             key=lambda item: (
@@ -1516,22 +1516,6 @@ Return only the required JSON object.
         "conflicts": [],
         "uncertainties": _string_list(parsed.get("uncertainties"))[:20],
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def select_editorial_subtitles(
@@ -1588,7 +1572,7 @@ def select_editorial_subtitles(
         ]
         prompt = f"""Task: select the spoken thoughts that benefit from appearing as on-screen subtitles in one mapped section of a long-form video.
 
-Output language: {output_language_instruction(project.get('output_locale', 'en'))}
+Output language: {processing_language_instruction(project)}
 Title/game: {project.get('title_or_game', '')}
 Recording objective: {project.get('objective', '')}
 Source ID: {unit['source_id']}
@@ -1728,8 +1712,6 @@ def _subtitle_phrase_survives_plan(
     return True
 
 
-
-
 def _build_executable_planning_units(project: dict[str, Any]) -> list[dict[str, Any]]:
     units: list[dict[str, Any]] = []
     target_ms = 12 * 60 * 1000
@@ -1815,38 +1797,14 @@ def _build_executable_planning_units(project: dict[str, Any]) -> list[dict[str, 
     return units
 
 
-
-
-
-
-
-
 def _load_project_source_transcript(source: dict[str, Any]) -> list[TranscriptEvidence]:
     output = source.get("stages", {}).get("transcription", {}).get("output")
     if not isinstance(output, dict):
         return []
-    timing_path = Path(str(output.get("timing_path") or ""))
-    text_path = Path(str(output.get("text_path") or ""))
-    try:
-        texts = []
-        for line in text_path.read_text(encoding="utf-8").splitlines():
-            _, separator, text = line.partition(". ")
-            texts.append(text if separator else line)
-        with timing_path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-    except (OSError, UnicodeError, csv.Error):
+    document_path = output.get("document_path")
+    if not document_path:
         return []
-    result = []
-    for row, text in zip(rows, texts):
-        try:
-            start_ms = round(float(row["start"]) * 1000)
-            end_ms = round(float(row["end"]) * 1000)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if text.strip() and end_ms > start_ms:
-            result.append(TranscriptEvidence(start_ms, end_ms, text.strip()))
-    return result
-
+    return load_transcript_evidence(Path(document_path))
 
 
 
@@ -1854,8 +1812,6 @@ def _items_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return int(left.get("end_ms", 0)) > int(right.get("start_ms", 0)) and int(
         left.get("start_ms", 0)
     ) < int(right.get("end_ms", 0))
-
-
 
 
 def _compact_event_graph(value: Any) -> dict[str, Any]:
@@ -1883,14 +1839,6 @@ def _compact_event_graph(value: Any) -> dict[str, Any]:
         and str(item.get("to_event_id")) in node_ids
     ]
     return {"nodes": nodes, "edges": edges}
-
-
-
-
-
-
-
-
 
 
 def build_editorial_prompt(
@@ -2022,16 +1970,6 @@ def _normalize_window_result(
     }
 
 
-
-
-
-
-
-
-
-
-
-
 def _normalize_timed_items(
     value: Any,
     source_id: str,
@@ -2099,8 +2037,6 @@ def _integer(value: Any, default: int) -> int:
         return default
 
 
-
-
 def _confidence(value: Any) -> float:
     try:
         number = float(value)
@@ -2118,42 +2054,6 @@ def _clock(milliseconds: int) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _valid_final_range(item: dict[str, Any], duration_ms: int) -> tuple[int, int] | None:

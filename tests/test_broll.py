@@ -208,7 +208,7 @@ class BrollTests(unittest.TestCase):
                 source_grounding_score=.9, technical_quality_score=.9,
             ),
         ]
-        accepted, omitted = apply_confidence_policy(items, mode="automatic", frontend_protocol=None)
+        accepted, omitted = apply_confidence_policy(items)
         self.assertEqual([item.id for item in accepted], ["good"])
         self.assertEqual(omitted[0]["reason"], "safe_policy_failed")
         self.assertIn("placement_safety", omitted[0]["failed_scores"])
@@ -360,7 +360,7 @@ class BrollTests(unittest.TestCase):
         )
         provider = FakeProvider(needs_response, initial_response, final_response)
 
-        def describe(candidates: object, _subtitles: object, _protocol: object) -> dict[str, str]:
+        def describe(candidates: object, _subtitles: object) -> dict[str, str]:
             rows = list(candidates)  # type: ignore[arg-type]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].asset.id, "asset")
@@ -368,7 +368,6 @@ class BrollTests(unittest.TestCase):
 
         with (
             patch("subtitler.broll.load_catalog", return_value=[asset]),
-            patch("subtitler.broll.request_filename_descriptions", side_effect=describe),
         ):
             outcome = plan_broll(
                 mode="automatic",
@@ -376,8 +375,8 @@ class BrollTests(unittest.TestCase):
                 subtitles=[Subtitle(0, 2, "The battle was difficult")],
                 fps=60,
                 provider=provider,
-                frontend_protocol="stdio-v1",
                 sidecar_path=None,
+                review=describe,
             )
 
         self.assertEqual(len(outcome.placements), 1)
@@ -464,7 +463,6 @@ class BrollTests(unittest.TestCase):
                 subtitles=[Subtitle(0, 2, "battle"), Subtitle(2, 6, "continues")],
                 fps=60,
                 provider=FakeProvider(needs_response, response),
-                frontend_protocol=None,
                 sidecar_path=sidecar,
             )
             self.assertEqual(len(outcome.placements), 1)
@@ -540,7 +538,6 @@ class BrollTests(unittest.TestCase):
                 subtitles=[Subtitle(0, 2, "battle")],
                 fps=60,
                 provider=provider,
-                frontend_protocol=None,
                 sidecar_path=None,
                 web_discovery=fail_discovery,  # type: ignore[arg-type]
             )

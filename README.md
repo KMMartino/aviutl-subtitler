@@ -2,25 +2,23 @@
 
 Local Windows pipeline for generating AviUtl `.exo` subtitles from VOD audio.
 
-The supported product surface is intentionally small: four workflows, each backed by a JSON config file. Fine-grained model, VAD, alignment, cleanup, subtitle, and EXO settings live in `configs/` instead of on the command line.
+The app composes reusable processing operations into subtitle and editing-guide workflows. Local and hosted subtitles share the same composition; silence markers use local VAD without transcription or cloud analysis. Model, VAD, alignment, cleanup, subtitle, and EXO settings live in `configs/`.
 
 ## Workflows
 
 ```text
 local                Local Gemma transcription + local cleanup
 hosted               Hosted transcription + tested cloud cleanup
-local-long-stream    Reserved; unavailable until suitable local models exist
-hosted-long-stream   Full transcript + factual event map + human editing guides
+hosted-long-stream   Local VAD -> source-media EXO with blank silence markers
 ```
 
-The launchers map to the available workflows. The desktop UI explains that long-stream
-analysis is hosted-only; the local long-stream configuration is retained as a reserved
-compatibility surface rather than a selectable product mode.
+The desktop starts with the desired output—subtitles or silence markers—and then
+the available processing location. Workflow definitions declare their capabilities;
+the unused local long-stream configuration and launcher have been removed.
 
 ```text
 run_subtitler_drop.bat
 run_subtitler_hosted_drop.bat
-run_subtitler_long_stream_drop.bat
 run_subtitler_long_stream_hosted_drop.bat
 ```
 
@@ -36,6 +34,12 @@ video/audio input
 -> optional cleanup/boundary review/final candidate report
 -> AviUtl .exo output
 ```
+
+The internal workflow migration is tracked in
+[plans/workflow-architecture.md](plans/workflow-architecture.md). The existing
+subtitle modes share explicit transcription and subtitle-planning requests. Long-stream processing detects speech locally, protects acoustic edges, and exports blank silence markers alongside the original media. Paired recordings and multiple sources are supported; exports over 12 hours split at source boundaries. Managed projects retain intermediate artifacts and copy user-facing EXO files beside the media.
+
+The editorial analysis backend is shelved for future workflows. Its CLI requires `--analysis` on `start` or `run`; the desktop does not invoke it. EXO re-import is not part of the active silence-marker workflow.
 
 ### Transcription segment policy
 
@@ -73,7 +77,7 @@ Available options:
 
 ```text
 input
---workflow local|hosted|local-long-stream|hosted-long-stream
+--workflow local|hosted|hosted-long-stream
 --output PATH
 --config PATH
 --env-file PATH
@@ -81,6 +85,7 @@ input
 --audio-track N
 --sidecar-dir PATH
 --cut-silence-encoder hevc-amf-cqp21|hevc-nvenc-qp21|hevc-qsv-q21|libx265-crf21
+--transcript-artifact PATH
 ```
 
 Everything else is configured in JSON.
@@ -92,7 +97,6 @@ Default configs live here:
 ```text
 configs/local.json
 configs/hosted.json
-configs/local-long-stream.json
 configs/hosted-long-stream.json
 ```
 
@@ -136,7 +140,51 @@ Typical sidecars:
 <output>.aligned_text.txt
 <output>.run.json
 <output>.api_usage.csv
+<output>.subtitles.json
+<output>.transcript.json
 ```
+
+The timed-text JSON stores text and timestamps together on the original source
+timeline, before optional silence cuts. It records its source, audio track, raw
+versus cleaned text policy, and completeness. It is a subtitle-plan artifact;
+the complete aligned transcript is stored separately in `.transcript.json`, with
+tokens, speech regions, source identity, settings, and a revision ID.
+
+Pass `--transcript-artifact` to explicitly reuse a complete transcript for another
+subtitle run. This skips audio extraction, transcription, and alignment; downstream
+cleanup and export still run with the current settings. Reuse requires the same
+audio track, source modification time, and sampled source fingerprint. It does not
+silently rerun a model when an artifact is incompatible. Set `cleanup.backend` to
+`none` in a workflow config to plan and export subtitles without model cleanup.
+
+The shelved editorial CLI accepts `--transcript-artifact` with `--analysis` on `start` and `run`;
+repeat it for multiple source files. Artifacts must match the project's sources
+and selected audio track. Replacing an already completed transcript requires
+`--restart-from transcription`, which invalidates its downstream results.
+
+With sidecars retained, restarting a run reuses completed transcription
+and subtitle planning. Changing cleanup or subtitle layout reruns planning without ASR;
+changing export/B-roll settings preserves both. Checkpoints retain tokens, markers,
+prior API usage, and dedicated transcript snapshots. B-roll separately saves its
+catalog, model requests, submitted review, and web discovery. Failed attempts retain
+known costs; corrupt artifacts stop instead of silently launching paid work.
+Unsent review-screen edits are not saved. Completed runs can reuse the same results;
+select “Start from the beginning” or pass `--fresh-run` to force new processing.
+
+Editorial stages use the same immutable operation-result store. Each result records
+its parameters, upstream revisions, and integrity checks; transcript files are also
+checked by content hash. Changing recorded inputs restarts the earliest affected
+boundary. New revisions use separate workspaces so partial-window caches cannot
+leak across settings changes. Explicit restart creates a new revision while keeping
+prior operation artifacts.
+
+Both source panels accept a finished recording URL using the configured managed
+yt-dlp installation. Recordings download in full to `SubUtl Sources` beside the
+managed media directory, with a `source.json` provenance artifact. Downloading is
+independent of paid processing and can be cancelled. Progress is shown for each
+media file (video and audio download separately). The B-roll library's existing
+rights/description admission and 20-minute window policy remain separate.
+
 
 Cleanup may also write:
 

@@ -1,3 +1,4 @@
+import { workflowCatalog } from "../../shared/workflowCatalog";
 import type { WorkflowName } from "./types";
 
 export function normalizeSlashes(path: string): string {
@@ -29,13 +30,7 @@ export function defaultOutputPath(inputPath: string, workflow: WorkflowName): st
   if (!inputPath) return "";
   const dir = dirname(inputPath);
   const stem = basenameWithoutExt(inputPath);
-  const suffix: Record<WorkflowName, string> = {
-    local: "",
-    hosted: "-hosted",
-    "local-long-stream": "-long-stream-local",
-    "hosted-long-stream": "-long-stream-hosted"
-  };
-  return joinPath(dir, `${stem}${suffix[workflow]}.exo`);
+  return joinPath(dir, `${stem}${workflowCatalog[workflow].outputSuffix}.exo`);
 }
 
 export function defaultSidecarDir(inputPath: string): string {

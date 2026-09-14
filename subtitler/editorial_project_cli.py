@@ -10,7 +10,8 @@ from typing import Literal, cast
 
 from .api_usage import ApiUsageLedger
 from .audio import get_media_duration
-from .config import default_config_path, project_root
+from .config import default_config_path, load_workflow_config, project_root
+from .editorial_locale import editorial_locale
 from .editorial_hosted import HostedEditorialExecutorOptions, HostedEditorialStageExecutor
 from .editorial_project import (
     EditorialProjectOptions,
@@ -31,6 +32,7 @@ from .editorial_resume import (
 )
 from .editorial_runner import EditorialRunInterrupted, run_editorial_project
 from .errors import SubtitlerError
+from .transcript_document import load_transcript_document
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,30 +43,34 @@ def build_parser() -> argparse.ArgumentParser:
     initialize.add_argument("--checkpoint", required=True)
     initialize.add_argument("--source", action="append", default=[])
     initialize.add_argument("--source-spec", action="append", default=[])
-    initialize.add_argument("--title", required=True)
-    initialize.add_argument("--objective", required=True)
-    initialize.add_argument("--target-min-sec", type=float, required=True)
-    initialize.add_argument("--target-max-sec", type=float, required=True)
+    initialize.add_argument("--title", default="Recording")
+    initialize.add_argument("--objective", default="Silence markers")
+    initialize.add_argument("--target-min-sec", type=float, default=60)
+    initialize.add_argument("--target-max-sec", type=float, default=60)
     initialize.add_argument("--must-keep", action="append", default=[])
     initialize.add_argument("--de-emphasize", action="append", default=[])
     initialize.add_argument("--subtitle-mode", choices=("full", "emphasis"), default="full")
     initialize.add_argument("--output-locale", choices=("en", "ja"), default="en")
+    initialize.add_argument("--processing-locale", choices=("en", "ja"))
+    initialize.add_argument("--config")
+    initialize.add_argument("--analysis", action="store_true")
 
-    start = commands.add_parser("start", help="Create a project and immediately run hosted analysis")
+    start = commands.add_parser("start", help="Create a project and generate local silence markers")
     start.add_argument("--checkpoint", required=True)
     start.add_argument("--source", action="append", default=[])
     start.add_argument("--source-spec", action="append", default=[])
-    start.add_argument("--title", required=True)
-    start.add_argument("--objective", required=True)
-    start.add_argument("--target-min-sec", type=float, required=True)
-    start.add_argument("--target-max-sec", type=float, required=True)
+    start.add_argument("--title", default="Recording")
+    start.add_argument("--objective", default="Silence markers")
+    start.add_argument("--target-min-sec", type=float, default=60)
+    start.add_argument("--target-max-sec", type=float, default=60)
     start.add_argument("--must-keep", action="append", default=[])
     start.add_argument("--de-emphasize", action="append", default=[])
     start.add_argument("--subtitle-mode", choices=("full", "emphasis"), default="full")
     start.add_argument("--output-locale", choices=("en", "ja"), default="en")
+    start.add_argument("--processing-locale", choices=("en", "ja"))
     _add_run_arguments(start, include_checkpoint=False)
 
-    run = commands.add_parser("run", help="Resume hosted analysis from a checkpoint")
+    run = commands.add_parser("run", help="Resume local silence detection from a checkpoint")
     _add_run_arguments(run, include_checkpoint=True)
 
     status = commands.add_parser("status", help="Print resumable project status as JSON")
@@ -89,13 +95,48 @@ def build_parser() -> argparse.ArgumentParser:
     apply_cuts.add_argument("--config", default=str(default_config_path("hosted-long-stream")))
     apply_cuts.add_argument("--env-file", default=str(project_root() / ".env"))
     apply_cuts.add_argument("--workspace")
-    apply_cuts.add_argument("--pipeline-script", default=str(project_root() / "aviutl_subtitle.py"))
+    narrate = commands.add_parser("narrate", help="Add narration to completed guides without rerunning analysis")
+    narrate.add_argument("--checkpoint", required=True)
+    narrate.add_argument("--output-checkpoint", required=True)
+    narrate.add_argument("--env-file", required=True)
+    narrate.add_argument("--workspace", required=True)
+    narrate.add_argument("--budget", type=float, default=4.0)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "narrate":
+            from .editorial_narration import apply_narration, generate_narration
+            from .editorial_exo import write_editorial_exo_parts
+            from .editorial_runner import _record_stage_cost
+            from .env import load_env_file
+            source = Path(args.checkpoint).resolve()
+            destination = Path(args.output_checkpoint).resolve()
+            if destination == source:
+                raise SubtitlerError("Use a new checkpoint path to preserve the original guide")
+            project = load_editorial_checkpoint(source)
+            if project['editorial_map']['action_planning']['status'] != 'complete':
+                raise SubtitlerError("Narration requires completed editing recommendations")
+            import shutil
+            if source.with_suffix('.operations').is_dir():
+                shutil.copytree(source.with_suffix('.operations'), destination.with_suffix('.operations'), dirs_exist_ok=True)
+            load_env_file(Path(args.env_file))
+            try:
+                narration = generate_narration(project, Path(args.workspace), {'narration_budget_usd': args.budget})
+            except Exception as exc:
+                _record_stage_cost(project, 'project', 'narration_suggestions', getattr(exc, 'editorial_failure_output', {}))
+                write_editorial_checkpoint(destination, project)
+                raise
+            apply_narration(project, narration)
+            _record_stage_cost(project, 'project', 'narration_suggestions', narration)
+            parts = write_editorial_exo_parts(destination.with_suffix('.exo'), project)
+            project['outputs'] = {'exo_path': parts[0]['path'], 'exo_parts': parts, 'html_path': str(destination.with_suffix('.html'))}
+            write_editorial_checkpoint(destination, project)
+            write_editorial_html(destination.with_suffix('.html'), project)
+            print(f"Narration complete: {len(narration['narration_briefs'])} suggestions; ${narration['api_cost_usd']:.4f}")
+            return 0
         if args.command == "init":
             return _initialize(args)
         if args.command == "run":
@@ -134,21 +175,26 @@ def _initialize(args: argparse.Namespace) -> int:
     project = create_editorial_project(
         sources,
         EditorialProjectOptions(
-            title_or_game=args.title,
-            objective=args.objective,
+            title_or_game=args.title.strip() or sources[0].path.stem,
+            objective=args.objective.strip() or "Silence markers",
             target_duration_min_ms=round(args.target_min_sec * 1000),
             target_duration_max_ms=round(args.target_max_sec * 1000),
             must_keep_notes=tuple(args.must_keep),
             de_emphasize_notes=tuple(args.de_emphasize),
             subtitle_mode=args.subtitle_mode,
             output_locale=args.output_locale,
+            processing_locale=editorial_locale(getattr(args, "processing_locale", None) or load_workflow_config(
+                "hosted-long-stream", Path(args.config) if getattr(args, "config", None) else None,
+            )["backend"]["language"]),
         ),
     )
     write_editorial_checkpoint(checkpoint, project)
     report = checkpoint.with_suffix(".html")
-    write_editorial_html(report, project)
+    if getattr(args, "analysis", False):
+        write_editorial_html(report, project)
     print(f"Editorial checkpoint: {checkpoint}")
-    print(f"Editorial report: {report}")
+    if getattr(args, "analysis", False):
+        print(f"Editorial report: {report}")
     return 0
 
 
@@ -157,13 +203,20 @@ def _run(args: argparse.Namespace) -> int:
     if getattr(args, "extend_project_spec", None):
         _extend_checkpoint(checkpoint, args.extend_project_spec)
     workspace = Path(args.workspace).resolve() if args.workspace else checkpoint.parent / f"{checkpoint.stem}.files"
+    if not getattr(args, 'analysis', False):
+        from .silence_markers import run_silence_markers
+        config = load_workflow_config('hosted-long-stream', Path(args.config))
+        run_silence_markers(checkpoint, workspace, audio_track=args.audio_track,
+            game_audio_track=config.get('editorial', {}).get('game_audio_track'),
+            exo=Path(args.exo).resolve() if getattr(args, 'exo', None) else None,
+            source_specs=_decode_source_specs(getattr(args, 'source_spec', [])) or None)
+        return 0
     report = Path(args.report).resolve() if args.report else checkpoint.with_suffix(".html")
     executor = HostedEditorialStageExecutor(
         HostedEditorialExecutorOptions(
             config_path=Path(args.config).resolve(),
             env_file=Path(args.env_file).resolve(),
             workspace=workspace,
-            pipeline_script=Path(args.pipeline_script).resolve(),
             audio_track=args.audio_track,
             glossary_path=Path(args.glossary).resolve() if args.glossary else None,
             game_knowledge_path=(
@@ -171,17 +224,32 @@ def _run(args: argparse.Namespace) -> int:
                 if args.game_knowledge_store
                 else None
             ),
+            transcript_artifacts=tuple(Path(item).resolve() for item in getattr(args, "transcript_artifact", [])),
         )
     )
+    if executor.transcript_artifacts:
+        project = load_editorial_checkpoint(checkpoint)
+        source_keys = {(Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"]).resolve(), 0 if source.get("media_mode") == "paired" else args.audio_track) for source in project["sources"]}
+        if not executor.transcript_artifacts.keys() <= source_keys:
+            raise SubtitlerError("A supplied transcript does not match this project's source files and audio track")
+        if getattr(args, "restart_from", None) not in {"source_probe", "transcription"}:
+            for source in project["sources"]:
+                artifact = executor.transcript_artifacts.get((Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"]).resolve(), 0 if source.get("media_mode") == "paired" else args.audio_track))
+                stored = source["stages"]["transcription"]
+                if artifact is not None and stored["status"] == "complete":
+                    previous = load_transcript_document(Path(stored["output"].get("document_path") or stored["output"]["transcript_path"]))
+                    if previous.revision_id != load_transcript_document(artifact).revision_id:
+                        raise SubtitlerError("A supplied transcript changed; use --restart-from transcription to replace its downstream results")
     run_editorial_project(
         checkpoint,
         executor,
         report_path=report,
+        exo_path=Path(args.exo).resolve() if getattr(args, "exo", None) else None,
         restart_from=getattr(args, "restart_from", None),
         source_specs=_decode_source_specs(getattr(args, "source_spec", [])) or None,
     )
     print(f"Editorial analysis complete: {report}")
-    print(f"Editorial AviUtl project: {checkpoint.with_suffix('.exo')}")
+    print(f"Editorial AviUtl project: {getattr(args, 'exo', None) or checkpoint.with_suffix('.exo')}")
     return 0
 
 
@@ -243,7 +311,6 @@ def _apply_cuts(args: argparse.Namespace) -> int:
             config_path=Path(args.config).resolve(),
             env_file=Path(args.env_file).resolve(),
             workspace=workspace,
-            pipeline_script=Path(args.pipeline_script).resolve(),
         )
     )
     provider = executor.build_narration_review_provider(
@@ -255,6 +322,8 @@ def _apply_cuts(args: argparse.Namespace) -> int:
             checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
             output_path=Path(args.output) if args.output else None,
             narration_provider=provider,
+            provider_parameters=executor.operation_parameters("semantic_spans"),
+            api_usage=usage,
             progress=lambda message: print(message, file=sys.stderr, flush=True),
         )
     finally:
@@ -294,7 +363,11 @@ def _parse_source_spec(raw_spec: str) -> EditorialSourceInput:
         raise SubtitlerError("Editorial source specification has an invalid pairingBasis")
     if spec.get("roleConfirmed") is not True:
         raise SubtitlerError("Editorial source roles must be confirmed before analysis")
+    speech_source = spec.get("speechSource", "facecam")
+    if speech_source not in {"facecam", "gameplay"}:
+        raise SubtitlerError("Invalid speech audio source")
     return EditorialSourceInput(
+        speech_source=cast(Literal["facecam", "gameplay"], speech_source),
         path=visual_path,
         duration_ms=visual_duration_ms,
         audio_path=audio_path,
@@ -331,14 +404,17 @@ def _add_run_arguments(parser: argparse.ArgumentParser, *, include_checkpoint: b
             ),
             default="compatible",
         )
+    parser.add_argument("--analysis", action="store_true", help="Run the shelved hosted editorial pipeline instead of local silence markers")
     parser.add_argument("--config", default=str(default_config_path("hosted-long-stream")))
     parser.add_argument("--env-file", default=str(project_root() / ".env"))
     parser.add_argument("--workspace")
     parser.add_argument("--report")
-    parser.add_argument("--pipeline-script", default=str(project_root() / "aviutl_subtitle.py"))
-    parser.add_argument("--audio-track", type=int, default=1)
+    parser.add_argument("--exo")
+    parser.add_argument("--audio-track", type=int, default=0)
     parser.add_argument("--glossary")
     parser.add_argument("--game-knowledge-store")
+    parser.add_argument("--transcript-artifact", action="append", default=[],
+                        help="Reuse a complete transcript; repeat for multiple sources")
 
 
 def _decode_source_specs(raw_specs: list[str]) -> list[dict[str, object]] | None:
@@ -385,6 +461,7 @@ def _extend_checkpoint(checkpoint: Path, raw_project: str) -> None:
             de_emphasize_notes=tuple(str(item) for item in request.get("deEmphasizeNotes", [])),
             subtitle_mode=cast(Literal["full", "emphasis"], request.get("subtitleMode", "full")),
             output_locale=cast(Literal["en", "ja"], project.get("output_locale", "en")),
+            processing_locale=editorial_locale(project.get("processing_locale", "en")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SubtitlerError("Editorial extension project settings are invalid") from exc

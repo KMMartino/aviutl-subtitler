@@ -33,14 +33,14 @@ def analyze_acoustic_emphasis(
     *,
     duration_ms: int,
     ffmpeg: str = "ffmpeg",
-    audio_track: int = 1,
+    audio_track: int = 0,
 ) -> AcousticEvents:
     """Find strong local energy changes without claiming they prove excitement."""
     with tempfile.TemporaryDirectory(prefix="subutl_acoustic_") as temp_name:
         wav_path = Path(temp_name) / "audio.wav"
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(media_path),
-            "-map", f"0:a:{max(0, audio_track - 1)}", "-ac", "1", "-ar", "16000",
+            "-map", f"0:a:{audio_track}", "-ac", "1", "-ar", "16000",
             "-c:a", "pcm_s16le", "-y", str(wav_path),
         ]
         completed = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)

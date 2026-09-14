@@ -4,6 +4,8 @@
 
 Respond in the language used by the user's latest prompt. Follow an explicit request for a different response language when provided.
 
+Write documents intended for the user's review in HTML and provide links to the HTML files. Internal and agent-facing documents may remain Markdown.
+
 ## Verification
 
 Run the checks for every changed surface without waiting for approval. A verification pass is complete when all applicable commands pass, or when the handoff names each failing command and distinguishes regressions from pre-existing failures.
@@ -101,6 +103,8 @@ Layer assignments are contractual:
 | Paired editorial media | Gameplay 1–2; facecam 3–4 | Above media | Above subtitles | Above markers |
 
 ## Releases and GitHub Actions
+
+Before choosing a release version, fetch remote tags and inspect published releases; the local package version alone may be stale. Run `npm --prefix frontend run release:version -- vX.Y.Z`, then commit both `frontend/package.json` and `frontend/package-lock.json` before creating that tag. Release CI verifies that the tag matches committed metadata instead of changing it during publication.
 
 Normal pushes to `main` run CI only. Publish Windows artifacts with a version tag, for example:
 

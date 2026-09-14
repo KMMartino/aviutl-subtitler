@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import sys
+
 import aviutl_subtitle
 from subtitler.config import load_workflow_config
 from subtitler.errors import SubtitlerError
@@ -50,7 +52,7 @@ class WorkflowConfigLoadingTests(unittest.TestCase):
             stderr = io.StringIO()
             argv = ["aviutl_subtitle.py", str(input_path), "--config", str(config_path)]
 
-            with patch.object(aviutl_subtitle.sys, "argv", argv), contextlib.redirect_stderr(stderr):
+            with patch.object(sys, "argv", argv), contextlib.redirect_stderr(stderr):
                 result = aviutl_subtitle.main()
 
         self.assertEqual(result, 1)

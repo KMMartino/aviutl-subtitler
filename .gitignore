@@ -78,3 +78,11 @@ Desktop.ini
 .DS_Store
 .idea/
 .vscode/
+
+# Local verification scripts and logs
+.worklogs/
+
+# Local tool cache and recording-specific analysis evidence
+/.vite/
+/plans/editorial-capability-evidence/
+/plans/editorial-capability-assessment-2026-09-08.html

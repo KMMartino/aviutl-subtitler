@@ -1,3 +1,4 @@
+import SourceUrlInput from "./SourceUrlInput";
 import { FileSearch, FileVideo, LoaderCircle } from "lucide-react";
 import { useState, type DragEvent } from "react";
 import type { MediaAnalysis } from "../lib/types";
@@ -15,6 +16,7 @@ type Props = {
   analysisError: string;
   disabled?: boolean;
   onInput(path: string): void;
+  onSourceBusyChange?(busy: boolean): void;
   onAudioTrack(value: number): void;
 };
 
@@ -47,6 +49,7 @@ export default function InputPanel(props: Props) {
           <button disabled={props.disabled} aria-label={t("input.browseAria")} onClick={pickInput} title={t("input.browseAria")}><FileSearch size={17} /> {t("common.browse")}</button>
         </div>
       </label>
+      <SourceUrlInput disabled={props.disabled} onInput={props.onInput} onBusyChange={props.onSourceBusyChange} />
       <div className="media-preview">
         <div className="thumbnail-frame">
           {props.analysis?.thumbnailDataUrl

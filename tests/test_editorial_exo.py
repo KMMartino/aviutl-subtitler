@@ -3,12 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from subtitler.timed_text import TimedTextDocument, TimedTextSpan, write_timed_text
 from subtitler.editorial_exo import (
     _event_graph_marker_layers,
     _human_information_marker_layers,
     _selected_editorial_subtitles,
     _source_edit_boundaries,
     write_editorial_exo,
+    write_editorial_exo_parts,
 )
 from subtitler.exo import encode_text_for_exo
 from subtitler.editorial_project import (
@@ -19,6 +21,55 @@ from subtitler.editorial_project import (
 
 
 class EditorialExoTests(unittest.TestCase):
+    def test_long_exports_keep_source_boundaries_and_review_part_local_cuts(self) -> None:
+        from subtitler.editorial_export_parts import export_source_groups, project_for_review
+        from subtitler.editorial_review import _map_markers_to_sources, apply_reviewed_editorial_cuts
+        from subtitler.editorial_project import write_editorial_checkpoint
+        from subtitler.errors import SubtitlerError
+
+        hour = 3_600_000
+        for hours, expected in [([4, 4, 4], [3]), ([3] * 6, [3, 3]),
+                                ([6, 3, 2, 2, 2, 2], [2, 4]), ([13, 2], [1, 1])]:
+            project = {"sources": [{"order": i, "duration_ms": h * hour} for i, h in enumerate(hours)]}
+            self.assertEqual([len(g) for g in export_source_groups(project)], expected)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = []
+            for i in range(6):
+                media = root / f"{i + 1}.mp4"
+                media.write_bytes(b"media")
+                inputs.append(EditorialSourceInput(media, 3 * hour, frame_rate=30, width=1920, height=1080))
+            project = create_editorial_project(inputs, EditorialProjectOptions("Game", "Session", 5000, 9000))
+            project["editorial_map"].update({"workflow": "human_information", "status": "complete",
+                "confirmed_cuts": [{"source_id": s["source_id"], "start_ms": 1000, "end_ms": 2000}
+                                   for s in project["sources"]]})
+            parts = write_editorial_exo_parts(root / "guide.exo", project)
+            self.assertEqual(len(parts), 2)
+            project["outputs"] = {"exo_parts": parts}
+            second = Path(parts[1]["path"]).read_text(encoding="shift_jis")
+            catalog = [{"source_id": s["source_id"], "activities": [{"activity_id": f"a{i}",
+                        "start_ms": 0, "end_ms": 1000, "label": "Opening"}], "states": []}
+                       for i, s in enumerate(project["sources"])]
+            layers = _event_graph_marker_layers({"editorial_map": {"editor_recommendations": {"catalog": catalog}}},
+                                                {project["sources"][3]["source_id"]: 0})
+            self.assertIn("A04", layers[0][0].text)
+            self.assertEqual(layers[0][0].start_time, 0)
+
+            self.assertNotIn(f"file={inputs[0].visual_path}", second)
+            reviewed = project_for_review(project, second)
+            cuts, _ = _map_markers_to_sources([(31, 60)], fps=30, project=reviewed)
+            self.assertEqual(cuts[0]["source_id"], project["sources"][3]["source_id"])
+            self.assertEqual((cuts[0]["start_ms"], cuts[0]["end_ms"]), (1000, 2000))
+            with self.assertRaises(SubtitlerError):
+                project_for_review(project, "file=unknown.mp4")
+            checkpoint = root / "guide.json"
+            write_editorial_checkpoint(checkpoint, project)
+            renamed = root / "reviewed.exo"
+            renamed.write_bytes(Path(parts[1]["path"]).read_bytes())
+            result = apply_reviewed_editorial_cuts(renamed, checkpoint_path=checkpoint)
+            self.assertEqual(result["cut_count"], 3)
+            self.assertEqual(result["removed_ms"], 3000)
+
     def test_selected_editorial_subtitle_is_always_rendered_on_one_line(self) -> None:
         artifact = {
             "sources": [],
@@ -326,12 +377,12 @@ class EditorialExoTests(unittest.TestCase):
                 [EditorialSourceInput(media, 10_000, frame_rate=60)],
                 EditorialProjectOptions("Run", "Tell the story", 5_000, 9_000, subtitle_mode="emphasis"),
             )
-            timing = root / "timing.csv"
-            timing.write_text("start,end\n1,2\n", encoding="utf-8")
-            text = root / "text.txt"
-            text.write_text("1. Full transcript line\n", encoding="utf-8")
+            document_path = root / "transcript.json"
+            write_timed_text(document_path, TimedTextDocument(
+                "revision", "source.mp4", 0, True, True, (TimedTextSpan(1, 2, "Full transcript line"),),
+            ))
             artifact["sources"][0]["stages"]["transcription"]["output"] = {
-                "timing_path": str(timing), "text_path": str(text)
+                "document_path": str(document_path)
             }
             artifact["editorial_map"]["emphasized_phrases"] = [{
                 "source_id": artifact["sources"][0]["source_id"],
@@ -373,13 +424,12 @@ class EditorialExoTests(unittest.TestCase):
                 ],
                 EditorialProjectOptions("Run", "Tell the story", 10_000, 20_000),
             )
-            timing = root / "timing.csv"
-            timing.write_text("start,end\n1.0,2.0\n", encoding="utf-8")
-            text = root / "text.txt"
-            text.write_text("1. Spoken line\n", encoding="utf-8")
+            document_path = root / "transcript.json"
+            write_timed_text(document_path, TimedTextDocument(
+                "revision", "source.mp4", 0, True, True, (TimedTextSpan(1, 2, "Spoken line"),),
+            ))
             artifact["sources"][1]["stages"]["transcription"]["output"] = {
-                "timing_path": str(timing),
-                "text_path": str(text),
+                "document_path": str(document_path),
             }
             source_id = artifact["sources"][1]["source_id"]
             artifact["editorial_map"]["emphasized_phrases"] = [{

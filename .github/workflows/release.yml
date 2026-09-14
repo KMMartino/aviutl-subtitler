@@ -82,11 +82,11 @@ jobs:
         working-directory: frontend
         run: npm audit
 
-      - name: Apply release version
+      - name: Verify committed release version
         working-directory: frontend
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: npm run release:version
+        run: npm run release:version -- --check
 
       - name: Build installer and portable app
         working-directory: frontend

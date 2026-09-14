@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest import mock
 
 import aviutl_subtitle
+from subtitler.config import load_workflow_config
 from subtitler.models import AlignedChunk, AlignedToken, AudioChunk, TranscriptChunk
+from subtitler.timed_text import load_timed_text
+from subtitler.transcript_workflow import run_transcript_workflow
 
 
 class _FakeTranscriber:
@@ -44,6 +47,63 @@ class _DeterministicAlignmentPool:
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required for the generated-audio integration fixture")
 class GeneratedAudioEndToEndTests(unittest.TestCase):
+    def test_direct_editorial_transcription_produces_source_timed_document(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="subtitler-e2e-") as directory:
+            root = Path(directory)
+            source = root / "generated.wav"
+            _write_generated_tone(source)
+            config = load_workflow_config("hosted-long-stream")
+            config["alignment"].update(device="cpu", workers=1)
+
+            def deterministic_vad(*, samples, sample_rate, **_kwargs):
+                self.assertEqual(sample_rate, 16000)
+                chunk = AudioChunk(0, 0.1, 0.9, samples[1600:14400], vad_group_index=0)
+                return [chunk], [chunk], [(0.1, 0.9)]
+
+            with (
+                mock.patch("subtitler.backends.existing_pipeline.segment_speech_with_groups", side_effect=deterministic_vad),
+                mock.patch("subtitler.backends.existing_pipeline.AlignmentPool", _DeterministicAlignmentPool),
+                mock.patch("subtitler.backends.existing_pipeline.ExistingPipelineBackend._build_transcriber",
+                           return_value=_FakeTranscriber()),
+                mock.patch("subtitler.subtitle_stage.build_refiner", side_effect=AssertionError("unexpected cleanup")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = run_transcript_workflow(
+                    source_path=source, config=config, workspace=root / "work", audio_track=0, glossary=[],
+                )
+            document = load_timed_text(result.document_path, require_complete_raw=True)
+            self.assertEqual([span.text for span in document.spans], ["テスト音声"])
+            self.assertEqual(document.source_path, str(source.resolve()))
+            self.assertTrue(result.transcript_path.is_file())
+            self.assertEqual(result.api_cost_usd, 0)
+            self.assertFalse(list(root.rglob("*.exo")))
+
+            # A second workflow consumes the artifact with all expensive stages disabled.
+            # CSV exports can be removed; they are no longer communication contracts.
+            for sidecar in (root / "work").glob("*.csv"):
+                sidecar.unlink()
+            reuse_config = root / "reuse-config.json"
+            reuse_settings = load_workflow_config("hosted")
+            reuse_settings["cleanup"]["backend"] = "none"
+            reuse_settings["cleanup"]["llm_split_planning"] = False
+            reuse_config.write_text(json.dumps(reuse_settings), encoding="utf-8")
+            output = root / "reused.exo"
+            argv = [
+                "aviutl_subtitle.py", str(source), "--workflow", "hosted", "--config", str(reuse_config),
+                "--output", str(output), "--audio-track", "0", "--sidecar-dir", str(root / "reuse"),
+                "--transcript-artifact", str(result.transcript_path), "--no-glossary",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch("subtitler.transcription_stage.extract_audio", side_effect=AssertionError("unexpected extraction")),
+                mock.patch("subtitler.transcription_stage.build_backend", side_effect=AssertionError("unexpected model")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(aviutl_subtitle.main(), 0)
+            self.assertIn("テスト音声".encode("utf-16-le").hex(), output.read_text(encoding="cp932"))
+            reused = load_timed_text(root / "reuse/reused.subtitles.json")
+            self.assertEqual(reused.input_revision_id, document.input_revision_id)
+
     def test_cli_converts_audio_and_runs_pipeline_to_exo(self) -> None:
         with tempfile.TemporaryDirectory(prefix="subtitler-e2e-") as temp_name:
             root = Path(temp_name)
@@ -95,7 +155,7 @@ class GeneratedAudioEndToEndTests(unittest.TestCase):
                     "subtitler.backends.existing_pipeline.ExistingPipelineBackend._build_transcriber",
                     return_value=transcriber,
                 ),
-                mock.patch.object(aviutl_subtitle, "_build_refiner", return_value=None),
+                mock.patch("subtitler.subtitle_stage.build_refiner", return_value=None),
                 contextlib.redirect_stdout(console),
             ):
                 result = aviutl_subtitle.main()

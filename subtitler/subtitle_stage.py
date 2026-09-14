@@ -6,7 +6,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .api_usage import ApiUsageLedger
 from .errors import SubtitlerError
@@ -14,11 +14,11 @@ from .external_refiners import GeminiTextRefiner, OpenAITextRefiner
 from .glossary import GlossaryEntry
 from .models import AlignedChunk, ExoMarker, Subtitle
 from .run_artifacts import (
+    RunArtifactPaths,
     build_youtube_chapter_markers,
     flag_possible_mistranscriptions,
     write_final_subtitle_text,
 )
-from .run_context import RunContext
 from .subtitle_planner import build_grouped_subtitles
 from .text_refiner import LlamaServerTextRefiner, TextRefiner
 
@@ -34,6 +34,18 @@ class RefinerFactory(Protocol):
 
 
 @dataclass(frozen=True)
+class SubtitleStageRequest:
+    """Subtitle policy selected by a workflow, without knowledge of mode names."""
+
+    config: dict[str, Any]
+    artifacts: RunArtifactPaths
+    diagnostics_enabled: bool = False
+    sidecars_enabled: bool = True
+    raw_transcript: bool = False
+    generate_chapters: bool = False
+
+
+@dataclass(frozen=True)
 class SubtitleStageOutcome:
     subtitles: list[Subtitle]
     chapter_markers: list[ExoMarker]
@@ -41,7 +53,7 @@ class SubtitleStageOutcome:
 
 
 def run_subtitle_stage(
-    context: RunContext,
+    inputs: SubtitleStageRequest,
     aligned: list[AlignedChunk],
     glossary: list[GlossaryEntry],
     api_usage: ApiUsageLedger,
@@ -49,52 +61,14 @@ def run_subtitle_stage(
     refiner_factory: RefinerFactory | None = None,
 ) -> SubtitleStageOutcome:
     """Plan and refine subtitles, always closing an initialized refiner."""
-    config = context.config
-    artifacts = context.artifacts
+    config = inputs.config
+    artifacts = inputs.artifacts
     cleanup_cfg = config["cleanup"]
     subtitle_cfg = config["subtitles"]
-    if context.args.workflow == "hosted-long-stream":
-        print(
-            "Long-stream editorial: retaining the full raw aligned transcript and skipping full subtitle cleanup.",
-            flush=True,
-        )
-        subtitles = build_grouped_subtitles(
-            aligned,
-            max_chars=int(subtitle_cfg["max_chars"]),
-            min_duration=float(subtitle_cfg["min_duration"]),
-            max_duration=float(subtitle_cfg["max_duration"]),
-            gap_threshold=float(subtitle_cfg["gap_threshold"]),
-            regroup_gap_sec=float(subtitle_cfg["regroup_gap_sec"]),
-            refiner=None,
-            llm_splitter=None,
-            regroup_profile_path=(
-                artifacts.regroup_profile if context.diagnostics_enabled else None
-            ),
-            llm_split_profile_path=None,
-            llm_split_console=False,
-            subtitle_timing_profile_path=(
-                artifacts.subtitle_timing_profile if context.diagnostics_enabled else None
-            ),
-            boundary_timing_profile_path=(
-                artifacts.boundary_timing_profile if context.diagnostics_enabled else None
-            ),
-            cleanup_diff_path=None,
-            chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
-            cleanup_window_subtitles=1,
-            cleanup_workers=1,
-            chain_split_workers=int(
-                subtitle_cfg["chain_split_workers"] or default_chain_split_workers(config)
-            ),
-            progress_callback=count_progress_reporter(),
-            planning_profile_path=(
-                artifacts.planning_profile if context.diagnostics_enabled else None
-            ),
-            strip_sentence_periods=False,
-        )
-        if artifacts.final_text is not None:
-            write_final_subtitle_text(artifacts.final_text, subtitles)
-        return SubtitleStageOutcome(subtitles, [], [])
-    refiner = (refiner_factory or build_refiner)(config, glossary, api_usage, artifacts.base)
+    raw = inputs.raw_transcript
+    if raw:
+        print("Retaining the full raw aligned transcript and skipping subtitle cleanup.", flush=True)
+    refiner = None if raw else (refiner_factory or build_refiner)(config, glossary, api_usage, artifacts.base)
     try:
         chapter_markers: list[ExoMarker] = []
         mistranscription_markers: list[ExoMarker] = []
@@ -106,42 +80,43 @@ def run_subtitle_stage(
             gap_threshold=float(subtitle_cfg["gap_threshold"]),
             regroup_gap_sec=float(subtitle_cfg["regroup_gap_sec"]),
             refiner=refiner,
-            llm_splitter=refiner if cleanup_cfg.get("llm_split_planning") else None,
-            regroup_profile_path=artifacts.regroup_profile if context.diagnostics_enabled else None,
+            llm_splitter=refiner if not raw and cleanup_cfg.get("llm_split_planning") else None,
+            regroup_profile_path=artifacts.regroup_profile if inputs.diagnostics_enabled else None,
             llm_split_profile_path=(
                 artifacts.llm_split_profile
-                if context.sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]
+                if not raw and inputs.sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]
                 else None
             ),
             llm_split_console=bool(
-                context.sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]
+                not raw and inputs.sidecars_enabled and config["diagnostics"]["llm_split_diagnostics"]
             ),
             subtitle_timing_profile_path=(
-                artifacts.subtitle_timing_profile if context.diagnostics_enabled else None
+                artifacts.subtitle_timing_profile if inputs.diagnostics_enabled else None
             ),
             boundary_timing_profile_path=(
-                artifacts.boundary_timing_profile if context.diagnostics_enabled else None
+                artifacts.boundary_timing_profile if inputs.diagnostics_enabled else None
             ),
-            cleanup_diff_path=artifacts.cleanup_diff if context.sidecars_enabled else None,
+            cleanup_diff_path=artifacts.cleanup_diff if not raw and inputs.sidecars_enabled else None,
             chain_lead_in_sec=max(0.0, float(subtitle_cfg["chain_lead_in_sec"])),
-            cleanup_window_subtitles=int(
+            cleanup_window_subtitles=1 if raw else int(
                 cleanup_cfg["window_subtitles"] or default_cleanup_window(config)
             ),
-            cleanup_workers=int(cleanup_cfg["workers"] or default_cleanup_workers(config)),
+            cleanup_workers=1 if raw else int(cleanup_cfg["workers"] or default_cleanup_workers(config)),
             chain_split_workers=int(
                 subtitle_cfg["chain_split_workers"] or default_chain_split_workers(config)
             ),
             progress_callback=count_progress_reporter(),
-            planning_profile_path=artifacts.planning_profile if context.diagnostics_enabled else None,
+            planning_profile_path=artifacts.planning_profile if inputs.diagnostics_enabled else None,
+            strip_sentence_periods=not raw,
         )
+        if (raw or refiner is not None) and artifacts.final_text is not None:
+            write_final_subtitle_text(artifacts.final_text, subtitles)
         if refiner is not None:
-            if artifacts.final_text is not None:
-                write_final_subtitle_text(artifacts.final_text, subtitles)
-            if context.args.workflow == "hosted" and config["additional_settings"]["youtube_chapters"]:
+            if inputs.generate_chapters:
                 chapter_markers = build_youtube_chapter_markers(
                     subtitles,
                     refiner,
-                    artifacts.chapter_markers if context.sidecars_enabled else None,
+                    artifacts.chapter_markers if inputs.sidecars_enabled else None,
                 )
             if cleanup_cfg.get("skip_final_review"):
                 print("Skipping final mistranscription check.", flush=True)

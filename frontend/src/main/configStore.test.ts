@@ -42,7 +42,6 @@ describe("config store runtime paths", () => {
     fs.mkdirSync(paths.bundledConfigRoot, { recursive: true });
     fs.writeFileSync(path.join(paths.bundledConfigRoot, "local.json"), JSON.stringify({ backend: { name: "existing-pipeline" } }));
     fs.writeFileSync(path.join(paths.bundledConfigRoot, "hosted.json"), JSON.stringify({ hosted: true }));
-    fs.writeFileSync(path.join(paths.bundledConfigRoot, "local-long-stream.json"), JSON.stringify({ long: "local" }));
     fs.writeFileSync(path.join(paths.bundledConfigRoot, "hosted-long-stream.json"), JSON.stringify({ long: "hosted" }));
 
     ensureFrontendState(paths);
@@ -77,7 +76,7 @@ describe("config store runtime paths", () => {
   it("does not overwrite existing user workflow configs", () => {
     const paths = makePaths();
     fs.mkdirSync(paths.bundledConfigRoot, { recursive: true });
-    for (const workflow of ["local", "hosted", "local-long-stream", "hosted-long-stream"]) {
+    for (const workflow of ["local", "hosted", "hosted-long-stream"]) {
       fs.writeFileSync(path.join(paths.bundledConfigRoot, `${workflow}.json`), JSON.stringify({ template: workflow }));
     }
     ensureFrontendState(paths);
@@ -269,7 +268,7 @@ describe("config store runtime paths", () => {
       modelsDirectory: path.join(legacyRoot, "models"),
       selectedWorkflow: "local",
     }, null, 2));
-    for (const workflow of ["local", "hosted", "local-long-stream", "hosted-long-stream"]) {
+    for (const workflow of ["local", "hosted", "hosted-long-stream"]) {
       fs.writeFileSync(path.join(legacyRoot, "configs", `${workflow}.json`), JSON.stringify({
         local: { model: path.join(legacyRoot, "models", "model.gguf") }
       }, null, 2));
@@ -368,7 +367,7 @@ function makeSubUtlPaths(): RuntimePaths {
 
 function writeWorkflowTemplates(paths: RuntimePaths): void {
   fs.mkdirSync(paths.bundledConfigRoot, { recursive: true });
-  for (const workflow of ["local", "hosted", "local-long-stream", "hosted-long-stream"]) {
+  for (const workflow of ["local", "hosted", "hosted-long-stream"]) {
     fs.writeFileSync(path.join(paths.bundledConfigRoot, `${workflow}.json`), JSON.stringify({ template: workflow }));
   }
 }

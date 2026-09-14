@@ -111,7 +111,6 @@ class TranscriptionRequest:
     sidecar_base: Path | None
     glossary: list[Any]
     profile_enabled: bool = False
-    workflow: str = "local"
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

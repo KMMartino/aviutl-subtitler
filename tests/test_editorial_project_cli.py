@@ -11,6 +11,24 @@ from subtitler.editorial_project_cli import main
 
 
 class EditorialProjectCliTests(unittest.TestCase):
+    def test_initialization_defaults_analysis_to_footage_language_with_explicit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"media")
+            config = root / "config.json"
+            config.write_text(json.dumps({"backend": {"language": "ja"}}), encoding="utf-8")
+            for override, expected in (([], "ja"), (["--processing-locale", "en"], "en")):
+                checkpoint = root / "project.json"
+                with patch("subtitler.editorial_project_cli.get_media_duration", return_value=60), contextlib.redirect_stdout(io.StringIO()):
+                    code = main(["init", "--checkpoint", str(checkpoint), "--source", str(source),
+                        "--title", "Game", "--objective", "Explain", "--target-min-sec", "30", "--target-max-sec", "45",
+                        "--output-locale", "en", "--config", str(config), *override])
+                self.assertEqual(code, 0)
+                project = json.loads(checkpoint.read_text(encoding="utf-8"))
+                self.assertEqual(project["processing_locale"], expected)
+                self.assertEqual(project["output_locale"], "en")
+
     def test_apply_cuts_wires_hosted_narration_review_and_reports_its_result(self) -> None:
         class Provider:
             closed = False
@@ -23,6 +41,9 @@ class EditorialProjectCliTests(unittest.TestCase):
         class Executor:
             def __init__(self, options) -> None:
                 self.options = options
+
+            def operation_parameters(self, stage):
+                return {"model": "test"}
 
             def build_narration_review_provider(self, usage, sidecar_base):
                 self.usage = usage

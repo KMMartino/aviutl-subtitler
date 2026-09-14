@@ -33,6 +33,7 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
     paths.mediaLibraryDatabase,
   ];
   if (request.editorialProject || request.editorialCheckpoint) {
+    if (request.deliverablePath) args.push("--exo", request.outputPath.replace(/\.json$/i, ".exo"));
     return {
       command: pythonPath,
       args,
@@ -41,6 +42,8 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
       env,
     };
   }
+  if (request.transcriptArtifacts?.[0]) args.push("--transcript-artifact", request.transcriptArtifacts[0]);
+  if (request.freshRun) args.push("--fresh-run");
   if (request.audioTrack !== undefined) {
     args.push("--audio-track", String(request.audioTrack));
   }
@@ -75,8 +78,7 @@ function buildEditorialArgs(paths: RuntimePaths, request: RunRequest): string[] 
       "--checkpoint", request.editorialCheckpoint,
       "--config", request.configPath,
       "--env-file", request.envFile,
-      "--pipeline-script", path.join(paths.bundledBackendRoot, "aviutl_subtitle.py"),
-      "--audio-track", String(request.audioTrack ?? 1),
+      "--audio-track", String(request.audioTrack ?? 0),
       "--game-knowledge-store", path.join(paths.stateRoot, "editorial-game-knowledge.json"),
     ];
     for (const source of request.editorialCheckpointSources ?? []) args.push("--source-spec", JSON.stringify(source));
@@ -109,13 +111,12 @@ function buildEditorialArgs(paths: RuntimePaths, request: RunRequest): string[] 
     request.configPath,
     "--env-file",
     request.envFile,
-    "--pipeline-script",
-    path.join(paths.bundledBackendRoot, "aviutl_subtitle.py"),
     "--audio-track",
-    String(request.audioTrack ?? 1),
+    String(request.audioTrack ?? 0),
     "--game-knowledge-store",
     path.join(paths.stateRoot, "editorial-game-knowledge.json"),
   ];
+  if (project.processingLocale) args.push("--processing-locale", project.processingLocale);
   for (const source of project.sources) args.push("--source-spec", JSON.stringify(source));
   if (request.sidecarDir) args.push("--workspace", request.sidecarDir);
   if (fs.existsSync(paths.glossaryFile)) args.push("--glossary", paths.glossaryFile);

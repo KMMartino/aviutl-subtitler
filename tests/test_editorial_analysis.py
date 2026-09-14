@@ -1,13 +1,13 @@
+from subtitler.timed_text import TimedTextDocument, TimedTextSpan, write_timed_text
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
+from subtitler.evidence import TranscriptEvidence, VisualEvidence
 from subtitler.editorial_analysis import (
     EditorialAnalysisWindow,
-    TranscriptEvidence,
-    VisualEvidence,
     analyze_editorial_source,
     build_editorial_event_graph,
     build_activity_episode_layer,
@@ -123,7 +123,8 @@ class EditorialAnalysisTests(unittest.TestCase):
         self.assertEqual(len(result["event_phases"]), 1)
         self.assertEqual(len(result["global_threads"]), 1)
         self.assertEqual(len(result["narration_briefs"]), 1)
-        self.assertIn("Produce no cut", provider.prompts[0])
+        self.assertIn("editor_instruction", provider.prompts[0])
+        self.assertIn("narrator_direction", provider.prompts[0])
 
     def test_activity_episode_reconciliation_joins_a_cross_window_activity(self) -> None:
         class EpisodeProvider:
@@ -514,10 +515,11 @@ class EditorialAnalysisTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            timing_path = root / "transcript.subtitle_timing.csv"
-            text_path = root / "transcript.final_text.txt"
-            timing_path.write_text("start,end\n1.0,2.0\n", encoding="utf-8")
-            text_path.write_text("1. This changes everything\n", encoding="utf-8")
+            document_path = root / "transcript.json"
+            write_timed_text(document_path, TimedTextDocument(
+                "revision", "source.mp4", 0, True, True,
+                (TimedTextSpan(1, 2, "This changes everything"),),
+            ))
             project = {
                 "title_or_game": "Game",
                 "objective": "First playthrough",
@@ -532,8 +534,7 @@ class EditorialAnalysisTests(unittest.TestCase):
                         "event_graph": {"nodes": []},
                     },
                     "stages": {"transcription": {"output": {
-                        "timing_path": str(timing_path),
-                        "text_path": str(text_path),
+                        "document_path": str(document_path),
                     }}},
                 }],
             }
@@ -552,24 +553,24 @@ class EditorialAnalysisTests(unittest.TestCase):
                 max_workers=1,
             )
 
-        self.assertEqual(provider.operation, "editorial_selective_subtitles")
-        self.assertIn("This changes everything", provider.prompt)
-        self.assertEqual(selected[0]["source_text"], "This changes everything")
+            self.assertEqual(provider.operation, "editorial_selective_subtitles")
+            self.assertIn("This changes everything", provider.prompt)
+            self.assertEqual(selected[0]["source_text"], "This changes everything")
 
-        cut_selected = select_editorial_subtitles(
-            provider=provider,
-            project=project,
-            final_actions=[{
-                "source_id": "source-1",
-                "start_ms": 0,
-                "end_ms": 10_000,
-                "action_type": "cut",
-                "operation_ranges": [],
-            }],
-            story_actions=[],
-            max_workers=1,
-        )
-        self.assertEqual(cut_selected, [])
+            cut_selected = select_editorial_subtitles(
+                provider=provider,
+                project=project,
+                final_actions=[{
+                    "source_id": "source-1",
+                    "start_ms": 0,
+                    "end_ms": 10_000,
+                    "action_type": "cut",
+                    "operation_ranges": [],
+                }],
+                story_actions=[],
+                max_workers=1,
+            )
+            self.assertEqual(cut_selected, [])
 
 
 if __name__ == "__main__":

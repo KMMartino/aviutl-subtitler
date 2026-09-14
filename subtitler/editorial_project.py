@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +12,11 @@ from typing import Any, Literal, Sequence
 from uuid import uuid4
 
 from .errors import SubtitlerError
+from .artifact_io import write_json_artifact
+from .media_identity import FINGERPRINT_ALGORITHM, fingerprint_source
 
 
 EDITORIAL_SCHEMA_VERSION = 4
-FINGERPRINT_ALGORITHM = "sha256-sampled-v1"
 CHECKPOINT_STAGES = (
     "source_probe",
     "transcription",
@@ -42,31 +42,38 @@ SOURCE_DERIVED_EDITORIAL_FIELDS = (
 # Increment the matching boundary version whenever its artifact contract or
 # behavior changes. See AGENTS.md for the mandatory maintenance rule.
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
-    "source_probe": 2,
-    "transcription": 11,
-    "visual_learning": 15,
+    "source_probe": 6,
+    "transcription": 14,
+    "visual_learning": 17,
     "semantic_spans": 10,
     "local_reconciliation": 1,
-    "global_reconciliation": 10,
-    "action_planning": 11,
+    "global_reconciliation": 15,
+    "action_planning": 36,
     "editorial_assets": 1,
 }
-LEGACY_EDITORIAL_STAGE_VERSIONS = {stage: 1 for stage in EDITORIAL_PIPELINE_STAGES}
+GLOBAL_OUTPUT_FIELDS = (
+    'global_threads', 'connections', 'conflicts', 'duration_budget',
+    'editorial_direction_summary', 'optimal_plan', 'director_review', 'director_model',
+    'payoff_threads', 'story_actions', 'event_phases', 'narration_briefs',
+    'progression_summary', 'uncertainties', 'workflow',
+)
+ACTION_OUTPUT_FIELDS = (
+    'director_review', 'director_model', 'final_actions', 'supporting_edits',
+    'editorial_threads', 'story_actions', 'emphasized_phrases', 'duration_budget',
+    'workflow', 'protected_zones', 'cut_candidates', 'confirmed_cuts',
+    'removed_ms', 'narration_replaced_ms', 'prompt_version', 'narration_briefs',
+    'editor_recommendations', 'gap_edge_mode', 'cutting_mode', 'adaptive_report_path', 'adaptive_artifact_path', 'baseline_confirmed_cuts',
+)
+
+
 CheckpointStatus = Literal["pending", "in_progress", "complete", "failed"]
-
-
-@dataclass(frozen=True)
-class SourceFingerprint:
-    algorithm: str
-    size_bytes: int
-    digest: str
-    sample_size_bytes: int
 
 
 @dataclass(frozen=True)
 class EditorialSourceInput:
     path: Path
     duration_ms: int
+    speech_source: Literal["facecam", "gameplay"] = "facecam"
     audio_path: Path | None = None
     visual_path: Path | None = None
     audio_duration_ms: int | None = None
@@ -90,44 +97,7 @@ class EditorialProjectOptions:
     de_emphasize_notes: tuple[str, ...] = ()
     subtitle_mode: Literal["full", "emphasis"] = "full"
     output_locale: Literal["en", "ja"] = "en"
-
-
-def fingerprint_source(path: Path, *, sample_size: int = 1024 * 1024) -> SourceFingerprint:
-    """Fingerprint large media without reading the full file.
-
-    The digest is independent of filename and timestamps so moved or renamed
-    source media can be relinked. Size plus evenly distributed samples guard
-    against accidentally accepting a different recording with the same name.
-    """
-    if sample_size <= 0:
-        raise ValueError("sample_size must be positive")
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        raise SubtitlerError(f"Could not inspect editorial source {path}: {exc}") from exc
-    if not path.is_file():
-        raise SubtitlerError(f"Editorial source is not a file: {path}")
-
-    hasher = hashlib.sha256()
-    hasher.update(FINGERPRINT_ALGORITHM.encode("ascii"))
-    hasher.update(size.to_bytes(16, "big", signed=False))
-    offsets = _sample_offsets(size, sample_size)
-    try:
-        with path.open("rb") as handle:
-            for offset in offsets:
-                handle.seek(offset)
-                data = handle.read(min(sample_size, size - offset))
-                hasher.update(offset.to_bytes(16, "big", signed=False))
-                hasher.update(len(data).to_bytes(8, "big", signed=False))
-                hasher.update(data)
-    except OSError as exc:
-        raise SubtitlerError(f"Could not fingerprint editorial source {path}: {exc}") from exc
-    return SourceFingerprint(
-        algorithm=FINGERPRINT_ALGORITHM,
-        size_bytes=size,
-        digest=hasher.hexdigest(),
-        sample_size_bytes=sample_size,
-    )
+    processing_locale: Literal["en", "ja"] = "en"
 
 
 def create_editorial_project(
@@ -144,6 +114,8 @@ def create_editorial_project(
     normalized_paths: set[str] = set()
     source_records: list[dict[str, Any]] = []
     for order, source in enumerate(sources):
+        if source.speech_source not in {"facecam", "gameplay"}:
+            raise SubtitlerError("Invalid speech audio source")
         visual = (source.visual_path or source.path).resolve()
         audio = (source.audio_path or visual).resolve()
         if source.media_mode not in {"single", "paired"}:
@@ -190,6 +162,7 @@ def create_editorial_project(
                 "fingerprint": asdict(visual_fingerprint),
                 "media_mode": source.media_mode,
                 "pairing_basis": source.pairing_basis,
+                "speech_source": source.speech_source,
                 "audio_path": str(audio),
                 "visual_path": str(visual),
                 "audio_original_name": audio.name,
@@ -222,6 +195,7 @@ def create_editorial_project(
         "de_emphasize_notes": [],
         "subtitle_mode": "full",
         "output_locale": options.output_locale,
+        "processing_locale": options.processing_locale,
         "pipeline_versions": dict(EDITORIAL_STAGE_VERSIONS),
         "sources": source_records,
         "cumulative_context": _empty_cumulative_context(),
@@ -323,21 +297,7 @@ def write_editorial_checkpoint(path: Path, artifact: dict[str, Any]) -> None:
     """Validate and atomically replace a project checkpoint."""
     validate_editorial_project(artifact)
     artifact["updated_at_utc"] = _utc_now()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(artifact, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
+    write_json_artifact(path, artifact, indent=2)
 
 
 def load_editorial_checkpoint(path: Path) -> dict[str, Any]:
@@ -349,14 +309,42 @@ def load_editorial_checkpoint(path: Path) -> dict[str, Any]:
         raise SubtitlerError(f"Could not read editorial checkpoint {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SubtitlerError("Editorial checkpoint must contain a JSON object")
-    _upgrade_legacy_checkpoint(value)
-    _upgrade_output_locale(value)
-    _upgrade_action_planning_stage(value)
-    _upgrade_versionless_boundaries(value)
+    validate_editorial_project(value)
     _upgrade_editorial_map_fields(value)
     _repair_source_derived_editorial_fields(value)
+    for stage, fields in ((GLOBAL_CHECKPOINT_STAGE, GLOBAL_OUTPUT_FIELDS),
+                          (ACTION_CHECKPOINT_STAGE, ACTION_OUTPUT_FIELDS),
+                          (ASSET_CHECKPOINT_STAGE, ("supporting_edits", "editorial_assets"))):
+        checkpoint = value["editorial_map"][stage]
+        if checkpoint["status"] == "complete" and isinstance(checkpoint.get("output"), dict):
+            for field in fields:
+                if field in checkpoint["output"]:
+                    value["editorial_map"]["assets" if field == "editorial_assets" else field] = checkpoint["output"][field]
+    _verify_operation_results(path, value)
+    narration = value.get('narration_artifact')
+    if isinstance(narration, dict) and 'editor_recommendations' in value['editorial_map']:
+        from .editorial_narration import apply_narration, narration_inputs
+        from .operation_store import content_digest
+        if narration.get('input_revision') == content_digest(narration_inputs(value)):
+            apply_narration(value, narration)
     validate_editorial_project(value)
     return value
+
+
+def _verify_operation_results(path: Path, project: dict[str, Any]) -> None:
+    from .api_usage import ApiUsageLedger
+    from .operation_store import ArtifactError, OperationStore, content_digest
+
+    checkpoints = [checkpoint for source in project["sources"] for checkpoint in source["stages"].values()]
+    checkpoints.extend(project["editorial_map"][stage] for stage in PROJECT_CHECKPOINT_STAGES)
+    if not any("operation_result" in checkpoint for checkpoint in checkpoints):
+        return
+    store = OperationStore(path.with_suffix(".operations"), project["project_id"], ApiUsageLedger(), restore_usage=False)
+    for checkpoint in checkpoints:
+        if "operation_result" in checkpoint:
+            saved = store.resolve(checkpoint["operation_result"])
+            if content_digest(saved) != content_digest(checkpoint.get("output")):
+                raise ArtifactError("Editorial checkpoint differs from its immutable operation result")
 
 
 def update_source_stage(
@@ -454,6 +442,8 @@ def validate_editorial_project(artifact: dict[str, Any]) -> None:
         raise SubtitlerError("Editorial subtitle mode is invalid")
     if artifact.get("output_locale") not in {"en", "ja"}:
         raise SubtitlerError("Editorial output locale is invalid")
+    if artifact.get("processing_locale", "en") not in {"en", "ja"}:
+        raise SubtitlerError("Editorial processing locale is invalid")
     minimum = artifact.get("target_duration_min_ms")
     maximum = artifact.get("target_duration_max_ms")
     if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum <= 0:
@@ -482,6 +472,8 @@ def validate_editorial_project(artifact: dict[str, Any]) -> None:
             raise SubtitlerError("Editorial source order values must be unique non-negative integers")
         ids.add(source_id)
         orders.add(order)
+        if source.get("speech_source", "facecam") not in {"facecam", "gameplay"}:
+            raise SubtitlerError("Invalid speech audio source")
         mode = source.get("media_mode")
         if mode not in {"single", "paired"}:
             raise SubtitlerError(f"Editorial source media mode is invalid: {source_id}")
@@ -525,13 +517,6 @@ def validate_editorial_project(artifact: dict[str, Any]) -> None:
         _validate_stage_checkpoint(editorial_map[stage], stage, pipeline_versions[stage])
 
 
-def _sample_offsets(size: int, sample_size: int) -> list[int]:
-    if size <= sample_size * 3:
-        return [0]
-    last = size - sample_size
-    return sorted({0, max(0, (size - sample_size) // 2), last})
-
-
 def _validate_fingerprint(value: Any, source_id: str) -> None:
     if not isinstance(value, dict) or value.get("algorithm") != FINGERPRINT_ALGORITHM:
         raise SubtitlerError(f"Editorial source fingerprint is invalid: {source_id}")
@@ -544,102 +529,6 @@ def _validate_stage_checkpoint(value: Any, stage: str, expected_version: int) ->
         raise SubtitlerError(f"Editorial stage boundary version is invalid: {stage}")
     if value.get("status") not in {"pending", "in_progress", "complete", "failed"}:
         raise SubtitlerError(f"Editorial stage checkpoint status is invalid: {stage}")
-
-
-def _upgrade_legacy_checkpoint(artifact: dict[str, Any]) -> None:
-    """Upgrade the unreleased single-file schema without re-fingerprinting media."""
-    if artifact.get("schema_version") != 1:
-        return
-    sources = artifact.get("sources")
-    if not isinstance(sources, list):
-        return
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        path = source.get("path")
-        name = source.get("original_name")
-        duration = source.get("duration_ms")
-        fingerprint = source.get("fingerprint")
-        source.update(
-            {
-                "media_mode": "single",
-                "pairing_basis": "single",
-                "audio_path": path,
-                "visual_path": path,
-                "audio_original_name": name,
-                "visual_original_name": name,
-                "audio_duration_ms": duration,
-                "visual_duration_ms": duration,
-                "frame_rate": None,
-                "audio_fingerprint": fingerprint,
-                "visual_fingerprint": fingerprint,
-            }
-        )
-    artifact["schema_version"] = 2
-
-
-def _upgrade_output_locale(artifact: dict[str, Any]) -> None:
-    """Treat every checkpoint written before locale support as English."""
-    if artifact.get("schema_version") != 2:
-        return
-    artifact["output_locale"] = "en"
-    artifact["schema_version"] = 3
-
-
-def _upgrade_action_planning_stage(artifact: dict[str, Any]) -> None:
-    """Add the separately resumable executable-planning boundary."""
-    if artifact.get("schema_version") != 3:
-        return
-    versions = artifact.get("pipeline_versions")
-    action_version = 1
-    if isinstance(versions, dict):
-        action_version = int(versions.setdefault(ACTION_CHECKPOINT_STAGE, 1))
-    editorial_map = artifact.get("editorial_map")
-    if isinstance(editorial_map, dict):
-        # Schema 3 predates this boundary. Treat any stray value as non-durable
-        # rather than pairing it with a synthetic version and accepting it.
-        editorial_map[ACTION_CHECKPOINT_STAGE] = {
-            "version": action_version,
-            "status": "pending",
-            "attempts": 0,
-            "started_at_utc": None,
-            "completed_at_utc": None,
-            "error": "",
-            "output": None,
-        }
-    artifact["schema_version"] = EDITORIAL_SCHEMA_VERSION
-
-
-def _upgrade_versionless_boundaries(artifact: dict[str, Any]) -> None:
-    versions = artifact.get("pipeline_versions")
-    if not isinstance(versions, dict):
-        versions = dict(LEGACY_EDITORIAL_STAGE_VERSIONS)
-        artifact["pipeline_versions"] = versions
-    for stage in EDITORIAL_PIPELINE_STAGES:
-        versions.setdefault(stage, EDITORIAL_STAGE_VERSIONS[stage] if stage == ASSET_CHECKPOINT_STAGE else 1)
-    for source in artifact.get("sources", []):
-        if not isinstance(source, dict) or not isinstance(source.get("stages"), dict):
-            continue
-        for stage in CHECKPOINT_STAGES:
-            checkpoint = source["stages"].get(stage)
-            if isinstance(checkpoint, dict) and "version" not in checkpoint:
-                checkpoint["version"] = int(versions.get(stage, 1))
-    editorial_map = artifact.get("editorial_map")
-    if isinstance(editorial_map, dict):
-        for stage in PROJECT_CHECKPOINT_STAGES:
-            checkpoint = editorial_map.get(stage)
-            if not isinstance(checkpoint, dict):
-                editorial_map[stage] = {
-                    "version": int(versions.get(stage, EDITORIAL_STAGE_VERSIONS[stage])),
-                    "status": "pending",
-                    "attempts": 0,
-                    "started_at_utc": None,
-                    "completed_at_utc": None,
-                    "error": "",
-                    "output": None,
-                }
-            elif "version" not in checkpoint:
-                checkpoint["version"] = int(versions.get(stage, 1))
 
 
 def _upgrade_editorial_map_fields(artifact: dict[str, Any]) -> None:
@@ -701,6 +590,7 @@ def _repair_source_derived_editorial_fields(artifact: dict[str, Any]) -> None:
             and checkpoint.get("status") == "complete"
             and isinstance(output, dict)
         ):
+            source["result"] = output
             completed_outputs.append(output)
     if not completed_outputs:
         return
@@ -711,6 +601,14 @@ def _repair_source_derived_editorial_fields(artifact: dict[str, Any]) -> None:
             if isinstance(values, list):
                 rebuilt.extend(values)
         editorial_map[field] = rebuilt
+    # Adaptive assembly may review the global draft. Restore the latest completed
+    # owner so reopening a project cannot resurrect omitted narration.
+    for boundary in (GLOBAL_CHECKPOINT_STAGE, "action_planning"):
+        checkpoint = editorial_map.get(boundary)
+        if isinstance(checkpoint, dict) and checkpoint.get("status") == "complete":
+            output = checkpoint.get("output")
+            if isinstance(output, dict) and isinstance(output.get("narration_briefs"), list):
+                editorial_map["narration_briefs"] = list(output["narration_briefs"])
 
 
 def _validate_options(options: EditorialProjectOptions) -> None:
@@ -724,6 +622,8 @@ def _validate_options(options: EditorialProjectOptions) -> None:
         raise SubtitlerError("Editorial target duration range is invalid")
     if options.subtitle_mode not in {"full", "emphasis"}:
         raise SubtitlerError("Editorial subtitle mode is invalid")
+    if options.processing_locale not in {"en", "ja"}:
+        raise SubtitlerError("Editorial processing locale must be English or Japanese")
     if options.output_locale not in {"en", "ja"}:
         raise SubtitlerError("Editorial output locale must be English or Japanese")
 

@@ -1,9 +1,13 @@
+import CreatorWorkspace from "./components/CreatorWorkspace";
+import { speechPath } from "../shared/creatorProject";
+import type { CreatorProject, ProjectResult } from "../shared/creatorProject";
+import { buildEditorialSources } from "./lib/editorialPairing";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { ArrowLeft, Library, Settings as SettingsIcon } from "lucide-react";
 import ModeSelector from "./components/ModeSelector";
 import ThemeSelector from "./components/ThemeSelector";
 import InputPanel from "./components/InputPanel";
-import EditorialProjectPanel from "./components/EditorialProjectPanel";
+import SilenceProjectPanel from "./components/SilenceProjectPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import GlossaryPanel from "./components/GlossaryPanel";
 import RunPanel from "./components/RunPanel";
@@ -16,7 +20,7 @@ import BrollReviewScreen from "./components/BrollReviewScreen";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
 import { defaultEditorialCheckpointPath, defaultOutputPath, defaultSidecarDir } from "./lib/paths";
 import type { AppSettings, BrollCandidate, BrollReviewDecision, CoreWorkflowSettings, CutSilenceEncoderPreset, EditorialCutApplicationResult, EditorialProjectRequest, EditorialRestartMode, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
-import { isHostedWorkflow, isLocalWorkflow } from "./lib/workflowLabels";
+import { isLocalWorkflow } from "../shared/workflowCatalog";
 import { useBatchedLog } from "./hooks/useBatchedLog";
 import { useMediaAnalysis } from "./hooks/useMediaAnalysis";
 import { useHostedModels } from "./hooks/useHostedModels";
@@ -29,6 +33,40 @@ import { useI18n } from "./i18n";
 
 export default function App() {
   const { setLocale, t } = useI18n();
+  const [creatorProject, setCreatorProject] = useState<CreatorProject | null>(null);
+  const creatorProjectRef = useRef<CreatorProject | null>(null);
+  const projectSaveQueue = useRef(Promise.resolve());
+  const [projectSaving, setProjectSaving] = useState(false);
+  function changeEditorialProject(value: EditorialProjectRequest) {
+    setEditorialProject(value);
+    const directory = creatorProjectRef.current?.directory;
+    if (!directory) return;
+    setProjectSaving(true);
+    projectSaveQueue.current = projectSaveQueue.current.then(async () => {
+      const project = creatorProjectRef.current;
+      if (!project || project.directory !== directory) return;
+      const recordings = value.sources.map((source) => ({ id: project.recordings.find((recording) => recording.source.visualPath === source.visualPath)?.id ?? crypto.randomUUID(), source }));
+      const saved = await window.subtitler.updateProject({ ...project, recordings, editorial: value });
+      creatorProjectRef.current = saved; setCreatorProject(saved);
+    }).catch((error: unknown) => setNotice(String(error)));
+    const pending = projectSaveQueue.current;
+    void pending.finally(() => { if (pending === projectSaveQueue.current) setProjectSaving(false); });
+  }
+  const [creatorRecordingId, setCreatorRecordingId] = useState("");
+  function receiveProject(project: CreatorProject | null) {
+    creatorProjectRef.current = project;
+    setCreatorProject(project);
+    if (project) {
+      setEditorialProject({ ...project.editorial, sources: project.recordings.map((recording) => recording.source) });
+      const recording = project.recordings.find((recording) => recording.id === creatorRecordingId) ?? project.recordings[0];
+      setCreatorRecordingId(recording?.id ?? "");
+      setInputPath(recording ? (settings?.selectedWorkflow === "hosted-long-stream" ? recording.source.visualPath : speechPath(recording.source)) : "");
+    } else {
+      setCreatorRecordingId(""); setInputPath("");
+      setEditorialProject({ sources: [], titleOrGame: "", objective: "", targetDurationMinSeconds: 60, targetDurationMaxSeconds: 60, outputLocale: "en" });
+    }
+    setEditorialResumeCheckpoint(""); setEditorialExtensionCheckpoint(""); setReviewedEditorialProject("");
+  }
   const [startupError, setStartupError] = useState("");
   const pathRequest = useRef(0);
   const [projectRoot, setProjectRoot] = useState("");
@@ -50,15 +88,15 @@ export default function App() {
     outputLocale: "en"
   });
   const [editorialResumeCheckpoint, setEditorialResumeCheckpoint] = useState("");
-  const [editorialRestartFrom, setEditorialRestartFrom] = useState<EditorialRestartMode>("compatible");
+  const [editorialRestartFrom] = useState<EditorialRestartMode>("compatible");
   const [editorialExtensionCheckpoint, setEditorialExtensionCheckpoint] = useState("");
-  const [editorialExtensionBaseCount, setEditorialExtensionBaseCount] = useState(0);
   const [reviewedEditorialProject, setReviewedEditorialProject] = useState("");
-  const [editorialCutApplication, setEditorialCutApplication] = useState<EditorialCutApplicationResult | null>(null);
+  const [, setEditorialCutApplication] = useState<EditorialCutApplicationResult | null>(null);
   const [managedDeleteAction, setManagedDeleteAction] = useState("");
   const [pathStatus, setPathStatus] = useState<Record<string, PathStatus>>({});
   const [glossary, setGlossary] = useState("");
   const { logs, append: appendLog, replace: replaceLogs, clear: clearLogs } = useBatchedLog();
+  const [acquiringSource, setAcquiringSource] = useState(false);
   const [runState, setRunState] = useState<RunState>("idle");
   const [activeRunId, setActiveRunId] = useState("");
   const [startedAt, setStartedAt] = useState<number | null>(null);
@@ -122,16 +160,16 @@ export default function App() {
   const [inputWidth, setInputWidth] = useState(48);
   const [logsHeight, setLogsHeight] = useState(24);
 
-  const hostedReady = !isHostedWorkflow(workflow) || hostedSelectionReady;
-  const localReady = !isLocalWorkflow(workflow) || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
+  const hostedReady = workflow !== "hosted" || hostedSelectionReady;
+  const localReady = workflow !== "local" || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
   const ffmpegReady = Boolean(runtimeStatus?.ffmpeg.ready);
   const pythonRequirementsReady = Boolean(runtimeStatus?.python.requirementsInstalled);
-  const alignmentReady = Boolean(
+  const alignmentReady = workflow === "hosted-long-stream" || Boolean(
     coreSettings?.alignment
     && (!coreSettings.alignment.offlineModelCache
       || (runtimeStatus?.alignment.installed && coreSettings.alignment.model === runtimeStatus.alignment.modelPath))
   );
-  const cutSilenceEnabled = (coreSettings?.additionalSettings?.cutSilenceMode ?? "off") !== "off";
+  const cutSilenceEnabled = workflow !== "hosted-long-stream" && (coreSettings?.additionalSettings?.cutSilenceMode ?? "off") !== "off";
   const renderCutVideo = cutSilenceEnabled && Boolean(coreSettings?.additionalSettings?.renderCutVideo);
   const selectedEncoderProbe = encoderProbes.find((probe) => probe.preset === settings?.cutSilenceEncoderPreset);
   const cutSilenceReady = !cutSilenceEnabled || Boolean(
@@ -142,16 +180,25 @@ export default function App() {
   const editorialReady = !editorialMapEnabled || Boolean(
     editorialResumeCheckpoint || (editorialProject.sources.length
     && editorialProject.sources.every((source) => source.roleConfirmed)
-    && editorialProject.titleOrGame.trim()
-    && editorialProject.objective.trim()
-    && editorialProject.targetDurationMinSeconds > 0
-    && editorialProject.targetDurationMaxSeconds >= editorialProject.targetDurationMinSeconds)
+)
   );
-  const canRun = Boolean(workflow !== "local-long-stream" && settings && configs && configPaths && pythonReady && pythonRequirementsReady && hostedReady && localReady && (
+  const canRun = Boolean(!projectSaving && !acquiringSource && settings && configs && configPaths && pythonReady && pythonRequirementsReady && hostedReady && localReady && (
     reviewedEditorialProject
       ? editorialMapEnabled
       : (inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && outputPath && ffmpegReady && alignmentReady && cutSilenceReady && editorialReady
   ));
+
+  const runBlockedReason = canRun || !(inputPath || editorialResumeCheckpoint || reviewedEditorialProject) ? ""
+    : !settings || !configs || !configPaths || !runtimeStatus ? t("run.loading")
+    : projectSaving || acquiringSource ? t("run.preparing")
+    : !pythonReady || !pythonRequirementsReady ? t("run.pythonBlocked")
+    : !hostedReady ? t("run.hostedBlocked")
+    : !localReady ? t("run.localBlocked")
+    : !reviewedEditorialProject && !ffmpegReady ? t("run.ffmpegBlocked")
+    : !reviewedEditorialProject && !alignmentReady ? t("run.alignmentBlocked")
+    : !reviewedEditorialProject && !cutSilenceReady ? t("run.encoderBlocked")
+    : !reviewedEditorialProject && !editorialReady ? t("run.editorialBlocked")
+    : t("run.outputBlocked");
 
   useEffect(() => {
     void loadInitialState();
@@ -318,6 +365,11 @@ export default function App() {
 
   function setWorkflow(nextWorkflow: WorkflowName) {
     if (!settings) return;
+    if (creatorProject) {
+      setEditorialProject({ ...creatorProject.editorial, sources: creatorProject.recordings.map((recording) => recording.source) });
+      const recording = creatorProject.recordings.find((recording) => recording.id === creatorRecordingId) ?? creatorProject.recordings[0];
+      if (recording) { setCreatorRecordingId(recording.id); handleInput(nextWorkflow === "hosted-long-stream" ? recording.source.visualPath : speechPath(recording.source)); }
+    }
     const next = { ...settings, selectedWorkflow: nextWorkflow };
     setSettings(next);
     void saveSettings(next);
@@ -344,6 +396,23 @@ export default function App() {
     }
   }
 
+  async function resumeProjectResult(result: ProjectResult) {
+    if (!creatorProject || !settings || !configPaths) return;
+    setWorkflow(result.workflow);
+    clearLogs(); setRunState("running"); setElapsedMs(0);
+    try {
+      const started = await window.subtitler.startRun({
+        creatorProjectDirectory: creatorProject.directory, creatorResumeResultId: result.id,
+        workflow: result.workflow, inputPath: result.outputPath, outputPath: result.outputPath,
+        configPath: configPaths[result.workflow], envFile: settings.envFile,
+        profile: false, sidecarsEnabled: true, cutSilenceEncoderPreset: settings.cutSilenceEncoderPreset,
+        silencePreviewHeight: settings.silencePreviewHeight, silencePreviewFps: settings.silencePreviewFps,
+      });
+      if (started.project) { creatorProjectRef.current = started.project; setCreatorProject(started.project); }
+      setOutputPath(started.outputPath ?? result.outputPath); setActiveRunId(started.runId);
+    } catch (error) { setRunState("failed"); throw error; }
+  }
+
   async function startRun() {
     if (!settings || !configPaths || !coreSettings) return;
     try {
@@ -357,11 +426,26 @@ export default function App() {
         return;
       }
       await persistWorkflowSettings(false);
+      await projectSaveQueue.current;
+      let project = creatorProjectRef.current;
+      if (!editorialResumeCheckpoint && !editorialExtensionCheckpoint) {
+        const sources = editorialMapEnabled ? editorialProject.sources : buildEditorialSources([{ path: inputPath, analysis: analysis ?? await window.subtitler.analyzeMedia(inputPath) }]);
+        if (!project) project = await window.subtitler.createProject((inputPath.split(/[\\/]/).pop() ?? "Untitled project").replace(/\.[^.]+$/, ""));
+        const recordings = editorialMapEnabled
+          ? sources.map((source) => ({ id: project!.recordings.find((recording) => recording.source.visualPath === source.visualPath)?.id ?? crypto.randomUUID(), source }))
+          : project.recordings.some((recording) => speechPath(recording.source) === inputPath)
+            ? project.recordings : [...project.recordings, ...sources.map((source) => ({ id: crypto.randomUUID(), source }))];
+        project = await window.subtitler.updateProject({ ...project, recordings, editorial: editorialMapEnabled ? editorialProject : project.editorial });
+        creatorProjectRef.current = project; setCreatorProject(project);
+      }
       clearLogs();
       setRunState("running");
       setElapsedMs(0);
       const result = await window.subtitler.startRun({
+        creatorProjectDirectory: !editorialResumeCheckpoint && !editorialExtensionCheckpoint ? project?.directory : undefined,
+        creatorRecordingId: !editorialMapEnabled ? project?.recordings.find((recording) => speechPath(recording.source) === inputPath)?.id : undefined,
         workflow,
+        freshRun: false,
         inputPath: editorialResumeCheckpoint || editorialExtensionCheckpoint || inputPath,
         outputPath,
         configPath: configPaths[workflow],
@@ -382,6 +466,9 @@ export default function App() {
         editorialRestartFrom: editorialMapEnabled && (editorialResumeCheckpoint || editorialExtensionCheckpoint) ? editorialRestartFrom : undefined,
         editorialExtend: editorialMapEnabled && Boolean(editorialExtensionCheckpoint) ? true : undefined
       });
+      if (result.project) { creatorProjectRef.current = result.project; setCreatorProject(result.project); }
+      if (result.outputPath) setOutputPath(result.outputPath);
+      if (result.sidecarDir) setSidecarDir(result.sidecarDir);
       setActiveRunId(result.runId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -405,6 +492,8 @@ export default function App() {
     } else if (event.type === "stdout" || event.type === "stderr") {
       appendLog(event.text);
     } else if (event.type === "exit") {
+      const directory = creatorProjectRef.current?.directory;
+      if (directory) void window.subtitler.openProject(directory).then((project) => { creatorProjectRef.current = project; setCreatorProject(project); }).catch((error: unknown) => setNotice(String(error)));
       setElapsedMs(event.elapsedMs);
       setRunState(event.cancelled ? "cancelled" : event.code === 0 ? "succeeded" : "failed");
       if (!event.cancelled && event.code === 0) appendLog("\nRun complete.\n");
@@ -546,14 +635,14 @@ export default function App() {
   });
 
   return (
-    <main className="app">
+    <main className={view === "main" ? "app creator-app" : "app"}>
       <header className="topbar">
         <div>
-          <h1>AviUtl Subtitler</h1>
-          <div className="subtle">{projectRoot}</div>
+          <h1>SubUtl</h1>
+          <div className="subtle" title={projectRoot}>{creatorProject?.name ?? t("project.workspace")}</div>
         </div>
         <div className="topbar-controls">
-          <ModeSelector workflow={workflow} onChange={setWorkflow} disabled={runState === "running"} />
+          <ModeSelector workflow={workflow} onChange={setWorkflow} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} />
           <ThemeSelector value={settings.theme} onChange={(theme) => {
             const next = { ...settings, theme };
             setSettings(next);
@@ -569,6 +658,7 @@ export default function App() {
           )}
         </div>
       </header>
+      {view === "main" && <CreatorWorkspace suggestedName={inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "")} onResume={resumeProjectResult} onBusyChange={setAcquiringSource} project={creatorProject} selectedRecording={creatorRecordingId} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} onProject={receiveProject} onSelect={(id, source) => { setCreatorRecordingId(id); handleInput(editorialMapEnabled ? source.visualPath : speechPath(source)); }} />}
       {view === "library" ? (
         <MediaLibraryScreen />
       ) : view === "settings" ? (
@@ -704,52 +794,9 @@ export default function App() {
       <div className="main-workspace" style={{ "--logs-height": `${logsHeight}%` } as React.CSSProperties}>
         <div className="primary-flow" style={{ "--input-width": `${inputWidth}%` } as React.CSSProperties}>
           <div className="input-stack">
-            {editorialMapEnabled ? <EditorialProjectPanel
-              value={editorialProject}
-              resumeCheckpoint={editorialResumeCheckpoint}
-              resumeRestartFrom={editorialRestartFrom}
-              extensionCheckpoint={editorialExtensionCheckpoint}
-              extensionBaseCount={editorialExtensionBaseCount}
-              reviewedProject={reviewedEditorialProject}
-              cutApplication={editorialCutApplication}
-              disabled={runState === "running"}
-              onChange={setEditorialProject}
-              onRecoverProject={(project) => {
-                setEditorialProject(project);
-                if (project.sources[0]) handleInput(project.sources[0].visualPath);
-              }}
-              onPrimarySource={handleInput}
-              onResumeCheckpoint={(path, restartFrom) => {
-                setEditorialResumeCheckpoint(path);
-                setEditorialExtensionCheckpoint("");
-                setEditorialExtensionBaseCount(0);
-                setEditorialRestartFrom(restartFrom);
-                if (path) setOutputPath(path);
-                else if (inputPath) setOutputPath(defaultEditorialCheckpointPath(inputPath));
-              }}
-              onBeginExtension={(checkpoint, analyzedSourceCount) => {
-                setEditorialExtensionCheckpoint(checkpoint);
-                setEditorialExtensionBaseCount(analyzedSourceCount);
-                setEditorialResumeCheckpoint("");
-                setEditorialRestartFrom("compatible");
-              }}
-              onCancelExtension={(checkpoint) => {
-                setEditorialExtensionCheckpoint("");
-                setEditorialExtensionBaseCount(0);
-                setEditorialResumeCheckpoint(checkpoint);
-                setOutputPath(checkpoint);
-              }}
-              onDeclineReuse={(checkpoint) => {
-                if (outputPath.toLocaleLowerCase() === checkpoint.toLocaleLowerCase()) {
-                  setOutputPath(newEditorialCheckpointPath(checkpoint));
-                }
-              }}
-              onReviewedProject={(path) => {
-                setReviewedEditorialProject(path);
-                setEditorialCutApplication(null);
-                setRunState("idle");
-              }}
-            /> : <InputPanel
+            {editorialMapEnabled ? <SilenceProjectPanel value={editorialProject} disabled={runState === "running"}
+              onChange={changeEditorialProject} onPrimarySource={handleInput} /> : <InputPanel
+              onSourceBusyChange={setAcquiringSource}
               inputPath={inputPath}
               audioTrack={coreSettings.audioTrack}
               analysis={analysis}
@@ -759,18 +806,24 @@ export default function App() {
               onInput={handleInput}
               onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
             />}
-            <RunPanel state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun} />
+            <RunPanel blockedReason={runBlockedReason} onConfigure={() => setView("settings")} state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun}
+               />
           </div>
           <div className="resize-divider column-divider" role="separator" aria-label={t("shell.resizeColumns")} aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={t("shell.inputWidth", { percent: Math.round(inputWidth) })} tabIndex={0} title={t("shell.resizeColumnsHelp")} onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
           <div className="flow-side">
-          <OutputPanel
+          {(editorialResumeCheckpoint || editorialExtensionCheckpoint || reviewedEditorialProject) ? <OutputPanel
             outputPath={outputPath}
             editorial={editorialMapEnabled}
             disabled={runState === "running" || Boolean(editorialResumeCheckpoint || editorialExtensionCheckpoint)}
             onOutput={setOutputPath}
-          />
-           {(workflow === "local" || workflow === "hosted") && <AdditionalSettingsPanel workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />}
-          <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />
+          /> : <section className="panel creator-output-summary"><div className="panel-title">{t("project.results")}</div>
+            {creatorProject?.results.some((result) => result.status === "complete") ? creatorProject.results.filter((result) => result.status === "complete").slice(-3).reverse().flatMap((result) => (result.deliverablePaths ?? [result.deliverablePath ?? result.outputPath]).map((file) => <div className="result-file-row" key={`${result.id}:${file}`}>
+              <span>{file.split(/[\\/]/).pop()}</span>
+              <button onClick={() => void window.subtitler.showItemInFolder(file)}>{t("project.files")}</button>
+            </div>)) : <p>{t("project.emptyResults")}</p>}
+          </section>}
+           {<AdditionalSettingsPanel audioTracks={analysis?.audioTracks} paired={editorialProject.sources.length > 0 && editorialProject.sources.every((source) => source.mode === "paired" && source.roleConfirmed)} workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />}
+          {!editorialMapEnabled && <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />}
           </div>
         </div>
         <div className="resize-divider log-divider" role="separator" aria-label={t("shell.resizeLogs")} aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={t("shell.logHeight", { percent: Math.round(logsHeight) })} tabIndex={0} title={t("shell.resizeLogsHelp")} onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />
@@ -782,11 +835,6 @@ export default function App() {
       {notice && <div className="toast" role="status">{notice}</div>}
     </main>
   );
-}
-
-function newEditorialCheckpointPath(checkpoint: string): string {
-  const dot = checkpoint.toLocaleLowerCase().endsWith(".json") ? checkpoint.length - 5 : checkpoint.length;
-  return `${checkpoint.slice(0, dot)}-new-${Date.now()}${checkpoint.slice(dot)}`;
 }
 
 function formatElapsed(ms: number): string {

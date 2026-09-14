@@ -9,39 +9,25 @@ from subtitler.api_usage import ApiUsageLedger
 from subtitler.glossary import GlossaryEntry
 from subtitler.models import AlignedChunk, AlignedToken, AudioChunk, ExoMarker, Subtitle
 from subtitler.run_artifacts import build_run_artifact_paths
-from subtitler.run_context import CliArguments, RunContext
-from subtitler.subtitle_stage import build_refiner, run_subtitle_stage
+from subtitler.subtitle_stage import SubtitleStageRequest, build_refiner, run_subtitle_stage
+from subtitler.workflow_policy import workflow_definition
 from subtitler.text_refiner import TextRefiner
 
 
-def _context(root: Path, *, workflow: str, backend: str, skip_review: bool, chapters: bool) -> RunContext:
+def _context(root: Path, *, workflow: str, backend: str, skip_review: bool, chapters: bool) -> SubtitleStageRequest:
     input_path = root / "input.mkv"
     input_path.touch()
     output_path = root / "output.exo"
-    args = CliArguments(
-        input=str(input_path),
-        workflow=workflow,
-        output=str(output_path),
-        config=None,
-        env_file=".env",
-        profile=True,
-        audio_track=None,
-        sidecar_dir=str(root / "sidecars"),
-        no_sidecars=False,
-        glossary=None,
-        no_glossary=False,
-    )
     artifacts = build_run_artifact_paths(
         input_path,
         output_path,
         enabled=True,
         directory=root / "sidecars",
     )
-    return RunContext(
-        args=args,
-        input_path=input_path,
-        output_path=output_path,
-        config_path=root / "config.json",
+    policy = workflow_definition(workflow).subtitles
+    return SubtitleStageRequest(
+        raw_transcript=policy.raw_transcript,
+        generate_chapters=policy.allow_chapters and chapters,
         config={
             "backend": {"transcriber": "local-gemma" if workflow == "local" else "openai", "n_gpu_layers": 22},
             "cleanup": {
@@ -70,8 +56,6 @@ def _context(root: Path, *, workflow: str, backend: str, skip_review: bool, chap
             "diagnostics": {"llm_split_diagnostics": True},
             "additional_settings": {"youtube_chapters": chapters},
         },
-        env_path=root / ".env",
-        loaded_env_keys=[],
         sidecars_enabled=True,
         diagnostics_enabled=True,
         artifacts=artifacts,
@@ -273,53 +257,18 @@ class SubtitleStageContractTests(unittest.TestCase):
 
 
 class SubtitleRefinerFactoryTests(unittest.TestCase):
-    def test_local_factory_preserves_server_and_sidecar_arguments(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_name:
-            root = Path(temp_name)
-            context = _context(
-                root,
-                workflow="local",
-                backend="local-llama",
-                skip_review=False,
-                chapters=False,
-            )
-            with mock.patch("subtitler.subtitle_stage.LlamaServerTextRefiner") as refiner_type:
-                build_refiner(context.config, [], ApiUsageLedger(), context.artifacts.base)
-
-        kwargs = refiner_type.call_args.kwargs
-        self.assertEqual(kwargs["model_path"], root / "cleanup.gguf")
-        self.assertEqual(kwargs["server_path"], root / "llama-server.exe")
-        self.assertEqual(kwargs["port"], 8082)
-        self.assertEqual(kwargs["ctx_size"], 4096)
-        self.assertEqual(kwargs["n_gpu_layers"], 22)
-        self.assertEqual(kwargs["log_path"], context.artifacts.base.with_suffix(".cleanup_llama.log"))
-        self.assertEqual(
-            kwargs["cleanup_diagnostics_path"],
-            context.artifacts.base.with_suffix(".cleanup_rejections.jsonl"),
-        )
-
-    def test_hosted_factory_preserves_model_glossary_and_usage(self) -> None:
+    def test_selects_requested_adapter_and_preserves_glossary(self):
         glossary = [GlossaryEntry("用語")]
-        usage = ApiUsageLedger()
-        with tempfile.TemporaryDirectory() as temp_name:
-            context = _context(
-                Path(temp_name),
-                workflow="hosted",
-                backend="openai",
-                skip_review=False,
-                chapters=False,
-            )
-            with mock.patch("subtitler.subtitle_stage.OpenAITextRefiner") as refiner_type:
-                build_refiner(context.config, glossary, usage, context.artifacts.base)
-        refiner_type.assert_called_once_with(
-            model="hosted-cleanup",
-            glossary=glossary,
-            usage=usage,
-            reasoning_effort=None,
-            structured_diagnostics_path=context.artifacts.base.with_suffix(
-                ".structured_responses.jsonl"
-            ),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            for workflow, backend, adapter in [("local", "local-llama", "LlamaServerTextRefiner"), ("hosted", "openai", "OpenAITextRefiner")]:
+                with self.subTest(backend=backend), mock.patch(f"subtitler.subtitle_stage.{adapter}") as factory:
+                    context = _context(Path(directory), workflow=workflow, backend=backend, skip_review=False, chapters=False)
+                    usage = ApiUsageLedger()
+                    result = build_refiner(context.config, glossary, usage, context.artifacts.base)
+                    self.assertIs(result, factory.return_value)
+                    self.assertIs(factory.call_args.kwargs["glossary"], glossary)
+                    if workflow == "hosted":
+                        self.assertIs(factory.call_args.kwargs["usage"], usage)
 
 
 if __name__ == "__main__":

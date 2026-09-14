@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from subtitler.errors import SubtitlerError
 from subtitler.editorial_cutting import build_human_information_plan
 from subtitler.editorial_exo import _cutting_assistant_marker_layers, _utterance_reference_markers
 from subtitler.editorial_project import EditorialProjectOptions, EditorialSourceInput, create_editorial_project
@@ -23,11 +24,13 @@ class CuttingAssistantTests(unittest.TestCase):
                 "source_id": "source-1", "start_ms": 0, "end_ms": 1900,
                 "kind": "setup", "purpose": "Introduce the run.",
                 "memory_jog": "State the premise.", "talking_points": ["Premise"],
+                "editor_instruction": "Show the first attempt.", "narrator_direction": "Explain the challenge rule.",
+                "added_value": "The rule is not visible.", "evidence_notes": ["Creator supplied the rule."],
                 "representative_visuals": ["Title screen"], "thread_ids": [],
             }],
         }
 
-        result = build_human_information_plan(project=project, synthesis=synthesis)
+        result = build_human_information_plan(project=project, synthesis=synthesis, speech_activity={"source-1": []})
 
         self.assertEqual(result["workflow"], "human_information")
         self.assertEqual(
@@ -36,6 +39,11 @@ class CuttingAssistantTests(unittest.TestCase):
         )
         self.assertTrue(all(item["candidate_kind"] == "voice_free_gap" for item in result["confirmed_cuts"]))
         self.assertEqual(len(result["final_actions"]), 1)
+        action = result["final_actions"][0]
+        self.assertEqual(action["instruction"], "Introduce the run.")
+        self.assertNotIn("narrator_direction", action["narration_guidance"])
+        self.assertEqual(action["narration_guidance"]["talking_points"], ["Premise"])
+        self.assertNotIn("Creator supplied", action["instruction"])
 
     def test_human_information_plan_ignores_gap_under_two_seconds(self) -> None:
         project = {"sources": [{
@@ -47,7 +55,7 @@ class CuttingAssistantTests(unittest.TestCase):
         }]}
 
         result = build_human_information_plan(
-            project=project,
+            project=project, speech_activity={"source-1": []},
             synthesis={"event_phases": [], "global_threads": [], "narration_briefs": []},
         )
 
@@ -62,7 +70,7 @@ class CuttingAssistantTests(unittest.TestCase):
         }]}
 
         result = build_human_information_plan(
-            project=project,
+            project=project, speech_activity={"source-1": []},
             synthesis={"event_phases": [], "global_threads": [], "narration_briefs": []},
         )
 
@@ -70,6 +78,21 @@ class CuttingAssistantTests(unittest.TestCase):
             [(item["start_ms"], item["end_ms"]) for item in result["confirmed_cuts"]],
             [(3100, 6000)],
         )
+
+    def test_detected_voice_and_transcript_both_protect_cut_boundaries(self) -> None:
+        project = {"sources": [{
+            "source_id": "source-1", "duration_ms": 430000,
+            "result": {"speech_segments": [{"start_ms": 421136, "end_ms": 424000}]},
+        }]}
+        result = build_human_information_plan(
+            project=project, synthesis={}, speech_activity={"source-1": [(419072, 423232)]},
+        )
+        self.assertEqual(
+            [(item["start_ms"], item["end_ms"]) for item in result["confirmed_cuts"]],
+            [(0, 419022), (424100, 430000)],
+        )
+        with self.assertRaisesRegex(SubtitlerError, "requires detected speech"):
+            build_human_information_plan(project=project, synthesis={}, speech_activity={})
 
     def test_flat_presentation_contains_only_cut_map_and_narration_dashboard(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

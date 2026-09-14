@@ -1,3 +1,5 @@
+import type { CreatorProject, ProjectCatalog, ProjectUpdate, TranscriptPreview } from "./shared/creatorProject";
+import type { AcquiredSource } from "./renderer/lib/types";
 import type { AlignmentModelStatus, AppSettings, AppState, BrollReviewDecision, CurrentLlamaServerState, EditorialCheckpointInspection, EditorialCheckpointSummary, EditorialCutApplicationResult, EditorialGameSummary, EditorialSourceSelection, EncoderProbeResult, EnvStatus, FfmpegStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, MediaAnalysis, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetAnalysisEstimate, MediaAssetAnalysisResult, MediaAssetDetail, MediaAssetKind, MediaAssetListRequest, MediaAssetListResult, MediaBulkAnalysisPlan, MediaLibraryDirectory, MediaLibraryRoot, MediaLibraryScanResult, PythonRuntimeStatus, RunEvent, RunRequest, RuntimeSetupStatus, SilenceCutDecision, WebAssetAcquireRequest, WebAssetProbe, WorkflowConfig, WorkflowName, YtDlpStatus } from "./renderer/lib/types";
 
 export {};
@@ -5,6 +7,14 @@ export {};
 declare global {
   interface Window {
     subtitler: {
+      reviewProjectResult(directory: string, resultId: string, reviewedExo: string): Promise<CreatorProject>;
+      projectTranscript(directory: string, resultId: string, file: string): Promise<TranscriptPreview>;
+      exportProjectExo(directory: string, resultId: string): Promise<string>;
+      projectCatalog(): Promise<ProjectCatalog>;
+      createProject(name: string, parentDirectory?: string): Promise<CreatorProject>;
+      openProject(directory: string): Promise<CreatorProject>;
+      updateProject(update: ProjectUpdate): Promise<CreatorProject>;
+      setProjectDirectory(directory: string): Promise<ProjectCatalog>;
       chooseInputFile(defaultPath?: string): Promise<string | null>;
       chooseInputFiles(defaultPath?: string): Promise<string[] | null>;
       chooseFile(): Promise<string | null>;
@@ -28,6 +38,9 @@ declare global {
       getMediaAssetThumbnails(assetIds: string[]): Promise<Record<string, string>>;
       updateMediaAssetDescription(assetId: string, description: string): Promise<MediaAssetDetail>;
       addMediaAssetSegment(assetId: string, scope: MediaAnalysisScope, description: string): Promise<MediaAssetDetail>;
+      acquireSource(sourceUrl: string): Promise<AcquiredSource>;
+      cancelSourceAcquisition(): Promise<void>;
+      onSourceProgress(callback: (percent: number) => void): () => void;
       probeWebAsset(sourceUrl: string): Promise<WebAssetProbe>;
       acquireWebAsset(request: WebAssetAcquireRequest): Promise<MediaAssetDetail>;
       estimateMediaAssetAnalysis(assetId: string, scope?: MediaAnalysisScope): Promise<MediaAssetAnalysisEstimate[]>;
@@ -75,7 +88,7 @@ declare global {
       applyReviewedEditorialCuts(reviewProject: string): Promise<EditorialCutApplicationResult>;
       listEditorialGames(): Promise<EditorialGameSummary[]>;
       rememberEditorialGame(title: string): Promise<EditorialGameSummary>;
-      startRun(request: RunRequest): Promise<{ runId: string }>;
+      startRun(request: RunRequest): Promise<{ runId: string; project?: CreatorProject; outputPath?: string; sidecarDir?: string }>;
       submitSilenceReview(runId: string, reviewId: string, decisions: Array<{ candidateId: string; decision: SilenceCutDecision }>): Promise<void>;
       submitBrollReview(runId: string, reviewId: string, decisions: BrollReviewDecision[]): Promise<void>;
       probeCutSilenceEncoders(): Promise<EncoderProbeResult[]>;

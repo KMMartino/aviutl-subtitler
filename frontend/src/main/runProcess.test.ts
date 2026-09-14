@@ -1,3 +1,4 @@
+import { terminateProcessTree } from "./processTree";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +23,7 @@ vi.mock("./python", () => ({
   }),
 }));
 
-import { cancelRun, shutdownActiveRun, startRun, submitBrollReview, submitSilenceReview, terminateProcessTree } from "./runProcess";
+import { cancelRun, shutdownActiveRun, startRun, submitBrollReview, submitSilenceReview } from "./runProcess";
 
 class FixtureChild extends EventEmitter {
   pid = 43210;
@@ -150,6 +151,21 @@ describe("workflow process lifecycle", () => {
       ["/PID", "43210", "/T", "/F"],
       expect.objectContaining({ timeout: 5000 }),
     );
+  });
+
+  it("waits for publication and reports a failed copy as a failed run", async () => {
+    const child = new FixtureChild();
+    mocks.spawn.mockReturnValue(child);
+    const send = vi.fn();
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, fail) => { reject = fail; });
+    startRun(fixtureWindow(send) as never, {} as never, "python.exe", {} as never, { onFinish: () => pending });
+    child.emit("close", 0, null);
+    expect(send.mock.calls.some((call) => call[1].type === "exit")).toBe(false);
+    reject(new Error("disk full"));
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledWith("run:event", expect.objectContaining({ type: "error", message: "disk full" }));
+    expect(send).toHaveBeenLastCalledWith("run:event", expect.objectContaining({ type: "exit", code: 1 }));
   });
 
   it("normalizes spawn errors and closes both output streams", () => {

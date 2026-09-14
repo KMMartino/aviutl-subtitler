@@ -5,14 +5,14 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from aviutl_subtitle import _count_progress_reporter
+from subtitler.subtitle_stage import count_progress_reporter
 from subtitler.subtitle_planner import CleanupStats, _write_planning_profile
 
 
 class ProgressObservabilityTests(unittest.TestCase):
     def test_count_reporter_is_coarse_and_reports_completion(self) -> None:
         output = StringIO()
-        report = _count_progress_reporter(step=25)
+        report = count_progress_reporter(step=25)
         with redirect_stdout(output):
             for completed in range(11):
                 report("Planning subtitle breaks", completed, 10)

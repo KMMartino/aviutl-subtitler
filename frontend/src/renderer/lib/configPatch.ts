@@ -1,3 +1,4 @@
+import { isLocalWorkflow, supportsWorkflowFeature } from "../../shared/workflowCatalog";
 import type { CoreWorkflowSettings, WorkflowConfig, WorkflowName } from "./types";
 import { hostedCleanupTuning, recommendedFallbackTranscription } from "../../shared/hostedModelCatalog";
 
@@ -10,6 +11,15 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
     : recommendedFallback.provider;
   return {
     audioTrack: Number(config.audio?.track ?? 1),
+    editorial: {
+      cuttingMode: "voice_gaps",
+      gapEdgeMode: "acoustic",
+      recommendationsEnabled: config.editorial?.recommendations_enabled !== false,
+      voiceGapMinMs: Number(config.editorial?.voice_gap_min_ms ?? 2000),
+      voiceLeadingHandleMs: Number(config.editorial?.voice_leading_handle_ms ?? 50),
+      voiceTrailingHandleMs: Number(config.editorial?.voice_trailing_handle_ms ?? 100),
+      gameAudioTrack: typeof config.editorial?.game_audio_track === "number" ? config.editorial.game_audio_track : undefined
+    },
     local: {
       model: String(config.backend?.model ?? ""),
       mmproj: String(config.backend?.mmproj ?? ""),
@@ -60,7 +70,7 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
 
 export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflowSettings, workflow: WorkflowName): WorkflowConfig {
   const next = structuredClone(config);
-  const localWorkflow = workflow === "local" || workflow === "local-long-stream";
+  const localWorkflow = isLocalWorkflow(workflow);
   next.audio ??= {};
   next.backend ??= {};
   next.cleanup ??= {};
@@ -70,6 +80,16 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.workflow ??= {};
   next.alignment ??= {};
   next.audio.track = settings.audioTrack;
+  if (workflow === "hosted-long-stream") {
+    next.editorial ??= {};
+    next.editorial.cutting_mode = "voice_gaps";
+    next.editorial.gap_edge_mode = "acoustic";
+    next.editorial.recommendations_enabled = settings.editorial?.recommendationsEnabled ?? true;
+    next.editorial.voice_gap_min_ms = settings.editorial?.voiceGapMinMs ?? 2000;
+    next.editorial.voice_leading_handle_ms = settings.editorial?.voiceLeadingHandleMs ?? 50;
+    next.editorial.voice_trailing_handle_ms = settings.editorial?.voiceTrailingHandleMs ?? 100;
+    next.editorial.game_audio_track = settings.editorial?.gameAudioTrack ?? null;
+  }
   if (localWorkflow) {
     next.backend.transcriber = "local-gemma";
     next.cleanup.backend = "local-llama";
@@ -99,14 +119,14 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
   next.cost.max_estimated_api_cost_usd = settings.cost?.maxEstimatedApiCostUsd ?? next.cost.max_estimated_api_cost_usd ?? 5;
   next.cost.allow_api_spend = settings.cost?.allowApiSpend ?? false;
   next.cost.estimate_cost_only = settings.cost?.estimateCostOnly ?? false;
-  next.additional_settings.youtube_chapters = workflow === "hosted" ? settings.additionalSettings?.youtubeChapters ?? false : false;
-  next.additional_settings.cut_silence_mode = workflow === "local" || workflow === "hosted"
+  next.additional_settings.youtube_chapters = supportsWorkflowFeature(workflow, "chapters") ? settings.additionalSettings?.youtubeChapters ?? false : false;
+  next.additional_settings.cut_silence_mode = supportsWorkflowFeature(workflow, "silence")
     ? settings.additionalSettings?.cutSilenceMode ?? "off"
     : "off";
-  next.additional_settings.render_cut_video = workflow === "local" || workflow === "hosted"
+  next.additional_settings.render_cut_video = supportsWorkflowFeature(workflow, "silence")
     ? settings.additionalSettings?.renderCutVideo ?? false
     : false;
-  next.additional_settings.broll_mode = workflow === "hosted"
+  next.additional_settings.broll_mode = supportsWorkflowFeature(workflow, "broll")
     ? settings.additionalSettings?.brollMode ?? "off"
     : "off";
   if (settings.cleanupGroupPolicy !== undefined) {

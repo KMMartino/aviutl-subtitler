@@ -1,3 +1,4 @@
+import { workflowCatalog } from "../../shared/workflowCatalog";
 import type { WorkflowName } from "./types";
 
 export type SettingsExpansion = {
@@ -16,7 +17,7 @@ export type WorkflowFamily = "local" | "hosted";
 export type SettingsExpansionByFamily = Partial<Record<WorkflowFamily, SettingsExpansion>>;
 
 export function workflowFamily(workflow: WorkflowName): WorkflowFamily {
-  return workflow === "local" || workflow === "local-long-stream" ? "local" : "hosted";
+  return workflowCatalog[workflow].engine;
 }
 
 export function defaultSettingsExpansion(readiness: {

@@ -1,7 +1,7 @@
 import { Settings } from "lucide-react";
 import type { CoreWorkflowSettings, CurrentLlamaServerState, CutSilenceEncoderPreset, EncoderProbeResult, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import type { SettingsExpansion } from "../lib/settingsExpansion";
-import { isHostedWorkflow, isLocalWorkflow } from "../lib/workflowLabels";
+import { isHostedWorkflow, isLocalWorkflow } from "../../shared/workflowCatalog";
 import OutputSettingsSection from "./settings/OutputSettingsSection";
 import HostedSettingsSection from "./settings/HostedSettingsSection";
 import LocalSettingsSection from "./settings/LocalSettingsSection";

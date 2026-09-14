@@ -47,7 +47,6 @@ from subtitler.vad import (
     segment_speech_with_groups,
     split_chunk_with_tighter_vad,
 )
-from subtitler.silence_cut import build_cut_candidates
 
 
 FAILED_TRANSCRIPTION_TEXT = "transcription failed"
@@ -436,14 +435,9 @@ class ExistingPipelineBackend:
                 flush=True,
             )
         normalized_raw_vad = [RawVadSpeechInterval(start, end) for start, end in raw_vad_intervals]
-        control_event = request.metadata.get("control_event")
-        cut_mode = self.config["additional_settings"].get("cut_silence_mode", "off")
-        if callable(control_event) and cut_mode == "review":
-            control_event(
-                "silence-candidates",
-                workflow=request.workflow,
-                candidates=[candidate.to_frontend() for candidate in build_cut_candidates(normalized_raw_vad)],
-            )
+        on_speech_activity = request.metadata.get("on_speech_activity")
+        if callable(on_speech_activity):
+            on_speech_activity(normalized_raw_vad)
 
         if request.profile_enabled and request.sidecar_base is not None:
             write_vad_selection(request.sidecar_base.with_suffix(".vad_selection.csv"), chunks, selection.selected_chunks)

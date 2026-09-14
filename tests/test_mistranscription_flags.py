@@ -4,7 +4,7 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from aviutl_subtitle import _flag_possible_mistranscriptions
+from subtitler.run_artifacts import flag_possible_mistranscriptions
 from subtitler.models import MisTranscriptionFlag, Subtitle
 from subtitler.text_refiner import (
     LlamaServerTextRefiner,
@@ -36,6 +36,7 @@ class MistranscriptionFlagParserTests(unittest.TestCase):
 
         self.assertEqual(len(flags), 1)
         self.assertEqual(flags[0].text, "ラスアスパート3")
+        self.assertEqual(flags[0].reason, "broken product name")
         self.assertEqual(flags[0].severity, "medium")
 
     def test_unknown_severity_is_coerced_to_medium(self) -> None:
@@ -120,7 +121,7 @@ class MistranscriptionFlagParserTests(unittest.TestCase):
         ]
         with TemporaryDirectory() as temp_name:
             path = Path(temp_name) / "flags.txt"
-            markers = _flag_possible_mistranscriptions(subtitles, Refiner(), path)
+            markers = flag_possible_mistranscriptions(subtitles, Refiner(), path)
             text = path.read_text(encoding="utf-8")
 
         self.assertIn("1\tlow\t弱い候補\tminor issue", text)

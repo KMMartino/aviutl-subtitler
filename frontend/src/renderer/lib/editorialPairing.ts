@@ -5,6 +5,12 @@ export type EditorialMediaCandidate = {
   analysis: MediaAnalysis;
 };
 
+export function pairEditorialRecording(gameplay: EditorialMediaCandidate, facecam: EditorialMediaCandidate): EditorialSourceSelection {
+  if (gameplay.path === facecam.path) throw new Error("Choose two different files for gameplay and facecam.");
+  if (!withinTenFrames(facecam.analysis, gameplay.analysis)) throw new Error("These files differ by more than ten frames. The current editing-guide exporter requires matching durations.");
+  return pairedSource({ ...facecam, index: 1, name: parsedName(facecam.path) }, { ...gameplay, index: 0, name: parsedName(gameplay.path) }, "manual", true);
+}
+
 const faceTerms = ["facecam", "face", "webcam", "camera", "cam", "selfie", "presenter"];
 const gameTerms = ["gameplay", "game", "screen", "capture", "play", "program", "feed"];
 

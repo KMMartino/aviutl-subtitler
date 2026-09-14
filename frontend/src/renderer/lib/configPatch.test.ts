@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { applyCoreSettings, applySharedAlignment, extractCoreSettings } from "./configPatch";
 
 describe("config patching", () => {
+  it("separates acoustic gap settings from recommendations and migrates old adaptive selection", () => {
+    const config = { audio: { track: 1 }, editorial: { cutting_mode: "adaptive", game_audio_track: 2 } };
+    const settings = extractCoreSettings(config);
+    expect(settings.editorial?.cuttingMode).toBe("voice_gaps");
+    const patched = applyCoreSettings(config, { ...settings, editorial: { ...settings.editorial!, gapEdgeMode: "acoustic", recommendationsEnabled: false } }, "hosted-long-stream");
+    expect(patched.editorial).toMatchObject({ cutting_mode: "voice_gaps", game_audio_track: 2, gap_edge_mode: "acoustic", recommendations_enabled: false, voice_gap_min_ms: 2000 });
+    expect(extractCoreSettings(patched).editorial?.gapEdgeMode).toBe("acoustic");
+    expect(extractCoreSettings(patched).editorial?.recommendationsEnabled).toBe(false);
+    expect(applyCoreSettings(config, settings, "hosted").editorial).toEqual(config.editorial);
+  });
   it("shares alignment selection without discarding advanced alignment options", () => {
     expect(applySharedAlignment({ alignment: { language: "ja", split_size: "char", model: "old" } }, "managed", true).alignment).toEqual({ language: "ja", split_size: "char", model: "managed", offline_model_cache: true });
   });
@@ -101,9 +111,7 @@ describe("config patching", () => {
     expect(core.additionalSettings?.renderCutVideo).toBe(true);
     expect(applyCoreSettings({}, core, "local").additional_settings?.cut_silence_mode).toBe("review");
     expect(applyCoreSettings({}, core, "hosted").additional_settings?.cut_silence_mode).toBe("review");
-    expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.cut_silence_mode).toBe("off");
     expect(applyCoreSettings({}, core, "local").additional_settings?.render_cut_video).toBe(true);
-    expect(applyCoreSettings({}, core, "local-long-stream").additional_settings?.render_cut_video).toBe(false);
   });
 
   it("does not preserve retired long-stream selection toggles", () => {

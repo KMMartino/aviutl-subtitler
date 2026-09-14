@@ -273,6 +273,7 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
 
   return <section className="panel editorial-project-panel" onDragOver={(event) => event.preventDefault()} onDrop={drop}>
     <div className="panel-title editorial-panel-title"><span>{t("editorial.title")}</span><button type="button" disabled={disabled || inspecting} onClick={() => void openCheckpointPicker()}><RotateCcw size={16} /> {t("editorial.openCheckpoint")}</button></div>
+    <small className="field-help">{t("editorial.urlPending")}</small>
     {!value.sources.length && !resumeCheckpoint && <div className="editorial-drop-zone">
       <FilePlus2 size={28} />
       <strong>{t("editorial.dropTitle")}</strong>
@@ -322,7 +323,8 @@ export default function EditorialProjectPanel({ value, disabled = false, resumeC
           <div className="editorial-game-search"><Search size={15} /><input autoFocus value={gameSearch} placeholder={t("editorial.searchGames")} onChange={(event) => setGameSearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void selectGame(gameSearch); }} />{gameSearch.trim() && !games.some((game) => game.title.toLocaleLowerCase() === gameSearch.trim().toLocaleLowerCase()) && <button type="button" title={t("editorial.addGame", { name: gameSearch.trim() })} onClick={() => void selectGame(gameSearch)}><Plus size={15} /> {t("common.add")}</button>}</div>
         </div>}
       </div></label>
-      <label><span className="field-label">{t("editorial.objective")}</span><textarea disabled={disabled} rows={3} value={value.objective} onChange={(event) => onChange({ ...value, objective: event.target.value })} /></label>
+      <label><span className="field-label">{locale === "ja" ? "分析言語" : "Processing language"}</span><select disabled={disabled} value={value.processingLocale ?? ""} onChange={(event) => onChange({ ...value, processingLocale: event.target.value === "ja" ? "ja" : event.target.value === "en" ? "en" : undefined })}><option value="">{locale === "ja" ? "文字起こしの言語に合わせる" : "Match transcription language"}</option><option value="ja">日本語</option><option value="en">English</option></select></label>
+      <label className="editorial-objective"><span className="field-label">{t("editorial.objective")}</span><small className="field-help">{t("editorial.objectiveHelp")}</small><textarea placeholder={t("editorial.objectiveExample")} disabled={disabled} rows={3} value={value.objective} onChange={(event) => onChange({ ...value, objective: event.target.value })} /></label>
     </div>
     <div className="editorial-duration">
       <div><strong>{t("editorial.requestedDuration")}</strong><span>{formatDuration(value.targetDurationMinSeconds, t)}–{formatDuration(value.targetDurationMaxSeconds, t)}</span></div>

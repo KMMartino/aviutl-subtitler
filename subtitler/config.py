@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .errors import SubtitlerError
+from .workflow_policy import WORKFLOW_DEFINITIONS, workflow_definition
 
 
-WORKFLOWS = {"local", "hosted", "local-long-stream", "hosted-long-stream"}
+WORKFLOWS = set(WORKFLOW_DEFINITIONS)
 OPENAI_TRANSCRIPTION_MODELS = {"gpt-transcribe"}
 
 
@@ -53,7 +54,10 @@ def load_workflow_config(workflow: str, explicit_path: Path | None = None) -> di
     return merged
 
 
-def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_paths: bool = True) -> None:
+def validate_workflow_config(
+    config: dict[str, Any], *, workflow: str, check_paths: bool = True, transcription_required: bool = True,
+    cleanup_required: bool = True,
+) -> None:
     if workflow not in WORKFLOWS:
         raise SubtitlerError(f"Unknown workflow: {workflow}")
 
@@ -69,6 +73,19 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
     additional_settings = _section(config, "additional_settings")
     broll = _section(config, "broll")
     diagnostics = _section(config, "diagnostics")
+    editorial = config.get("editorial", {})
+    _choice(editorial.get("cutting_mode", "voice_gaps"), {"voice_gaps", "adaptive"}, "editorial.cutting_mode")
+    _choice(editorial.get('gap_edge_mode', 'fixed'), {'fixed', 'acoustic'}, 'editorial.gap_edge_mode')
+    _boolean(editorial.get('recommendations_enabled', True), 'editorial.recommendations_enabled')
+    for key, milliseconds in (('voice_gap_min_ms', 2000), ('voice_leading_handle_ms', 50), ('voice_trailing_handle_ms', 100)):
+        _optional_int_min(editorial.get(key, milliseconds), 1 if key == 'voice_gap_min_ms' else 0, 'editorial.' + key)
+    _optional_float_min(editorial.get('recommendation_budget_usd'), 0.01, 'editorial.recommendation_budget_usd')
+    _choice(editorial.get('recommendation_model', 'gpt-5.6-terra'), {'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'}, 'editorial.recommendation_model')
+    _optional_int_min(editorial.get("game_audio_track"), 0, "editorial.game_audio_track")
+    _optional_float_min(editorial.get("adaptive_budget_usd"), 0.01, "editorial.adaptive_budget_usd")
+    _boolean(editorial.get("trim_utterance_pauses", False), "editorial.trim_utterance_pauses")
+    for key, default in (("collection_model", "gpt-5.6-luna"), ("cutting_model", "gpt-5.6-terra"), ("escalation_model", "gpt-5.6-sol")):
+        _choice(editorial.get(key, default), {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}, "editorial." + key)
 
     _choice(backend.get("name"), {"existing-pipeline"}, "backend.name")
     _choice(backend.get("transcriber"), {"local-gemma", "gemini", "openai"}, "backend.transcriber")
@@ -166,20 +183,21 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
         "additional_settings.broll_mode",
     )
 
-    expected_mode = "long-stream" if workflow.endswith("-long-stream") else "full"
-    is_hosted = workflow.startswith("hosted")
-    if additional_settings["youtube_chapters"] and workflow != "hosted":
+    definition = workflow_definition(workflow)
+    expected_mode = definition.transcript_scope
+    is_hosted = definition.engine == "hosted"
+    if additional_settings["youtube_chapters"] and "chapters" not in definition.capabilities:
         raise SubtitlerError("additional_settings.youtube_chapters is only supported by the hosted short workflow")
-    if additional_settings["cut_silence_mode"] != "off" and workflow not in {"local", "hosted"}:
+    if additional_settings["cut_silence_mode"] != "off" and "silence" not in definition.capabilities:
         raise SubtitlerError("additional_settings.cut_silence_mode is only supported by short workflows")
-    if additional_settings["render_cut_video"] and workflow not in {"local", "hosted"}:
+    if additional_settings["render_cut_video"] and "silence" not in definition.capabilities:
         raise SubtitlerError("additional_settings.render_cut_video is only supported by short workflows")
-    if additional_settings["broll_mode"] != "off" and workflow != "hosted":
+    if additional_settings["broll_mode"] != "off" and "broll" not in definition.capabilities:
         raise SubtitlerError("additional_settings.broll_mode is only supported by the hosted short workflow")
     valid_pairing = (
-        backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"gemini", "openai"}
+        backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"none", "gemini", "openai"}
         if is_hosted
-        else backend["transcriber"] == "local-gemma" and cleanup["backend"] == "local-llama"
+        else backend["transcriber"] == "local-gemma" and cleanup["backend"] in {"none", "local-llama"}
     )
     if workflow_cfg["mode"] != expected_mode or not valid_pairing:
         raise SubtitlerError(
@@ -190,7 +208,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
 
     if backend["transcriber"] == "local-gemma":
         _non_empty_string(backend.get("model"), "backend.model")
-        if check_paths:
+        if check_paths and transcription_required:
             _existing_path(backend.get("model"), "backend.model")
             if backend.get("mmproj"):
                 _existing_path(backend.get("mmproj"), "backend.mmproj")
@@ -203,7 +221,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
 
     if cleanup["backend"] == "local-llama":
         _non_empty_string(cleanup.get("model"), "cleanup.model")
-        if check_paths:
+        if check_paths and cleanup_required:
             _existing_path(cleanup.get("model"), "cleanup.model")
             if cleanup.get("llama_server"):
                 _existing_path(cleanup.get("llama_server"), "cleanup.llama_server")
@@ -260,7 +278,7 @@ def validate_workflow_config(config: dict[str, Any], *, workflow: str, check_pat
                     f"Unsupported hosted fallback transcription model for {fallback_transcriber}: "
                     f"{fallback_model}"
                 )
-        if cleanup.get("api_model") not in approved_cleanup[cleanup["backend"]]:
+        if cleanup["backend"] != "none" and cleanup.get("api_model") not in approved_cleanup[cleanup["backend"]]:
             raise SubtitlerError(
                 f"Unsupported hosted cleanup model for {cleanup['backend']}: {cleanup.get('api_model')}"
             )

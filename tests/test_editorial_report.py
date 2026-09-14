@@ -26,9 +26,13 @@ class EditorialReportTests(unittest.TestCase):
                 "final_actions": [{
                     "action_id": "narration-001", "action_type": "narrated_summary",
                     "source_id": source_id, "start_ms": 0, "end_ms": 5000,
+                    "instruction": "Show the title briefly.",
                     "narration_guidance": {
                         "purpose": "Introduce the unfamiliar game.",
                         "vision": "Give one cohesive setup.",
+                        "narrator_direction": "Explain the challenge rule.",
+                        "added_value": "The rule is not explained by the game.",
+                        "evidence_notes": ["Confirm the rule with the creator."],
                         "talking_points": ["Premise"], "representative_visuals": ["Title"],
                     },
                 }],
@@ -43,13 +47,15 @@ class EditorialReportTests(unittest.TestCase):
 
         self.assertNotIn("Narration dashboard", rendered)
         self.assertIn("Narration possibilities", rendered)
-        self.assertIn("Use the reviewed range to generate a factual narration brief.", rendered)
-        self.assertNotIn("Give one cohesive setup", rendered)
+        self.assertIn("For the editor", rendered)
+        self.assertIn("For the narrator", rendered)
+        self.assertIn("Explain the challenge rule.", rendered)
+        self.assertIn("Editor evidence notes", rendered)
         self.assertIn("Factual progression", rendered)
         self.assertIn("Voice-free review markers", rendered)
         self.assertNotIn("Cut map", rendered)
         self.assertNotIn("00:01–00:02", rendered)
-        self.assertIn("Initial cut markers remain visible even underneath narration possibilities.", rendered)
+        self.assertIn("Recommendations never change cut markers.", rendered)
 
     def test_operation_labels_follow_the_parent_editorial_treatment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

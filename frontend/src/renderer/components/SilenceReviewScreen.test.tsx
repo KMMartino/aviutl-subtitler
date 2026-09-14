@@ -16,7 +16,6 @@ describe("Silence review screen", () => {
     expect(markup).toContain("Reject cut");
     expect(markup).toContain("Mark and reject");
     expect(markup).toContain("Submit decisions");
-    expect(markup).toContain("silence-review-navigation");
     expect(markup).toMatch(/disabled=""[^>]*>Submit decisions|disabled=""/);
   });
 

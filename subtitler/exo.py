@@ -7,6 +7,7 @@ import math
 import os
 import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 
@@ -751,7 +752,10 @@ def generate_exo_audio_object(
     *,
     layer: int = 2,
     volume: float = 100.0,
+    source_start_seconds: float | None = None,
 ) -> str:
+    position = 0.0 if source_start_seconds is None else source_start_seconds
+    linked = 1 if source_start_seconds is None else 0
     return f"""[{index}]
 start={segment.output_start_frame}
 end={segment.output_end_frame}
@@ -761,10 +765,10 @@ overlay=1
 audio=1
 [{index}.0]
 _name=音声ファイル
-再生位置=0.00
+再生位置={position:.2f}
 再生速度=100.0
 ループ再生=0
-動画ファイルと連携=1
+動画ファイルと連携={linked}
 file={source_path}
 [{index}.1]
 _name=標準再生
@@ -950,8 +954,14 @@ audio_ch={settings.audio_ch}"""
             )
         )
         index += 1
-    for clip, (_, audio_path, _, _) in zip(clips, clip_paths):
-        objects.append(generate_exo_audio_object(index, clip.segment, audio_path, layer=2))
+    for clip, (video_path, audio_path, _, _) in zip(clips, clip_paths):
+        objects.append(generate_exo_audio_object(
+            index, clip.segment, audio_path, layer=2,
+            source_start_seconds=(
+                (clip.segment.source_start_frame - 1) / settings.rate
+                if audio_path != video_path else None
+            ),
+        ))
         index += 1
     for clip, (_, _, overlay_video_path, _) in zip(clips, clip_paths):
         if overlay_video_path is None:
@@ -969,7 +979,7 @@ audio_ch={settings.audio_ch}"""
             )
         )
         index += 1
-    for clip, (_, _, _, overlay_audio_path) in zip(clips, clip_paths):
+    for clip, (_, _, overlay_video_path, overlay_audio_path) in zip(clips, clip_paths):
         if overlay_audio_path is None:
             continue
         objects.append(
@@ -979,6 +989,10 @@ audio_ch={settings.audio_ch}"""
                 overlay_audio_path,
                 layer=4,
                 volume=clip.overlay_audio_volume,
+                source_start_seconds=(
+                    (clip.segment.source_start_frame - 1) / settings.rate
+                    if overlay_audio_path != overlay_video_path else None
+                ),
             )
         )
         index += 1
@@ -1285,6 +1299,14 @@ def _event_marker_color(text: str) -> str:
 def _marker_frame_ranges(markers: list[ExoMarker], fps: int) -> list[tuple[int, int, str]]:
     ranges: list[tuple[int, int, str]] = []
     for marker in sorted(markers, key=lambda item: (item.start_time, item.end_time)):
+        if marker.is_cut or marker.text.strip() == "[CUT]":
+            # Only remove complete frames inside the approved half-open range.
+            # Flooring the start could consume the end of retained speech.
+            start = math.ceil(Decimal(str(marker.start_time)) * fps) + 1
+            end = math.floor(Decimal(str(marker.end_time)) * fps)
+            if end >= start:
+                ranges.append((start, end, marker.text))
+            continue
         start = time_to_frame(marker.start_time, fps)
         # EXO object ends are inclusive while editorial ranges are half-open.
         end = time_to_frame(marker.end_time, fps) - 1

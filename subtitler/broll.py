@@ -6,17 +6,17 @@ import json
 import math
 import re
 import sqlite3
-import sys
-import uuid
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, Sequence
 
 from .api_usage import ApiUsageLedger
+from .artifact_io import write_json_artifact
 from .external_refiners import GeminiTextRefiner, HostedTextRefiner, OpenAITextRefiner
 from .models import BrollPlacement, Subtitle
-from .silence_cut import emit_frontend_event
+from .operation_store import ArtifactError
+from .review_exchange import ReviewError
 from .web_assets import WebAssetCandidate
 
 
@@ -448,11 +448,13 @@ def plan_broll(
     canvas_width: int = 2560,
     canvas_height: int = 1440,
     provider: BrollPlanningProvider,
-    frontend_protocol: str | None,
     sidecar_path: Path | None,
     web_discovery: Callable[[Sequence[MissingAssetNeed]], list[WebAssetCandidate]] | None = None,
+    review: Callable[[Sequence[FilenameReviewCandidate], Sequence[Subtitle]], tuple[dict[str, str], set[str]]] | None = None,
+    catalog: Sequence[CatalogAsset] | None = None,
+    review_catalog: Callable[[], Sequence[CatalogAsset]] | None = None,
 ) -> BrollPlanOutcome:
-    assets = load_catalog(database_path) if database_path is not None else []
+    assets = list(catalog) if catalog is not None else load_catalog(database_path) if database_path is not None else []
     if not assets:
         print("Warning: B-roll is enabled, but the Media Library has no available indexed assets.", flush=True)
 
@@ -486,11 +488,7 @@ def plan_broll(
         rejected_description_count = 0
 
         if review_candidates:
-            descriptions, library_candidate_ids = request_filename_descriptions(
-                review_candidates,
-                subtitles,
-                frontend_protocol,
-            )
+            descriptions, library_candidate_ids = review(review_candidates, subtitles) if review else ({}, set())
             accepted_candidate_ids = {*descriptions, *library_candidate_ids}
             rejected_ids = {item.id for item in review_candidates if item.id not in accepted_candidate_ids}
             described_count = len(review_candidates) - len(rejected_ids)
@@ -507,7 +505,7 @@ def plan_broll(
             enriched_by_id: dict[str, CatalogAsset] = {}
             refreshed_by_id = {
                 asset.id: asset
-                for asset in load_catalog(database_path)
+                for asset in (review_catalog() if review_catalog else load_catalog(database_path))
             } if database_path is not None and library_candidate_ids else {}
             for item in review_candidates:
                 description = descriptions.get(item.id)
@@ -543,11 +541,7 @@ def plan_broll(
             rejected.extend(final_rejected)
             planner_rejection_count += len(final_rejected)
 
-        accepted, safety_omitted = apply_confidence_policy(
-            proposed,
-            mode=mode,
-            frontend_protocol=frontend_protocol,
-        )
+        accepted, safety_omitted = apply_confidence_policy(proposed)
         omitted = [*rejected, *safety_omitted]
         placements = [
             _to_exo_placement(item, subtitles, fps, canvas_width, canvas_height)
@@ -557,6 +551,8 @@ def plan_broll(
         if web_discovery and missing_assets:
             try:
                 web_candidates = web_discovery(missing_assets)
+            except ArtifactError:
+                raise
             except Exception as exc:
                 print(f"Warning: B-roll web discovery failed; keeping local placements. {exc}", flush=True)
         outcome = BrollPlanOutcome(
@@ -576,6 +572,8 @@ def plan_broll(
             planner_rejection_count=planner_rejection_count,
             safety_omission_count=len(safety_omitted),
         )
+    except (ReviewError, ArtifactError):
+        raise
     except Exception as exc:
         outcome = BrollPlanOutcome(
             placements=[],
@@ -816,11 +814,7 @@ def parse_broll_response(
 
 def apply_confidence_policy(
     proposed: Sequence[ProposedPlacement],
-    *,
-    mode: BrollMode,
-    frontend_protocol: str | None,
 ) -> tuple[list[ProposedPlacement], list[dict[str, Any]]]:
-    del mode, frontend_protocol
     accepted: list[ProposedPlacement] = []
     omitted: list[dict[str, Any]] = []
     for item in proposed:
@@ -850,72 +844,6 @@ def apply_confidence_policy(
             accepted.append(item)
     accepted.sort(key=lambda item: (item.start_line, item.end_line))
     return accepted, omitted
-
-
-def request_filename_descriptions(
-    candidates: Sequence[FilenameReviewCandidate],
-    subtitles: Sequence[Subtitle],
-    frontend_protocol: str | None,
-) -> tuple[dict[str, str], set[str]]:
-    """Ask the user to validate and describe title-only candidates before final planning."""
-    if frontend_protocol != "stdio-v1":
-        return {}, set()
-    review_id = str(uuid.uuid4())
-    emit_frontend_event(
-        "broll-review-required",
-        reviewId=review_id,
-        candidates=[
-            {
-                "id": item.id,
-                "assetId": item.asset.id,
-                "assetPath": str(item.asset.path),
-                "title": item.asset.title,
-                "mediaKind": item.asset.media_kind,
-                "startLine": item.start_line,
-                "endLine": item.end_line,
-                "transcriptText": " ".join(
-                    subtitle.text for subtitle in subtitles[item.start_line - 1:item.end_line]
-                )[:4000],
-                "sourceStartSec": item.source_start_sec,
-                "sourceEndSec": item.source_end_sec,
-                "confidence": item.confidence,
-                "reason": item.reason,
-                "descriptionRequired": True,
-            }
-            for item in candidates
-        ],
-    )
-    line = sys.stdin.readline()
-    if not line:
-        return {}, set()
-    try:
-        response = json.loads(line)
-    except json.JSONDecodeError:
-        return {}, set()
-    if (
-        not isinstance(response, dict)
-        or response.get("type") != "broll-review-result"
-        or response.get("reviewId") != review_id
-    ):
-        return {}, set()
-    valid_ids = {item.id for item in candidates}
-    descriptions: dict[str, str] = {}
-    library_candidates: set[str] = set()
-    seen: set[str] = set()
-    for item in response.get("decisions") or []:
-        if not isinstance(item, dict):
-            continue
-        candidate_id = str(item.get("candidateId") or "")
-        decision = str(item.get("decision") or "")
-        description = str(item.get("description") or "").strip()[:4000]
-        if candidate_id not in valid_ids or candidate_id in seen:
-            continue
-        seen.add(candidate_id)
-        if decision == "describe" and description:
-            descriptions[candidate_id] = description
-        elif decision == "use_library":
-            library_candidates.add(candidate_id)
-    return descriptions, library_candidates
 
 
 def _needs_prompt(subtitles: Sequence[Subtitle]) -> str:
@@ -1132,9 +1060,7 @@ def _write_plan(path: Path | None, mode: BrollMode, outcome: BrollPlanOutcome) -
         "web_candidates": [asdict(item) for item in outcome.web_candidates],
         "omitted": outcome.omitted,
     }
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    write_json_artifact(path, payload, indent=2)
 
 
 def _asset_need_score(asset: CatalogAsset, need: BrollNeed) -> float:

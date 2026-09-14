@@ -1,5 +1,7 @@
+import { forgetProcessTree, shutdownProcessTrees, terminateProcessTree } from "./processTree";
+import { workflows } from "../shared/workflowCatalog";
 import { BrowserWindow } from "electron";
-import { spawn, spawnSync, ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import type { BrollCandidate, BrollReviewDecision, RunEvent, RunRequest, SilenceCutDecision, SilenceCutCandidate } from "../renderer/lib/types";
 import { buildRunCommand } from "./python";
@@ -17,10 +19,8 @@ type ActiveRun = {
 };
 
 let activeRun: ActiveRun | null = null;
-const FORCE_DELAY_MS = 3000;
-const pendingForceTimers = new Map<number, NodeJS.Timeout>();
 
-export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath: string, request: RunRequest, callbacks?: { onControlEvent?(event: RunEvent): void; onFinish?(runId: string): void }): { runId: string } {
+export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath: string, request: RunRequest, callbacks?: { onControlEvent?(event: RunEvent): void; onFinish?(runId: string, status: "complete" | "failed" | "cancelled"): void | Promise<void> }): { runId: string } {
   if (activeRun) {
     throw new Error("A run is already active");
   }
@@ -35,7 +35,7 @@ export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath:
   });
   activeRun = { runId, process: child, startedAtMs, cancelled: false };
   let finished = false;
-  const finish = (code: number | null, signal: string | null) => {
+  const finish = async (code: number | null, signal: string | null) => {
     if (finished) return;
     finished = true;
     const cancelled = activeRun?.cancelled ?? false;
@@ -43,14 +43,18 @@ export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath:
     // FFmpeg/llama-server descendants may have resisted graceful termination.
     if (activeRun?.forceTimer && !cancelled) {
       clearTimeout(activeRun.forceTimer);
-      if (child.pid) pendingForceTimers.delete(child.pid);
+      if (child.pid) forgetProcessTree(child.pid);
     }
     child.stdout.destroy();
     child.stderr.destroy();
     const elapsedMs = Date.now() - startedAtMs;
-    emit(window, { type: "exit", runId, code, signal, elapsedMs, cancelled });
     activeRun = null;
-    callbacks?.onFinish?.(runId);
+    try {
+      const published = callbacks?.onFinish?.(runId, cancelled ? "cancelled" : code === 0 ? "complete" : "failed");
+      if (published) await published;
+    }
+    catch (error) { code = 1; emit(window, { type: "error", runId, message: error instanceof Error ? error.message : String(error) }); }
+    emit(window, { type: "exit", runId, code, signal, elapsedMs, cancelled });
   };
   emit(window, { type: "started", runId, commandPreview: command.preview, startedAt: new Date(startedAtMs).toISOString() });
 
@@ -139,49 +143,6 @@ export function cancelRun(runId: string, immediate = false): void {
   activeRun.forceTimer = terminateProcessTree(activeRun.process, immediate);
 }
 
-/** Stop the whole workflow tree. On Windows this includes Python's FFmpeg and llama-server descendants. */
-export function terminateProcessTree(child: Pick<ChildProcessWithoutNullStreams, "pid" | "kill">, immediate: boolean): NodeJS.Timeout | undefined {
-  if (!child.pid) {
-    child.kill();
-    return undefined;
-  }
-  if (process.platform === "win32") {
-    if (immediate) {
-      forceWindowsTree(child.pid);
-      return undefined;
-    }
-    const graceful = spawn("taskkill", ["/PID", String(child.pid), "/T"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    graceful.on("error", () => undefined);
-    const timer = setTimeout(() => {
-      forceWindowsTree(child.pid!);
-      pendingForceTimers.delete(child.pid!);
-    }, FORCE_DELAY_MS);
-    timer.unref();
-    pendingForceTimers.set(child.pid, timer);
-    return timer;
-  }
-  try {
-    process.kill(-child.pid, immediate ? "SIGKILL" : "SIGTERM");
-  } catch {
-    child.kill(immediate ? "SIGKILL" : "SIGTERM");
-  }
-  if (immediate) return undefined;
-  const timer = setTimeout(() => {
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {
-      // The process group already exited.
-    }
-    pendingForceTimers.delete(child.pid!);
-  }, FORCE_DELAY_MS);
-  timer.unref();
-  pendingForceTimers.set(child.pid, timer);
-  return timer;
-}
-
 export function shutdownActiveRun(): void {
   const activePid = activeRun?.process.pid;
   if (activeRun) {
@@ -189,28 +150,7 @@ export function shutdownActiveRun(): void {
     if (activeRun.forceTimer) clearTimeout(activeRun.forceTimer);
     terminateProcessTree(activeRun.process, true);
   }
-  for (const [pid, timer] of pendingForceTimers) {
-    clearTimeout(timer);
-    if (pid === activePid) continue;
-    if (process.platform === "win32") {
-      forceWindowsTree(pid);
-    } else {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        // The process group already exited.
-      }
-    }
-  }
-  pendingForceTimers.clear();
-}
-
-function forceWindowsTree(pid: number): void {
-  spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-    windowsHide: true,
-    stdio: "ignore",
-    timeout: 5000,
-  });
+  shutdownProcessTrees(activePid);
 }
 
 function emit(window: BrowserWindow, event: RunEvent): void {
@@ -235,7 +175,7 @@ function handleStdoutLine(window: BrowserWindow, runId: string, line: string, on
     if (value.type === "silence-candidates" || value.type === "silence-review-required") {
       const candidates = validateCandidates(value.candidates);
       if (value.type === "silence-candidates") {
-        if (!["local", "hosted", "local-long-stream", "hosted-long-stream"].includes(String(value.workflow))) throw new Error();
+        if (!workflows.some((workflow) => workflow === value.workflow)) throw new Error();
         event = { type: "silence-candidates", runId, workflow: value.workflow as RunRequest["workflow"], candidates };
       } else {
         if (typeof value.reviewId !== "string" || !value.reviewId) throw new Error();

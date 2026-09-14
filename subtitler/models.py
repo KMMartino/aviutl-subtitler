@@ -64,6 +64,7 @@ class ExoMarker:
     end_time: float
     text: str = ""
     group_id: int | None = None
+    is_cut: bool = False
 
 
 @dataclass

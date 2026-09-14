@@ -10,7 +10,7 @@ export function buildEditorialInspectionArgs(checkpoint: string, sources?: Edito
   return args;
 }
 
-export function buildEditorialApplyCutsArgs(paths: RuntimePaths, reviewProject: string): string[] {
+export function buildEditorialApplyCutsArgs(paths: RuntimePaths, reviewProject: string, checkpoint?: string): string[] {
   const stem = path.basename(reviewProject, path.extname(reviewProject));
   return [
     "-m", "subtitler.editorial_project_cli", "apply-cuts",
@@ -18,7 +18,7 @@ export function buildEditorialApplyCutsArgs(paths: RuntimePaths, reviewProject: 
     "--config", path.join(paths.userConfigRoot, "hosted-long-stream.json"),
     "--env-file", paths.envFile,
     "--workspace", path.join(path.dirname(reviewProject), `${stem}.files`, "narration-review"),
-    "--pipeline-script", path.join(paths.bundledBackendRoot, "aviutl_subtitle.py"),
+    ...(checkpoint ? ["--checkpoint", checkpoint] : []),
   ];
 }
 
@@ -27,8 +27,9 @@ export async function applyReviewedEditorialCuts(
   pythonPath: string,
   reviewProject: string,
   onOutput?: (stream: "stdout" | "stderr", text: string) => void,
+  checkpoint?: string,
 ): Promise<EditorialCutApplicationResult> {
-  const args = buildEditorialApplyCutsArgs(paths, reviewProject);
+  const args = buildEditorialApplyCutsArgs(paths, reviewProject, checkpoint);
   const { stdout, stderr, code } = await collectProcess(
     pythonPath, args, paths.bundledBackendRoot, onOutput,
   );

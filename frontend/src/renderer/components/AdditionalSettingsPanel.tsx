@@ -1,6 +1,8 @@
+import { supportsWorkflowFeature } from "../../shared/workflowCatalog";
 import { AlertTriangle } from "lucide-react";
 import type {
   CoreWorkflowSettings,
+  AudioTrackInfo,
   CutSilenceEncoderPreset,
   MediaFrameRateMode,
   WorkflowName
@@ -15,6 +17,8 @@ type Props = {
   encoderReady: boolean;
   encoderChecking: boolean;
   hasVideo: boolean;
+  audioTracks?: AudioTrackInfo[];
+  paired?: boolean;
   frameRateMode: MediaFrameRateMode;
   disabled?: boolean;
   onConfigure(): void;
@@ -22,7 +26,7 @@ type Props = {
 };
 
 export default function AdditionalSettingsPanel({
-  workflow, settings, encoder, encoderReady, encoderChecking, hasVideo, frameRateMode,
+  workflow, settings, encoder, encoderReady, encoderChecking, hasVideo, frameRateMode, audioTracks = [], paired = false,
   disabled = false, onConfigure, onChange
 }: Props) {
   const { t } = useI18n();
@@ -32,7 +36,7 @@ export default function AdditionalSettingsPanel({
     renderCutVideo: false,
     brollMode: "off"
   };
-  const shortWorkflow = workflow === "local" || workflow === "hosted";
+  const shortWorkflow = supportsWorkflowFeature(workflow, "silence");
   const cutMode = additionalSettings.cutSilenceMode ?? "off";
   const cutEnabled = cutMode !== "off";
   const reviewCuts = cutMode === "review";
@@ -65,17 +69,36 @@ export default function AdditionalSettingsPanel({
           <AlertTriangle size={18} /><span><strong>{t("additional.unknownFps")}</strong><small>{t("additional.unknownFpsDetail")}</small></span>
         </div>}
       </>}
-      {cutEnabled && (!hasVideo || encoderBlocked) && <div className="local-blocking-alert" role="alert"><AlertTriangle size={18} /><span><strong>{!hasVideo ? t("additional.videoRequired") : encoderChecking ? t("additional.checkingEncoder") : encoder === "unconfigured" ? t("additional.chooseEncoder") : t("additional.encoderUnavailable")}</strong>{!hasVideo ? <small>{t("additional.selectVideo")}</small> : <button onClick={onConfigure}>{t("additional.openCutSettings")}</button>}</span></div>}
-      {workflow === "hosted" && <label className="check">
+      {cutEnabled && hasVideo && encoderBlocked && <div className="local-blocking-alert" role="alert"><AlertTriangle size={18} /><span><strong>{encoderChecking ? t("additional.checkingEncoder") : encoder === "unconfigured" ? t("additional.chooseEncoder") : t("additional.encoderUnavailable")}</strong><button onClick={onConfigure}>{t("additional.openCutSettings")}</button></span></div>}
+      {supportsWorkflowFeature(workflow, "chapters") && <label className="check">
         <input disabled={disabled} type="checkbox" checked={additionalSettings.youtubeChapters} onChange={(event) => updateAdditional({ ...additionalSettings, youtubeChapters: event.target.checked })} />
         <TooltipLabel text={t("additional.chaptersHelp")}>{t("additional.chapters")}</TooltipLabel>
       </label>}
-      {workflow === "hosted" && <>
+      {supportsWorkflowFeature(workflow, "broll") && <>
         <label className="check">
           <input disabled={disabled || !hasVideo} type="checkbox" checked={(additionalSettings.brollMode ?? "off") !== "off"} onChange={(event) => updateAdditional({ ...additionalSettings, brollMode: event.target.checked ? "automatic" : "off" })} />
           <TooltipLabel text={t("additional.brollHelp")}>{t("additional.broll")}</TooltipLabel>
         </label>
       </>}
-    </div> : <div className="stack" />}
+    </div> : <div className="stack">
+      <fieldset className="audio-track-choice" disabled={disabled || paired || !audioTracks.length}>
+        <legend><TooltipLabel text={t("additional.trackTooltip")}>{t("additional.speechTrack")}</TooltipLabel></legend>
+        <div className="segmented track-options">{(paired ? [{ audioIndex: 0, title: "" }] : audioTracks).map((track) => <label className={settings.audioTrack === track.audioIndex || paired ? "active" : ""} key={track.audioIndex}>
+          <input type="radio" name="editorial-voice-track" checked={paired ? track.audioIndex === 0 : settings.audioTrack === track.audioIndex} onChange={() => onChange({ ...settings, audioTrack: track.audioIndex })} />
+          {track.title || t("additional.trackNumber", { number: track.audioIndex + 1 })}
+        </label>)}</div>
+      </fieldset>
+      <fieldset className="audio-track-choice" disabled={disabled || paired || !audioTracks.length}>
+        <legend>{t("additional.gameTrack")}</legend>
+        <div className="segmented track-options">
+          {!paired && <label className={settings.editorial?.gameAudioTrack === undefined ? "active" : ""}><input type="radio" name="editorial-game-track" checked={settings.editorial?.gameAudioTrack === undefined} onChange={() => onChange({ ...settings, editorial: { ...settings.editorial, cuttingMode: "voice_gaps", gameAudioTrack: undefined } })} />{t("additional.noGameTrack")}</label>}
+          {(paired ? [{ audioIndex: 0, title: "" }] : audioTracks).map((track) => <label className={settings.editorial?.gameAudioTrack === track.audioIndex || paired ? "active" : ""} key={track.audioIndex}>
+            <input type="radio" name="editorial-game-track" checked={paired ? track.audioIndex === 0 : settings.editorial?.gameAudioTrack === track.audioIndex} onChange={() => onChange({ ...settings, editorial: { ...settings.editorial, cuttingMode: "voice_gaps", gameAudioTrack: track.audioIndex } })} />
+            {track.title || t("additional.trackNumber", { number: track.audioIndex + 1 })}
+          </label>)}
+        </div>
+      </fieldset>
+      {paired && <small className="field-help">{t("additional.pairedTracks")}</small>}
+    </div>}
   </section>;
 }

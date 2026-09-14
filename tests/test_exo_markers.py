@@ -2,11 +2,22 @@ import re
 import unittest
 from pathlib import Path
 
-from subtitler.exo import _chapter_marker_frame_ranges, encode_text_for_exo, generate_exo_file
+from subtitler.exo import _chapter_marker_frame_ranges, _marker_frame_ranges, encode_text_for_exo, generate_exo_file
 from subtitler.models import BrollPlacement, ExoMarker, ExoMediaPlan, ExoMediaSegment, ExoSettings, Subtitle
 
 
 class ExoMarkerTests(unittest.TestCase):
+    def test_cut_markers_remove_only_complete_frames_inside_source_range(self) -> None:
+        cuts = [ExoMarker(1.001, 1.099, '[CUT]'), ExoMarker(2.0, 2.5, '[CUT]'),
+                ExoMarker(3.001, 3.010, '[CUT]')]
+        ranges = _marker_frame_ranges(cuts, 60)
+        self.assertEqual(ranges, [(62, 65, '[CUT]'), (121, 150, '[CUT]')])
+        for marker, (start, end, _) in zip(cuts, ranges):
+            self.assertGreaterEqual((start-1)/60, marker.start_time)
+            self.assertLessEqual(end/60, marker.end_time)
+        # Non-destructive labels retain their existing visibility convention.
+        self.assertEqual(_marker_frame_ranges([ExoMarker(1.001, 1.010, 'QA')], 60), [(61, 61, 'QA')])
+
     def test_multiline_text_uses_crlf_for_aviutl_editor_compatibility(self) -> None:
         encoded = encode_text_for_exo("First\nSecond\rThird\r\nFourth")
         decoded = bytes.fromhex(encoded).decode("utf-16-le").split("\0", 1)[0]

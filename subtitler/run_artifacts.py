@@ -16,9 +16,14 @@ from .models import ExoMarker
 
 
 class RunArguments(Protocol):
-    input: str
-    output: str | None
-    workflow: str
+    @property
+    def input(self) -> str: ...
+
+    @property
+    def output(self) -> str | None: ...
+
+    @property
+    def workflow(self) -> str: ...
 
 
 @dataclass(frozen=True)

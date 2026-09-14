@@ -1,7 +1,16 @@
+import type { ProjectUpdate } from "../shared/creatorProject";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { AppSettings, BrollReviewDecision, EditorialSourceSelection, LlamaBackendId, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetKind, MediaAssetListRequest, RunEvent, RunRequest, SilenceCutDecision, WebAssetAcquireRequest, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
 
 contextBridge.exposeInMainWorld("subtitler", {
+  reviewProjectResult: (directory: string, resultId: string, reviewedExo: string) => ipcRenderer.invoke("project:review", directory, resultId, reviewedExo),
+  projectTranscript: (directory: string, resultId: string, file: string) => ipcRenderer.invoke("project:transcript", directory, resultId, file),
+  exportProjectExo: (directory: string, resultId: string) => ipcRenderer.invoke("project:export-exo", directory, resultId),
+  projectCatalog: () => ipcRenderer.invoke("project:catalog"),
+  createProject: (name: string, parentDirectory?: string) => ipcRenderer.invoke("project:create", name, parentDirectory),
+  openProject: (directory: string) => ipcRenderer.invoke("project:open", directory),
+  updateProject: (update: ProjectUpdate) => ipcRenderer.invoke("project:update", update),
+  setProjectDirectory: (directory: string) => ipcRenderer.invoke("project:default-directory", directory),
   chooseInputFile: (defaultPath?: string) => ipcRenderer.invoke("dialog:input-file", defaultPath),
   chooseInputFiles: (defaultPath?: string) => ipcRenderer.invoke("dialog:input-files", defaultPath),
   chooseFile: () => ipcRenderer.invoke("dialog:file"),
@@ -25,6 +34,13 @@ contextBridge.exposeInMainWorld("subtitler", {
   getMediaAssetThumbnails: (assetIds: string[]) => ipcRenderer.invoke("library:thumbnails", assetIds),
   updateMediaAssetDescription: (assetId: string, description: string) => ipcRenderer.invoke("library:update-description", assetId, description),
   addMediaAssetSegment: (assetId: string, scope: MediaAnalysisScope, description: string) => ipcRenderer.invoke("library:add-segment", assetId, scope, description),
+  acquireSource: (sourceUrl: string) => ipcRenderer.invoke("source:acquire", sourceUrl),
+  cancelSourceAcquisition: () => ipcRenderer.invoke("source:cancel"),
+  onSourceProgress: (callback: (percent: number) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, percent: number) => callback(percent);
+    ipcRenderer.on("source:progress", listener);
+    return () => ipcRenderer.removeListener("source:progress", listener);
+  },
   probeWebAsset: (sourceUrl: string) => ipcRenderer.invoke("library:web-probe", sourceUrl),
   acquireWebAsset: (request: WebAssetAcquireRequest) => ipcRenderer.invoke("library:web-acquire", request),
   estimateMediaAssetAnalysis: (assetId: string, scope?: MediaAnalysisScope) => ipcRenderer.invoke("library:analysis-estimates", assetId, scope),

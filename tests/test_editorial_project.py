@@ -20,6 +20,57 @@ from subtitler.errors import SubtitlerError
 
 
 class EditorialProjectTests(unittest.TestCase):
+    def test_processing_locale_is_persisted_independently_and_changes_analysis_identity(self) -> None:
+        from subtitler.editorial_operations import EditorialOperations
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            source.write_bytes(b"recording")
+            project = create_editorial_project([EditorialSourceInput(source, 60000)],
+                EditorialProjectOptions("Game", "Explain", 30000, 45000, processing_locale="ja", output_locale="en"))
+            path = root / "project.json"
+            write_editorial_checkpoint(path, project)
+            project = load_editorial_checkpoint(path)
+            self.assertEqual((project["processing_locale"], project["output_locale"]), ("ja", "en"))
+            operations = EditorialOperations(path, project, object())
+            item = project["sources"][0]
+            transcription = operations.inputs("transcription", item)
+            visual = operations.inputs("visual_learning", item)
+            project["processing_locale"] = "en"
+            self.assertEqual(transcription, operations.inputs("transcription", item))
+            self.assertNotEqual(visual, operations.inputs("visual_learning", item))
+
+    def test_reopen_preserves_global_narration_and_restores_local_briefs_after_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source.mp4'
+            source.write_bytes(b'recording')
+            project = create_editorial_project([EditorialSourceInput(source, 60000)],
+                EditorialProjectOptions('Game', 'Explain the run', 30000, 45000))
+            source_id = project['sources'][0]['source_id']
+            local = {'id': 'local-brief'}
+            final = {'id': 'global-brief'}
+            for stage in project['sources'][0]['stages']:
+                update_source_stage(project, source_id, stage, 'complete', output={'narration_briefs': [local]})
+            mapping = project['editorial_map']
+            mapping['global_reconciliation'].update(status='complete', output={'narration_briefs': [final]})
+            mapping['narration_briefs'] = []
+            path = root / 'project.json'
+            write_editorial_checkpoint(path, project)
+            loaded = load_editorial_checkpoint(path)
+            self.assertEqual(loaded['editorial_map']['narration_briefs'], [final])
+            write_editorial_checkpoint(path, loaded)
+            self.assertEqual(load_editorial_checkpoint(path)['editorial_map']['narration_briefs'], [final])
+            loaded['editorial_map']['action_planning'].update(status='complete', output={'narration_briefs': []})
+            write_editorial_checkpoint(path, loaded)
+            self.assertEqual(load_editorial_checkpoint(path)['editorial_map']['narration_briefs'], [])
+            loaded['editorial_map']['action_planning'].update(status='pending', output=None)
+            write_editorial_checkpoint(path, loaded)
+            self.assertEqual(load_editorial_checkpoint(path)['editorial_map']['narration_briefs'], [final])
+            loaded['editorial_map']['global_reconciliation'].update(status='pending', output=None)
+            write_editorial_checkpoint(path, loaded)
+            self.assertEqual(load_editorial_checkpoint(path)['editorial_map']['narration_briefs'], [local])
+
     def test_checkpoint_tracks_ordered_sources_and_resumes_first_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -155,65 +206,19 @@ class EditorialProjectTests(unittest.TestCase):
                     EditorialProjectOptions("A game", "Finish the run", 30_000, 45_000),
                 )
 
-    def test_load_upgrades_the_earlier_single_file_checkpoint_schema(self) -> None:
+    def test_unsupported_checkpoint_schemas_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source_path = root / "source.mp4"
-            source_path.write_bytes(b"media")
-            project = create_editorial_project(
-                [EditorialSourceInput(source_path, 60_000)],
-                EditorialProjectOptions("A game", "Finish the run", 30_000, 45_000),
-            )
-            project["schema_version"] = 1
-            project.pop("pipeline_versions")
-            source = project["sources"][0]
-            for field in (
-                "media_mode",
-                "pairing_basis",
-                "audio_path",
-                "visual_path",
-                "audio_original_name",
-                "visual_original_name",
-                "audio_duration_ms",
-                "visual_duration_ms",
-                "frame_rate",
-                "audio_fingerprint",
-                "visual_fingerprint",
-            ):
-                source.pop(field)
-            for checkpoint_value in source["stages"].values():
-                checkpoint_value.pop("version")
-            project["editorial_map"]["global_reconciliation"].pop("version")
-            checkpoint = root / "legacy.editorial.json"
-            checkpoint.write_text(json.dumps(project), encoding="utf-8")
-
-            loaded = load_editorial_checkpoint(checkpoint)
-
-            self.assertEqual(loaded["schema_version"], 4)
-            self.assertEqual(loaded["output_locale"], "en")
-            self.assertEqual(loaded["sources"][0]["media_mode"], "single")
-            self.assertEqual(loaded["pipeline_versions"]["transcription"], 1)
-
-    def test_schema_two_checkpoint_is_migrated_and_persisted_as_english(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.mp4"
-            source.write_bytes(b"media")
-            project = create_editorial_project(
-                [EditorialSourceInput(source, 60_000)],
-                EditorialProjectOptions("A game", "Finish the run", 30_000, 45_000),
-            )
-            project["schema_version"] = 2
-            project.pop("output_locale")
-            checkpoint = root / "legacy.editorial.json"
-            checkpoint.write_text(json.dumps(project), encoding="utf-8")
-
-            loaded = load_editorial_checkpoint(checkpoint)
-            write_editorial_checkpoint(checkpoint, loaded)
-
-            persisted = json.loads(checkpoint.read_text(encoding="utf-8"))
-            self.assertEqual(persisted["schema_version"], 4)
-            self.assertEqual(persisted["output_locale"], "en")
+            media = root / "source.mp4"
+            media.write_bytes(b"media")
+            project = create_editorial_project([EditorialSourceInput(media, 60000)],
+                EditorialProjectOptions("Game", "Guide", 10000, 30000))
+            path = root / "project.json"
+            for version in (1, 2, 3, 99):
+                project["schema_version"] = version
+                path.write_text(json.dumps(project), encoding="utf-8")
+                with self.subTest(version=version), self.assertRaises(SubtitlerError):
+                    load_editorial_checkpoint(path)
 
     def test_load_repairs_duplicated_source_aggregates_from_local_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

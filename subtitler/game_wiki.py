@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
+import unicodedata
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -49,21 +49,20 @@ def _lookup(language: str, title: str, suffix: str) -> dict[str, Any] | None:
         attempts=1,
     )
     results = data.get("query", {}).get("search", []) if isinstance(data.get("query"), dict) else []
-    best: tuple[float, dict[str, Any]] | None = None
+    selected: dict[str, Any] | None = None
     for item in results if isinstance(results, list) else []:
         if not isinstance(item, dict):
             continue
         page_title = str(item.get("title") or "")
-        score = SequenceMatcher(None, _key(title), _key(page_title)).ratio()
         snippet = re.sub(r"<[^>]+>", " ", str(item.get("snippet") or "")).casefold()
         game_signal = any(word in snippet for word in ("video game", "videogame", "ゲーム"))
-        if score < 0.68 or not game_signal:
+        if not game_title_matches(title, page_title) or not game_signal:
             continue
-        if best is None or score > best[0]:
-            best = (score, item)
-    if best is None:
+        selected = item
+        break
+    if selected is None:
         return None
-    page_title = str(best[1]["title"])
+    page_title = str(selected["title"])
     extract_url = api + "?" + urlencode(
         {
             "action": "query",
@@ -88,6 +87,11 @@ def _lookup(language: str, title: str, suffix: str) -> dict[str, Any] | None:
     )
     pages = detail.get("query", {}).get("pages", {}) if isinstance(detail.get("query"), dict) else {}
     page = next((value for value in pages.values() if isinstance(value, dict)), None) if isinstance(pages, dict) else None
+    # Search titles may redirect. The resolved target must establish the same
+    # identity; lexical resemblance or an unverified alias is not sufficient.
+    if not page or not game_title_matches(title, str(page.get("title") or "")):
+        return None
+    page_title = str(page["title"])
     extract = " ".join(str(page.get("extract") or "").split())[:5000] if page else ""
     if not extract:
         return None
@@ -96,10 +100,16 @@ def _lookup(language: str, title: str, suffix: str) -> dict[str, Any] | None:
         "language": language,
         "page_title": page_title,
         "url": f"https://{language}.wikipedia.org/wiki/{quote(page_title.replace(' ', '_'))}",
-        "match_confidence": round(best[0], 3),
+        "match_confidence": 1.0,
+        "match_basis": "normalized_title",
         "summary": extract,
     }
 
 
-def _key(value: str) -> str:
-    return "".join(character for character in value.casefold() if character.isalnum())
+def game_title_matches(title: str, page_title: str) -> bool:
+    """Fail closed for mode labels, sequels, and aliases we cannot establish."""
+    def key(value: str) -> str:
+        normalized = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+        return re.sub(r"\s*\((?:\d{4} )?(?:video game|computer game|ゲーム|コンピュータゲーム)\)$", "", normalized)
+
+    return bool(key(title)) and key(title) == key(page_title)

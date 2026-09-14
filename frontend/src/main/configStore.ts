@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AppSettings, AppState, WorkflowConfig, WorkflowName } from "../renderer/lib/types";
-import { workflows } from "../renderer/lib/workflowLabels";
+import { workflows } from "../shared/workflowCatalog";
 import { APPROVED_MODELS, hostedCleanupTuning, isHostedModelApproved, recommendedFallbackTranscription } from "../shared/hostedModelCatalog";
 import { isAppLocale } from "../shared/i18n";
 import { defaultPythonPath } from "./python";

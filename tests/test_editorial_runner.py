@@ -1,3 +1,6 @@
+import json
+from unittest.mock import patch
+
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -12,6 +15,7 @@ from subtitler.editorial_project import (
     load_editorial_checkpoint,
     write_editorial_checkpoint,
 )
+from subtitler.operation_store import ArtifactError
 from subtitler.editorial_runner import (
     EditorialRunInterrupted,
     _record_stage_cost,
@@ -86,6 +90,109 @@ class EditorialRunnerTests(unittest.TestCase):
         write_editorial_checkpoint(checkpoint, project)
         return checkpoint
 
+    def test_completed_results_are_verified_and_only_changed_operations_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            executor.operation_parameters = lambda stage: {"selection": 1} if stage == "action_planning" else {}
+            before = run_editorial_project(checkpoint, executor)
+            executor.calls.clear()
+            before["sources"][0]["reference_frames"] = [{"timestamp_ms": 1000, "path": "report-thumbnail.jpg"}]
+            write_editorial_checkpoint(checkpoint, before)
+            with patch.object(executor, "plan_actions", side_effect=AssertionError("completed operation reran")):
+                run_editorial_project(checkpoint, executor)
+            self.assertEqual(executor.calls, [])
+            executor.operation_parameters = lambda stage: {"selection": 2} if stage == "action_planning" else {}
+            after = run_editorial_project(checkpoint, executor)
+            self.assertEqual(executor.calls, [])
+            self.assertEqual(before["editorial_map"]["global_reconciliation"], after["editorial_map"]["global_reconciliation"])
+            self.assertNotEqual(before["editorial_map"]["action_planning"]["operation_result"],
+                                after["editorial_map"]["action_planning"]["operation_result"])
+            after["sources"][0]["stages"]["source_probe"]["output"]["stage"] = "tampered"
+            write_editorial_checkpoint(checkpoint, after)
+            with self.assertRaises(ArtifactError):
+                run_editorial_project(checkpoint, executor)
+
+    def test_result_survives_crash_between_operation_and_checkpoint_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            def crash(path, project):
+                if project["sources"][0]["stages"]["source_probe"]["status"] == "complete":
+                    raise OSError("checkpoint disk interruption")
+                write_editorial_checkpoint(path, project)
+            with patch("subtitler.editorial_runner.write_editorial_checkpoint", side_effect=crash):
+                with self.assertRaises(OSError):
+                    run_editorial_project(checkpoint, executor)
+            executor.calls.clear()
+            run_editorial_project(checkpoint, executor)
+            self.assertNotIn((0, "source_probe"), [(order, stage) for order, stage, _ in executor.calls])
+
+    def test_transcription_reuses_saved_results_after_admission_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            cost = {"max_estimated_api_cost_usd": 10, "allow_api_spend": True, "estimate_cost_only": False}
+            executor.operation_parameters = lambda stage: {"cost": dict(cost)} if stage == "transcription" else {}
+            before = run_editorial_project(checkpoint, executor)
+            cost.update(max_estimated_api_cost_usd=25, allow_api_spend=False)
+            executor.calls.clear()
+            after = run_editorial_project(checkpoint, executor)
+            self.assertEqual(executor.calls, [])
+            self.assertEqual(before["sources"][0]["stages"]["transcription"],
+                             after["sources"][0]["stages"]["transcription"])
+            cost["estimate_cost_only"] = True
+            run_editorial_project(checkpoint, executor)
+            self.assertIn((0, "transcription"), [(order, stage) for order, stage, _ in executor.calls])
+
+    def test_transcription_crash_recovery_keeps_original_artifact_key_after_budget_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            cost = {"max_estimated_api_cost_usd": 10, "estimate_cost_only": False}
+            executor.operation_parameters = lambda stage: {"cost": dict(cost)} if stage == "transcription" else {}
+
+            def crash(path, project):
+                if project["sources"][0]["stages"]["transcription"]["status"] == "complete":
+                    raise OSError("checkpoint disk interruption")
+                write_editorial_checkpoint(path, project)
+
+            with patch("subtitler.editorial_runner.write_editorial_checkpoint", side_effect=crash):
+                with self.assertRaises(OSError):
+                    run_editorial_project(checkpoint, executor)
+            executor.calls.clear()
+            cost["max_estimated_api_cost_usd"] = 25
+            run_editorial_project(checkpoint, executor)
+            self.assertNotIn((0, "transcription"), [(order, stage) for order, stage, _ in executor.calls])
+            self.assertIn((1, "transcription"), [(order, stage) for order, stage, _ in executor.calls])
+
+    def test_failed_editorial_usage_survives_a_successful_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            error = RuntimeError("provider disconnected after billing")
+            error.editorial_failure_output = {"api_cost_usd": 0.1, "api_usage": []}
+            with patch.object(executor, "plan_actions", side_effect=error):
+                with self.assertRaises(EditorialRunInterrupted):
+                    run_editorial_project(checkpoint, executor)
+            run_editorial_project(checkpoint, executor)
+            failures = [json.loads(path.read_text(encoding="utf-8"))
+                        for path in checkpoint.with_suffix(".operations").glob("*.failed.*.json")]
+            self.assertEqual(failures[0]["failure"]["api_cost_usd"], 0.1)
+
+    def test_invalid_project_result_is_a_durable_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            checkpoint = self._project(Path(directory))
+            executor = _RecordingExecutor()
+            with patch.object(executor, "plan_actions", return_value=None):
+                with self.assertRaises(EditorialRunInterrupted):
+                    run_editorial_project(checkpoint, executor)
+            failed = load_editorial_checkpoint(checkpoint)
+            self.assertEqual(failed["editorial_map"]["action_planning"]["status"], "failed")
+            executor.calls.clear()
+            run_editorial_project(checkpoint, executor)
+            self.assertEqual(executor.calls, [])
+
     def test_processes_every_stage_of_one_source_before_the_next(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -109,6 +216,16 @@ class EditorialRunnerTests(unittest.TestCase):
             self.assertIn("Factual story synthesis", log.getvalue())
             self.assertEqual(result["editorial_map"]["editorial_assets"]["status"], "complete")
             self.assertIn("Editorial run complete", log.getvalue())
+            executor.calls.clear()
+            destination = root / "deliverables" / "guide.exo"
+            with patch("subtitler.editorial_audio.prepare_editorial_audio") as audio:
+                run_editorial_project(checkpoint, executor, exo_path=destination,
+                                      report_path=destination.with_suffix(".html"))
+            audio.assert_called_once()
+            self.assertEqual(audio.call_args.args[1], destination.with_suffix(".audio"))
+            self.assertTrue(destination.is_file())
+            self.assertTrue(destination.with_suffix(".html").is_file())
+            self.assertEqual(executor.calls, [])
 
     def test_failure_checkpoints_and_retry_skips_completed_expensive_stages(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

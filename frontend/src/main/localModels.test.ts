@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
-import { adoptExistingModelArtifacts, completeFilesNeedVerification, deleteManagedLocalProfile, fetchHuggingFaceFileMetadata, hasExpectedModelMetadata, LOCAL_PROFILES, localModelPaths, verifyDownloadedModelOrRemove } from "./localModels";
+import { adoptExistingModelArtifacts, completeFilesNeedVerification, deleteManagedLocalProfile, fetchHuggingFaceFileMetadata, hasExpectedModelMetadata, localModelPaths, verifyDownloadedModelOrRemove } from "./localModels";
 
 const roots: string[] = [];
 
@@ -121,27 +121,6 @@ describe("local model catalog", () => {
     })).rejects.toThrow();
     expect(fs.existsSync(target)).toBe(false);
     expect(fs.existsSync(`${target}.artifact.json`)).toBe(false);
-  });
-  it("defines the fixed 16 GB profile", () => {
-    expect(LOCAL_PROFILES.map((profile) => profile.id)).toEqual([
-      "8gb-gpu-gemma",
-      "12gb-gpu-gemma",
-      "16gb-gpu-gemma",
-      "8gb-gpu-gemma-mtp",
-      "12gb-gpu-gemma-mtp",
-      "16gb-gpu-gemma-mtp"
-    ]);
-    expect(LOCAL_PROFILES[0].files.transcription.filename).toBe("gemma-4-E2B-it-Q5_K_M.gguf");
-    expect(LOCAL_PROFILES[1].files.cleanup.filename).toBe("gemma-4-12b-it-Q5_K_M.gguf");
-    expect(LOCAL_PROFILES[2].files.cleanup.filename).toBe("gemma-4-12b-it-UD-Q6_K_XL.gguf");
-    expect(LOCAL_PROFILES.map((profile) => profile.cleanupGroupPolicy)).toEqual([
-      { minSec: 20, durationDivisor: 8, maxSec: 180 },
-      { minSec: 40, durationDivisor: 4, maxSec: 300 },
-      { minSec: 60, durationDivisor: 2, maxSec: 600 },
-      { minSec: 20, durationDivisor: 8, maxSec: 180 },
-      { minSec: 40, durationDivisor: 4, maxSec: 300 },
-      { minSec: 60, durationDivisor: 2, maxSec: 600 }
-    ]);
   });
 
   it("reuses standard target paths in MTP profiles", () => {

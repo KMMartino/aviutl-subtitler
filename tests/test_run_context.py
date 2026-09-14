@@ -92,7 +92,7 @@ class RunContextTests(unittest.TestCase):
         self.assertEqual(config["audio"]["track"], 3)
         self.assertTrue(config["diagnostics"]["profile"])
         load_config.assert_called_once_with("hosted-long-stream", Path("custom.json"))
-        validate.assert_called_once_with(config, workflow="hosted-long-stream")
+        validate.assert_called_once_with(config, workflow="hosted-long-stream", check_paths=False)
         load_env.assert_called_once_with(root / "keys.env")
         configure_offline.assert_called_once_with(config["alignment"])
 

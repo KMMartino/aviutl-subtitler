@@ -33,6 +33,17 @@ from .media_layout import (
 from .models import ExoCompositeMediaClip, ExoMarker, ExoMediaSegment, ExoSettings, Subtitle
 
 
+def write_editorial_exo_parts(path: Path, artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    from .editorial_export_parts import export_source_groups
+
+    parts = []
+    for index, sources in enumerate(export_source_groups(artifact), 1):
+        output = path if index == 1 else path.with_name(f"{path.stem}-part-{index:02d}.exo")
+        write_editorial_exo(output, {**artifact, "sources": sources})
+        parts.append({"path": str(output), "source_ids": [s["source_id"] for s in sources]})
+    return parts
+
+
 def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
     """Write linked source media, transcript subtitles, and editorial markers."""
     sources = sorted(artifact["sources"], key=lambda item: item["order"])
@@ -49,6 +60,7 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
         for item in artifact.get("editorial_map", {}).get("final_actions", [])
         if isinstance(item, dict)
     ]
+    silence_only = artifact.get("editorial_map", {}).get("workflow") == "silence_markers"
     human_information = (
         artifact.get("editorial_map", {}).get("workflow") == "human_information"
     )
@@ -76,7 +88,7 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
         source_offsets[source["source_id"]] = offset_seconds
         boundaries = (
             [0, int(source["duration_ms"])]
-            if human_information
+            if human_information or silence_only
             else _source_edit_boundaries(source, final_actions)
         )
         for start_ms, end_ms in zip(boundaries, boundaries[1:]):
@@ -94,18 +106,14 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
             clips.append(
                 ExoCompositeMediaClip(
                     video_path=Path(source["visual_path"]),
-                    audio_path=Path(source["visual_path"]),
+                    audio_path=Path(source.get("export_audio", {}).get("primary_path") or source["visual_path"]),
                     segment=segment,
                     overlay_video_path=(
                         Path(source["audio_path"])
                         if source.get("media_mode") == "paired" or wide_layout is not None
                         else None
                     ),
-                    overlay_audio_path=(
-                        Path(source["audio_path"])
-                        if source.get("media_mode") == "paired" or wide_layout is not None
-                        else None
-                    ),
+                    overlay_audio_path=_overlay_audio_path(source, wide_layout),
                     video_crop=primary.crop,
                     video_scale_percent=primary.scale_percent,
                     video_x=primary.x,
@@ -116,7 +124,10 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
                     ),
                     overlay_x=overlay.x if overlay is not None else 0.0,
                     overlay_y=overlay.y if overlay is not None else 0.0,
-                    overlay_audio_volume=overlay_audio_volume,
+                    overlay_audio_volume=(
+                        100.0 if source.get("export_audio", {}).get("overlay_path")
+                        else overlay_audio_volume
+                    ),
                 )
             )
             for action in final_actions:
@@ -130,14 +141,21 @@ def write_editorial_exo(path: Path, artifact: dict[str, Any]) -> None:
             next_group_id += 1
         offset_seconds += duration_seconds
 
-    subtitles.extend(_selected_editorial_subtitles(artifact, source_offsets))
+    if not silence_only:
+        subtitles.extend(_selected_editorial_subtitles(artifact, source_offsets))
 
     presented = presented_editorial_items(artifact)
     cutting_assistant = (
         artifact.get("editorial_map", {}).get("workflow") == "cutting_assistant"
     )
     event_marker_layers: list[list[ExoMarker]] = []
-    if human_information:
+    if silence_only:
+        marker_layers = [[ExoMarker(source_offsets[item['source_id']] + item['start_ms'] / 1000,
+                                    source_offsets[item['source_id']] + item['end_ms'] / 1000, is_cut=True)
+                          for item in artifact['editorial_map']['confirmed_cuts'] if item['source_id'] in source_offsets]]
+        reference_marker_layers = []
+        number_markers = []
+    elif human_information:
         marker_layers = _human_information_marker_layers(artifact, source_offsets)
         utterance_markers = _utterance_reference_markers(artifact, source_offsets)
         reference_marker_layers = _nonoverlapping_marker_lanes(utterance_markers)
@@ -251,18 +269,14 @@ def write_cut_applied_editorial_exo(
             clips.append(
                 ExoCompositeMediaClip(
                     video_path=Path(source["visual_path"]),
-                    audio_path=Path(source["visual_path"]),
+                    audio_path=Path(source.get("export_audio", {}).get("primary_path") or source["visual_path"]),
                     segment=segment,
                     overlay_video_path=(
                         Path(source["audio_path"])
                         if source.get("media_mode") == "paired" or wide_layout is not None
                         else None
                     ),
-                    overlay_audio_path=(
-                        Path(source["audio_path"])
-                        if source.get("media_mode") == "paired" or wide_layout is not None
-                        else None
-                    ),
+                    overlay_audio_path=_overlay_audio_path(source, wide_layout),
                     video_crop=primary.crop,
                     video_scale_percent=primary.scale_percent,
                     video_x=primary.x,
@@ -273,7 +287,10 @@ def write_cut_applied_editorial_exo(
                     ),
                     overlay_x=overlay.x if overlay is not None else 0.0,
                     overlay_y=overlay.y if overlay is not None else 0.0,
-                    overlay_audio_volume=overlay_audio_volume,
+                    overlay_audio_volume=(
+                        100.0 if source.get("export_audio", {}).get("overlay_path")
+                        else overlay_audio_volume
+                    ),
                 )
             )
             output_cursor_frame += frame_count
@@ -435,6 +452,22 @@ def _event_graph_marker_layers(
     locale = str(artifact.get("output_locale") or "en")
     local_states: list[ExoMarker] = []
     primary_activities: list[ExoMarker] = []
+
+    recommendations = artifact.get('editorial_map', {}).get('editor_recommendations')
+    if recommendations is not None:
+        from .editorial_recommendation_view import marker_labels
+        labels = marker_labels(recommendations)
+        for source in recommendations['catalog']:
+            if source['source_id'] not in source_offsets:
+                continue
+            offset = source_offsets[source['source_id']]
+            for items, lane, identifier, prefix in ((source['activities'], primary_activities, 'activity_id', '[Activity]'),
+                                                   (source['states'], local_states, 'state_id', '[State]')):
+                for item in items:
+                    label = item.get('label') or ' / '.join(item.get('observations', []))
+                    lane.append(ExoMarker(offset + item['start_ms'] / 1000, offset + item['end_ms'] / 1000,
+                                          f'{prefix} {labels[item[identifier]]}\n{_context_marker_label(label)}'))
+        return [lane for lane in (local_states, primary_activities) if lane]
 
     for source in sorted(artifact.get("sources", []), key=lambda item: item.get("order", 0)):
         if not isinstance(source, dict):
@@ -909,3 +942,14 @@ def _emphasis_outline_color(value: Any) -> str:
     if energy >= 0:
         return f"{round(255 * energy):02x}0000"
     return f"0000{round(255 * -energy):02x}"
+
+
+def _overlay_audio_path(
+    source: dict[str, Any], wide_layout: WideRecordingLayout | None
+) -> Path | None:
+    exported = source.get("export_audio")
+    if isinstance(exported, dict):
+        return Path(exported["overlay_path"]) if exported.get("overlay_path") else None
+    if source.get("media_mode") == "paired" or wide_layout is not None:
+        return Path(source["audio_path"])
+    return None

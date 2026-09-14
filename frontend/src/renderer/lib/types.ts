@@ -1,4 +1,4 @@
-export type WorkflowName = "local" | "hosted" | "local-long-stream" | "hosted-long-stream";
+export type WorkflowName = "local" | "hosted" | "hosted-long-stream";
 export type EditorialCheckpointSummary = {
   path: string;
   title: string;
@@ -263,6 +263,15 @@ export type HostedModelVerification = {
 
 export type CoreWorkflowSettings = {
   audioTrack: number;
+  editorial?: {
+    cuttingMode: "voice_gaps";
+    gapEdgeMode?: "fixed" | "acoustic";
+    recommendationsEnabled?: boolean;
+    voiceGapMinMs?: number;
+    voiceLeadingHandleMs?: number;
+    voiceTrailingHandleMs?: number;
+    gameAudioTrack?: number;
+  };
   local?: {
     model: string;
     mmproj: string;
@@ -306,6 +315,7 @@ export type JsonValue = string | number | boolean | null | JsonValue[] | { [key:
 export type WorkflowConfigSection = Record<string, JsonValue | undefined>;
 export type WorkflowConfig = {
   audio?: WorkflowConfigSection;
+  editorial?: WorkflowConfigSection;
   backend?: WorkflowConfigSection;
   cleanup?: WorkflowConfigSection;
   diagnostics?: WorkflowConfigSection;
@@ -318,6 +328,11 @@ export type WorkflowConfig = {
 };
 
 export type RunRequest = {
+  transcriptArtifacts?: string[];
+  creatorResumeResultId?: string;
+  creatorProjectDirectory?: string;
+  creatorRecordingId?: string;
+  freshRun?: boolean;
   workflow: WorkflowName;
   inputPath: string;
   outputPath: string;
@@ -325,6 +340,7 @@ export type RunRequest = {
   envFile: string;
   audioTrack?: number;
   sidecarDir?: string;
+  deliverablePath?: string;
   profile: boolean;
   sidecarsEnabled: boolean;
   cutSilenceEncoderPreset: CutSilenceEncoderPreset;
@@ -350,6 +366,7 @@ export type EditorialRestartBoundary =
 export type EditorialRestartMode = "compatible" | EditorialRestartBoundary;
 
 export type EditorialSourceSelection = {
+  speechSource?: "facecam" | "gameplay";
   path: string;
   durationSeconds: number;
   mode: "single" | "paired";
@@ -374,6 +391,7 @@ export type EditorialProjectRequest = {
   targetDurationMinSeconds: number;
   targetDurationMaxSeconds: number;
   outputLocale?: AppLocale;
+  processingLocale?: AppLocale;
 };
 
 export type EditorialCheckpointInspection = {
@@ -558,6 +576,17 @@ export type MediaLibraryScanResult = {
   incompatible: number;
   missing: number;
   errors: string[];
+};
+
+export type AcquiredSource = {
+  type: "source_media";
+  schemaVersion: 1;
+  revisionId: string;
+  path: string;
+  title: string;
+  origin: WebAssetProbe;
+  sourceStartSec: number;
+  sourceEndSec: number;
 };
 
 export type WebAssetProbe = {

@@ -2,7 +2,7 @@ import contextlib
 import io
 import unittest
 
-from aviutl_subtitle import _handle_backend_result_status
+from subtitler.transcription_stage import handle_backend_result_status
 from subtitler.errors import SubtitlerError
 from subtitler.transcription_backend import BackendDiagnostic, BackendTranscriptResult
 
@@ -15,7 +15,7 @@ class BackendResultCliTests(unittest.TestCase):
             SubtitlerError,
             "selected speech produced no usable transcript segments",
         ):
-            _handle_backend_result_status(result)
+            handle_backend_result_status(result)
 
     def test_partial_result_warns_and_continues(self) -> None:
         result = BackendTranscriptResult(
@@ -33,7 +33,7 @@ class BackendResultCliTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            _handle_backend_result_status(result)
+            handle_backend_result_status(result)
 
         self.assertIn("partial result", output.getvalue())
         self.assertIn("1 chunk(s) failed", output.getvalue())
@@ -43,7 +43,7 @@ class BackendResultCliTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            _handle_backend_result_status(BackendTranscriptResult(backend_name="test"))
+            handle_backend_result_status(BackendTranscriptResult(backend_name="test"))
 
         self.assertEqual(output.getvalue(), "")
 

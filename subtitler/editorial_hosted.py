@@ -2,29 +2,24 @@
 
 from __future__ import annotations
 
-import csv
 import json
 import subprocess
-import sys
 import threading
 import time
-import unicodedata
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .api_usage import ApiUsageLedger
-from .audio import get_media_duration
+from .artifact_io import write_json_artifact
 from .config import load_workflow_config, validate_workflow_config
+from .evidence import TranscriptEvidence, VisualEvidence, load_transcript_evidence
 from .editorial_analysis import (
     EDITORIAL_PROMPT_VERSION,
-    TranscriptEvidence,
-    VisualEvidence,
     analyze_editorial_source,
     select_editorial_subtitles,
-    synthesize_human_information_project,
 )
 from .editorial_cutting import build_human_information_plan
 from .editorial_assets import (
@@ -36,6 +31,8 @@ from .editorial_enrichment import (
     analyze_acoustic_emphasis,
 )
 from .editorial_locale import locale_label
+from .editorial_guidance import project_brief
+from .operation_store import content_digest
 from .env import load_env_file
 from .errors import SubtitlerError
 from .game_knowledge import (
@@ -44,8 +41,8 @@ from .game_knowledge import (
     update_game_profile,
 )
 from .glossary import load_glossary
-from .media_layout import analyze_wide_recording, probe_video_geometry
-from .game_wiki import lookup_game_wiki
+from .source_inspection import SourceInspectionRequest, inspect_recording
+from .game_wiki import game_title_matches, lookup_game_wiki
 from .editorial_visual import OpenAIEditorialVisualProvider
 from .media_analysis import (
     AnalysisSegment,
@@ -54,6 +51,9 @@ from .media_analysis import (
     analyze_media,
 )
 from .subtitle_stage import build_refiner
+from .speech_editing import align_selected_phrases, clean_selected_subtitles, tighten_transcript_to_speech
+from .transcript_document import load_transcript_document
+from .transcript_workflow import run_transcript_workflow
 
 
 EDITORIAL_PROGRESS_FIRST_UPDATE_SECONDS = 20.0
@@ -61,9 +61,6 @@ EDITORIAL_PROGRESS_UPDATE_INTERVAL_SECONDS = 30.0
 EDITORIAL_VISUAL_WINDOW_SECONDS = 12 * 60.0
 MAX_EDITORIAL_VISUAL_WORKERS = 3
 MAX_EDITORIAL_VISUAL_SPLIT_DEPTH = 2
-EDITORIAL_SUBTITLE_TARGET_CHARS = 20
-EDITORIAL_SUBTITLE_MAX_CHARS = 40
-EDITORIAL_SUBTITLE_MIN_CHARS = 6
 
 
 @dataclass(frozen=True)
@@ -71,10 +68,10 @@ class HostedEditorialExecutorOptions:
     config_path: Path
     env_file: Path
     workspace: Path
-    pipeline_script: Path
-    audio_track: int = 1
+    audio_track: int = 0
     glossary_path: Path | None = None
     game_knowledge_path: Path | None = None
+    transcript_artifacts: tuple[Path, ...] = ()
 
 
 class HostedEditorialStageExecutor:
@@ -82,14 +79,79 @@ class HostedEditorialStageExecutor:
 
     def __init__(self, options: HostedEditorialExecutorOptions) -> None:
         self.options = options
+        self.adaptive_artifact_workspace = options.workspace / "adaptive-artifacts"
+        self.recommendation_artifact_workspace = options.workspace / 'recommendation-artifacts'
+        self.local_evidence_workspace = options.workspace / 'local-evidence'
         self.options.workspace.mkdir(parents=True, exist_ok=True)
         load_env_file(options.env_file)
         self.config = load_workflow_config("hosted-long-stream", options.config_path)
+        self.transcript_artifacts: dict[tuple[Path, int], Path] = {}
+        for artifact in options.transcript_artifacts:
+            document = load_transcript_document(artifact)
+            key = (Path(document.source_path).resolve(), document.audio_track)
+            if key in self.transcript_artifacts:
+                raise SubtitlerError(f"Multiple transcripts supplied for {document.source_path}")
+            document.require_reusable(key[0], key[1])
+            self.transcript_artifacts[key] = artifact
         validate_workflow_config(
             self.config,
             workflow="hosted-long-stream",
             check_paths=False,
         )
+
+    def prepare_project(self, project: dict[str, Any]) -> None:
+        for source in project["sources"]:
+            paired = source.get("media_mode") == "paired"
+            source["audio_track"] = 0 if paired else self.options.audio_track
+            source["game_audio_track"] = 0 if paired else self.config.get("editorial", {}).get("game_audio_track")
+            speech_path = Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"])
+            tracks = [(speech_path, source["audio_track"])]
+            game_track = source["game_audio_track"]
+            if game_track is not None:
+                tracks.append((Path(source["visual_path"]), game_track))
+            for path, track in tracks:
+                probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+                                        "stream=index", "-of", "json", str(path)], capture_output=True, text=True, check=False)
+                if probe.returncode or type(track) is not int or track < 0 or track >= len(json.loads(probe.stdout).get("streams", [])):
+                    raise SubtitlerError(f"Audio track {track + 1} is unavailable in {path.name}")
+
+    def operation_parameters(self, stage: str) -> dict[str, Any]:
+        """Only parameters consumed by this operation belong in its reuse contract."""
+        if stage == "source_probe":
+            return {"audio_track": self.options.audio_track, "game_audio_track": self.config.get("editorial", {}).get("game_audio_track")}
+        if stage == "transcription":
+            return {
+                **{key: self.config.get(key, {}) for key in ("backend", "audio", "vad", "alignment", "workflow", "cost")},
+                "audio_track": self.options.audio_track,
+                "glossary": [asdict(entry) for entry in load_glossary(self.options.glossary_path)],
+            }
+        if stage == "local_reconciliation":
+            return {}
+        editorial = self.config.get("editorial", {})
+        if stage == "visual_learning":
+            return {"model": self._model_config("analysis")["cleanup"],
+                    "visual_reasoning_effort": self._visual_reasoning_effort(),
+                    "detail": editorial.get("visual_detail"), "sampling_scale": editorial.get("visual_sampling_scale"),
+                    "audio_track": self.options.audio_track}
+        if stage == "global_reconciliation":
+            return {"mode": "collected_activity_overview"}
+        if stage == "action_planning":
+            return {"adaptive": {key: editorial.get(key) for key in ("cutting_mode", "game_audio_track", "adaptive_budget_usd", "collection_model", "cutting_model", "escalation_model", "trim_utterance_pauses", "gap_edge_mode", "voice_gap_min_ms", "voice_leading_handle_ms", "voice_trailing_handle_ms", "recommendations_enabled", "recommendation_model", "recommendation_budget_usd")},
+                    "selection": self._model_config("analysis")["cleanup"],
+                    "cleanup": self._model_config("subtitle_cleanup")["cleanup"],
+                    "glossary": [asdict(entry) for entry in load_glossary(self.options.glossary_path)]}
+        return {"model": self._model_config("analysis")["cleanup"]}
+
+    @contextmanager
+    def operation_scope(self, generation: str) -> Iterator[None]:
+        # A new input revision must never inherit mutable partial-window caches.
+        original = self.options
+        self.options = replace(original, workspace=original.workspace / "operations" / generation)
+        self.options.workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            yield
+        finally:
+            self.options = original
 
     def run_stage(
         self,
@@ -116,86 +178,14 @@ class HostedEditorialStageExecutor:
         """Build the hosted structured-text provider used after narration review."""
         return self._build_editorial_refiner(usage, sidecar_base)
 
+    def generate_narration(self, project: dict[str, Any]) -> dict[str, Any]:
+        from .editorial_narration import generate_narration
+        return generate_narration(project, self.options.workspace / 'narration-artifacts', self.config.get('editorial', {}))
+
     def finalize_project(self, project: dict[str, Any]) -> dict[str, Any]:
-        usage = ApiUsageLedger()
-        global_checkpoint = project.get("editorial_map", {}).get("global_reconciliation", {})
-        prior_failure = global_checkpoint.get("output") if isinstance(global_checkpoint, dict) else None
-        base_reconciliation = (
-            prior_failure.get("base_reconciliation")
-            if isinstance(prior_failure, dict)
-            and isinstance(prior_failure.get("base_reconciliation"), dict)
-            else None
-        )
-        try:
-            if base_reconciliation is None:
-                refiner = self._build_director_refiner(
-                    usage, self.options.workspace / "editorial-global"
-                )
-                if refiner is None or not hasattr(refiner, "complete_structured"):
-                    raise SubtitlerError(
-                        "Hosted story synthesis requires a structured model"
-                    )
-                print(
-                    _message(
-                        project,
-                        "Story synthesis: building factual phases, long-horizon threads, and narration briefs...",
-                        "ストーリー統合: 事実に基づく展開、長期的なつながり、ナレーション案を作成中…",
-                    ),
-                    flush=True,
-                )
-                try:
-                    with _hosted_progress_updates(
-                        project,
-                        english_label="Story synthesis",
-                        japanese_label="ストーリー統合",
-                    ):
-                        base_reconciliation = synthesize_human_information_project(
-                            provider=refiner, project=project
-                        )
-                finally:
-                    refiner.close()
-            else:
-                print(
-                    _message(
-                        project,
-                        "Story synthesis: reusing the completed factual project map.",
-                        "ストーリー統合: 完了済みの事実ベースのプロジェクトマップを再利用します。",
-                    ),
-                    flush=True,
-                )
-        except Exception as exc:
-            setattr(
-                exc,
-                "editorial_failure_output",
-                {
-                    "api_cost_usd": usage.total_cost_usd,
-                    "api_usage": [row.__dict__ for row in usage.rows],
-                    "base_reconciliation": base_reconciliation,
-                    "structured_response_diagnostics_paths": [
-                        str(
-                            self.options.workspace
-                            / "editorial-global.structured_responses.jsonl"
-                        )
-                    ],
-                },
-            )
-            raise
-        result = dict(base_reconciliation)
-        result["api_cost_usd"] = usage.total_cost_usd
-        result["api_usage"] = [row.__dict__ for row in usage.rows]
-        print(
-            _message(
-                project,
-                f"Story synthesis: complete with {len(result.get('event_phases', []))} phase(s), "
-                f"{len(result.get('global_threads', []))} thread(s), and "
-                f"{len(result.get('narration_briefs', []))} narration brief(s).",
-                f"ストーリー統合: 展開 {len(result.get('event_phases', []))} 件、"
-                f"つながり {len(result.get('global_threads', []))} 件、"
-                f"ナレーション案 {len(result.get('narration_briefs', []))} 件を作成しました。",
-            ),
-            flush=True,
-        )
-        return result
+        """Expose collected structure without a paid automatic-story/narration plan."""
+        from .editorial_recommendations import factual_overview
+        return factual_overview(project)
 
     def plan_actions(self, project: dict[str, Any]) -> dict[str, Any]:
         """Select display subtitles and deterministically expose human editing guides."""
@@ -207,7 +197,43 @@ class HostedEditorialStageExecutor:
         )
         if not isinstance(synthesis, dict):
             raise SubtitlerError("Human-information planning requires completed story synthesis")
-        actionable = build_human_information_plan(project=project, synthesis=synthesis)
+        documents = {}
+        speech_activity = {}
+        for source in project["sources"]:
+            transcription = source.get("stages", {}).get("transcription", {}).get("output")
+            transcript_path = transcription.get("transcript_path") if isinstance(transcription, dict) else None
+            if not transcript_path:
+                raise SubtitlerError("Voice-gap planning requires a durable transcript with speech detection")
+            document = load_transcript_document(Path(transcript_path))
+            documents[source["source_id"]] = document
+            speech_activity[source["source_id"]] = (
+                [(round(item.start * 1000), round(item.end * 1000)) for item in document.backend.raw_vad_speech_intervals]
+                or document.speech_activity_ms()
+            )
+        settings = {**self.config.get("editorial", {}), "gap_edge_mode": "acoustic"}
+        voice_energy = {}
+        if settings.get("gap_edge_mode", "fixed") == "acoustic":
+            from .acoustic_edges import load_voice_energy
+            for source_id, document in documents.items():
+                try:
+                    voice_energy[source_id] = load_voice_energy(Path(document.source_path), document.audio_track,
+                        getattr(self, 'local_evidence_workspace', self.options.workspace) / "voice-energy")
+                except (OSError, SubtitlerError) as exc:
+                    print(f"Voice energy unavailable for {source_id}; using protective fixed padding: {exc}", flush=True)
+        actionable = build_human_information_plan(project=project, synthesis={**synthesis, "narration_briefs": []},
+            speech_activity=speech_activity, settings=settings, voice_energy=voice_energy)
+        from .editorial_recommendations import evidence_catalog, generate_recommendations
+        try:
+            recommendations = (generate_recommendations(project, getattr(self, 'recommendation_artifact_workspace', self.options.workspace), settings, usage)
+                if settings.get("recommendations_enabled", True)
+                else {"schema_version": 1, "type": "editor_recommendations", "executable": False,
+                      "catalog": evidence_catalog(project), "assessments": []})
+        except Exception as exc:
+            setattr(exc, "editorial_failure_output", {"api_cost_usd": usage.total_cost_usd,
+                "api_usage": [asdict(row) for row in usage.rows]})
+            raise
+        actionable.update(cutting_mode="voice_gaps", editor_recommendations=recommendations,
+                          gap_edge_mode=settings.get("gap_edge_mode", "fixed"), narration_briefs=[])
         selector = self._build_editorial_refiner(
             usage, self.options.workspace / "editorial-subtitle-selection"
         )
@@ -245,22 +271,16 @@ class HostedEditorialStageExecutor:
             if not isinstance(source, dict):
                 continue
             source_id = str(source.get("source_id") or "")
-            transcription = source.get("stages", {}).get("transcription", {}).get("output")
-            aligned_tokens_path = (
-                transcription.get("aligned_tokens_path")
-                if isinstance(transcription, dict)
-                else None
-            )
+            document = documents[source_id]
             emphasized_phrases.extend(
-                _align_emphasized_phrases(
+                align_selected_phrases(
                     [
                         item
                         for item in selected
                         if str(item.get("source_id")) == source_id
                     ],
-                    Path(aligned_tokens_path)
-                    if isinstance(aligned_tokens_path, str)
-                    else None,
+                    document.aligned_tokens(),
+                    document.speech_activity_ms(),
                 )
             )
         if emphasized_phrases:
@@ -280,7 +300,7 @@ class HostedEditorialStageExecutor:
                     "Hosted display-subtitle cleanup requires a text cleanup model"
                 )
             try:
-                emphasized_phrases = _clean_selected_editorial_subtitles(
+                emphasized_phrases = clean_selected_subtitles(
                     emphasized_phrases, cleaner
                 )
             finally:
@@ -300,18 +320,22 @@ class HostedEditorialStageExecutor:
             "cut_candidates": [],
             "confirmed_cuts": actionable["confirmed_cuts"],
             "removed_ms": actionable["removed_ms"],
+            "estimated_final_ms": actionable["estimated_final_ms"],
             "narration_replaced_ms": 0,
             "prompt_version": actionable["prompt_version"],
             "api_cost_usd": usage.total_cost_usd,
             "api_usage": [row.__dict__ for row in usage.rows],
         }
+        result.update({key: actionable[key] for key in ("cutting_mode", "adaptive_report_path",
+                       "adaptive_artifact_path", "baseline_confirmed_cuts", "narration_briefs",
+                       "editor_recommendations", "gap_edge_mode") if key in actionable})
         print(
             _message(
                 project,
-                f"Human editing guides: complete with {len(result['confirmed_cuts'])} voice-gap marker(s), "
+                f"Human editing guides: complete with {len(result['confirmed_cuts'])} cut marker(s), "
                 f"{len(result['final_actions'])} narration brief(s), and "
                 f"{len(emphasized_phrases)} display subtitle(s).",
-                f"人間向け編集ガイド: 無音マーカー {len(result['confirmed_cuts'])} 件、"
+                f"人間向け編集ガイド: カットマーカー {len(result['confirmed_cuts'])} 件、"
                 f"ナレーション案 {len(result['final_actions'])} 件、"
                 f"表示字幕 {len(emphasized_phrases)} 件で完了しました。",
             ),
@@ -359,21 +383,23 @@ class HostedEditorialStageExecutor:
             output_locale=str(project.get("output_locale", "en")),
         )
 
-    def _editorial_model_config(self) -> dict[str, Any]:
-        """Keep editorial intelligence independent from subtitle cleanup tuning."""
+    def _model_config(self, role: str) -> dict[str, Any]:
+        """Configure the same hosted process for analysis, synthesis, or cleanup."""
+        model_default, reasoning_key, reasoning_default = {
+            "analysis": ("gpt-5.6-luna", "reasoning_effort", "medium"),
+            "director": ("gpt-5.6-terra", "director_reasoning_effort", "low"),
+            "subtitle_cleanup": ("gpt-5.6-luna", "subtitle_cleanup_reasoning_effort", "low"),
+        }[role]
         config = json.loads(json.dumps(getattr(self, "config", {})))
-        editorial = config.get("editorial")
-        if not isinstance(editorial, dict):
-            editorial = {}
-        cleanup = config.setdefault("cleanup", {})
-        cleanup["backend"] = "openai"
-        cleanup["api_model"] = str(editorial.get("analysis_model") or "gpt-5.6-luna")
-        cleanup["reasoning_effort"] = str(editorial.get("reasoning_effort") or "medium")
-        cleanup["thinking_level"] = None
+        editorial = config.get("editorial") or {}
+        config.setdefault("cleanup", {}).update(
+            backend="openai", api_model=str(editorial.get(f"{role}_model") or model_default),
+            reasoning_effort=str(editorial.get(reasoning_key) or reasoning_default), thinking_level=None,
+        )
         return config
 
     def _editorial_model(self) -> str:
-        cleanup = self._editorial_model_config()["cleanup"]
+        cleanup = self._model_config("analysis")["cleanup"]
         return str(cleanup["api_model"])
 
     def _visual_reasoning_effort(self) -> str:
@@ -383,61 +409,28 @@ class HostedEditorialStageExecutor:
         value = str(editorial.get("visual_reasoning_effort") or "low")
         return value if value in {"none", "low", "medium", "high", "xhigh", "max"} else "low"
 
-    def _director_model_config(self) -> dict[str, Any]:
-        """Use the next hosted model tier for the bounded final director pass."""
-        config = json.loads(json.dumps(getattr(self, "config", {})))
-        editorial = config.get("editorial")
-        if not isinstance(editorial, dict):
-            editorial = {}
-        cleanup = config.setdefault("cleanup", {})
-        cleanup["backend"] = "openai"
-        cleanup["api_model"] = str(
-            editorial.get("director_model") or "gpt-5.6-terra"
-        )
-        cleanup["reasoning_effort"] = str(
-            editorial.get("director_reasoning_effort") or "low"
-        )
-        cleanup["thinking_level"] = None
-        return config
-
 
 
     def _director_model(self) -> str:
-        return str(self._director_model_config()["cleanup"]["api_model"])
+        return str(self._model_config("director")["cleanup"]["api_model"])
 
-    def _subtitle_cleanup_model_config(self) -> dict[str, Any]:
-        """Use the cleanup-specialized model without leaking it into editorial reasoning."""
-        config = json.loads(json.dumps(getattr(self, "config", {})))
-        editorial = config.get("editorial")
-        if not isinstance(editorial, dict):
-            editorial = {}
-        cleanup = config.setdefault("cleanup", {})
-        cleanup["backend"] = "openai"
-        cleanup["api_model"] = str(
-            editorial.get("subtitle_cleanup_model") or "gpt-5.6-luna"
-        )
-        cleanup["reasoning_effort"] = str(
-            editorial.get("subtitle_cleanup_reasoning_effort") or "low"
-        )
-        cleanup["thinking_level"] = None
-        return config
 
     def _build_editorial_refiner(
         self, usage: ApiUsageLedger, sidecar_base: Path
     ) -> Any:
-        return build_refiner(self._editorial_model_config(), [], usage, sidecar_base)
+        return build_refiner(self._model_config("analysis"), [], usage, sidecar_base)
 
     def _build_director_refiner(
         self, usage: ApiUsageLedger, sidecar_base: Path
     ) -> Any:
-        return build_refiner(self._director_model_config(), [], usage, sidecar_base)
+        return build_refiner(self._model_config("director"), [], usage, sidecar_base)
 
 
     def _build_game_learning_refiner(
         self, usage: ApiUsageLedger, sidecar_base: Path
     ) -> Any:
         """Reserve the output budget for the compact profile rather than deliberation."""
-        config = self._editorial_model_config()
+        config = self._model_config("analysis")
         config["cleanup"]["reasoning_effort"] = "low"
         return build_refiner(config, [], usage, sidecar_base)
 
@@ -445,68 +438,30 @@ class HostedEditorialStageExecutor:
         self, usage: ApiUsageLedger, sidecar_base: Path
     ) -> Any:
         return build_refiner(
-            self._subtitle_cleanup_model_config(),
+            self._model_config("subtitle_cleanup"),
             load_glossary(self.options.glossary_path),
             usage,
             sidecar_base,
         )
 
     def _probe(self, source: dict[str, Any]) -> dict[str, Any]:
-        audio_path = Path(source["audio_path"])
-        visual_path = Path(source["visual_path"])
-        audio_duration = round(get_media_duration(audio_path) * 1000)
-        visual_duration = round(get_media_duration(visual_path) * 1000)
-        if audio_duration <= 0 or visual_duration <= 0:
-            raise SubtitlerError(f"Could not determine paired media duration for {source['source_id']}")
-        recorded_duration = int(source["visual_duration_ms"])
-        if abs(recorded_duration - visual_duration) > max(2000, recorded_duration * 0.01):
-            raise SubtitlerError(
-                f"Source duration changed after project creation: {source['original_name']}"
-            )
-        frame_rate = _probe_frame_rate(visual_path)
-        visual_geometry = None
-        audio_geometry = None
-        wide_layout = None
-        try:
-            visual_geometry = probe_video_geometry(visual_path)
-            if source["media_mode"] == "single":
-                wide_layout = analyze_wide_recording(visual_path, visual_geometry)
-        except SubtitlerError:
-            pass
-        if source["media_mode"] == "paired":
-            try:
-                audio_geometry = probe_video_geometry(audio_path)
-            except SubtitlerError:
-                pass
-        if source["media_mode"] == "paired":
-            if frame_rate <= 0:
-                raise SubtitlerError(f"Could not determine gameplay frame rate for {source['visual_original_name']}")
-            if abs(audio_duration - visual_duration) > (10.0 / frame_rate) * 1000.0 + 1.0:
-                raise SubtitlerError(
-                    "Facecam and gameplay lengths differ by more than 10 gameplay frames: "
-                    f"{source['audio_original_name']} / {source['visual_original_name']}"
-                )
+        result = inspect_recording(SourceInspectionRequest(
+            audio_path=Path(source["audio_path"]), visual_path=Path(source["visual_path"]),
+            paired=source["media_mode"] == "paired", expected_visual_duration_ms=int(source["visual_duration_ms"]),
+        ))
+        visual, audio = result.visual_geometry, result.audio_geometry
         return {
-            "duration_ms": visual_duration,
-            "audio_duration_ms": audio_duration,
-            "visual_duration_ms": visual_duration,
-            "frame_rate": frame_rate or source.get("frame_rate"),
+            "duration_ms": result.visual_duration_ms,
+            "audio_duration_ms": result.audio_duration_ms,
+            "visual_duration_ms": result.visual_duration_ms,
+            "frame_rate": result.frame_rate or source.get("frame_rate"),
             "media_mode": source["media_mode"],
-            "audio_path": str(audio_path),
-            "visual_path": str(visual_path),
-            "visual_width": (
-                visual_geometry.width if visual_geometry is not None else source.get("width")
-            ),
-            "visual_height": (
-                visual_geometry.height if visual_geometry is not None else source.get("height")
-            ),
-            "audio_width": (
-                audio_geometry.width if audio_geometry is not None else source.get("audio_width")
-            ),
-            "audio_height": (
-                audio_geometry.height if audio_geometry is not None else source.get("audio_height")
-            ),
-            "wide_layout": wide_layout.to_dict() if wide_layout is not None else None,
+            "audio_path": source["audio_path"], "visual_path": source["visual_path"],
+            "visual_width": visual.width if visual else source.get("width"),
+            "visual_height": visual.height if visual else source.get("height"),
+            "audio_width": audio.width if audio else source.get("audio_width"),
+            "audio_height": audio.height if audio else source.get("audio_height"),
+            "wide_layout": result.wide_layout.to_dict() if result.wide_layout else None,
         }
 
     def _transcribe(
@@ -514,84 +469,27 @@ class HostedEditorialStageExecutor:
     ) -> dict[str, Any]:
         source_workspace = self.options.workspace / source["source_id"]
         source_workspace.mkdir(parents=True, exist_ok=True)
-        output = source_workspace / "transcript.exo"
-        effective_config = self._subtitle_cleanup_model_config()
-        effective_config_path = source_workspace / "transcription-config.json"
-        effective_config_path.write_text(
-            json.dumps(effective_config, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        result = run_transcript_workflow(
+            source_path=Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"]),
+            config=self._model_config("subtitle_cleanup"),
+            workspace=source_workspace,
+            audio_track=source.get("audio_track", self.options.audio_track),
+            glossary=load_glossary(self.options.glossary_path),
+            reuse_document=self.transcript_artifacts.get((Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"]).resolve(), source.get("audio_track", self.options.audio_track))),
         )
-        args = [
-            sys.executable,
-            str(self.options.pipeline_script),
-            source["audio_path"],
-            "--workflow",
-            "hosted-long-stream",
-            "--config",
-            str(effective_config_path),
-            "--env-file",
-            str(self.options.env_file),
-            "--output",
-            str(output),
-            "--sidecar-dir",
-            str(source_workspace),
-            "--audio-track",
-            str(self.options.audio_track),
-            "--profile",
-        ]
-        if self.options.glossary_path is not None:
-            args.extend(["--glossary", str(self.options.glossary_path)])
-        else:
-            args.append("--no-glossary")
-        process = subprocess.Popen(
-            args,
-            cwd=self.options.pipeline_script.parent,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            print(line, end="", flush=True)
-        code = process.wait()
-        if code != 0:
-            raise SubtitlerError(
-                f"Transcription pipeline failed for {source['original_name']} with exit code {code}"
-            )
-        timing = source_workspace / "transcript.subtitle_timing.csv"
-        text = source_workspace / "transcript.final_text.txt"
-        if not timing.is_file() or not text.is_file():
-            raise SubtitlerError(
-                f"Transcription finished without resumable timing artifacts for {source['original_name']}"
-            )
-        run_metadata_path = source_workspace / "transcript.run.json"
-        failed_groups = _failed_transcription_groups(run_metadata_path)
-        if failed_groups:
-            ranges = _failed_group_ranges(source_workspace / "transcript.vad_groups.csv", failed_groups)
-            detail = ", ".join(ranges[:5])
-            suffix = "…" if len(ranges) > 5 else ""
-            raise SubtitlerError(
-                f"Transcription left {len(failed_groups)} audio group(s) unresolved for "
-                f"{source['original_name']}: {detail}{suffix}. Resume from transcription; "
-                "semantic analysis was not allowed to use an incomplete transcript."
-            )
-        transcript = _load_transcript_evidence(timing, text)
-        aligned_tokens = source_workspace / "transcript.aligned_tokens.csv"
-        api_usage_path = source_workspace / "transcript.api_usage.csv"
+        transcript = load_transcript_evidence(result.document_path)
         return {
-            "exo_path": str(output),
-            "timing_path": str(timing),
-            "text_path": str(text),
-            "aligned_tokens_path": str(aligned_tokens) if aligned_tokens.is_file() else None,
+            "document_path": str(result.document_path),
+            "document_revision": result.document.revision_id,
+            "transcript_path": str(result.transcript_path),
             "subtitle_mode": "full",
             "speech_segments": len(transcript),
             "first_speech_ms": transcript[0].start_ms if transcript else None,
             "last_speech_ms": transcript[-1].end_ms if transcript else None,
-            "api_cost_usd": _sum_api_usage_cost(api_usage_path),
-            "api_usage_path": str(api_usage_path),
+            "api_cost_usd": result.api_cost_usd,
+            "api_usage_path": str(result.api_usage_path),
         }
+
 
     def _analyze_visuals(
         self,
@@ -616,7 +514,9 @@ class HostedEditorialStageExecutor:
             if isinstance(existing_profile.get("reference_context"), dict)
             else {}
         )
-        if reference_context.get("status") != "complete":
+        if reference_context.get("status") != "complete" or not game_title_matches(
+            str(project["title_or_game"]), str(reference_context.get("page_title") or "")
+        ):
             print(
                 _message(
                     project,
@@ -650,7 +550,7 @@ class HostedEditorialStageExecutor:
                 sampling_scale=float(editorial_config.get("visual_sampling_scale") or 1.5),
                 model=model,
                 reasoning_effort=self._visual_reasoning_effort(),
-                output_locale=str(project.get("output_locale", "en")),
+                output_locale=str(project.get("processing_locale", "en")),
                 editorial_context=provider_context,
                 progress_path=(
                     self.options.workspace / source["source_id"] / "visual.window_progress.json"
@@ -671,9 +571,9 @@ class HostedEditorialStageExecutor:
             )
             acoustic_future = pool.submit(
                 analyze_acoustic_emphasis,
-                Path(source["audio_path"]),
+                Path(source["visual_path"] if source.get("speech_source") == "gameplay" else source["audio_path"]),
                 duration_ms=int(probe["duration_ms"]),
-                audio_track=self.options.audio_track,
+                audio_track=source.get("audio_track", self.options.audio_track),
             )
             result = visual_future.result()
             acoustic_events = acoustic_future.result()
@@ -696,9 +596,8 @@ class HostedEditorialStageExecutor:
         transcription = prior_outputs.get("transcription")
         transcript_excerpt: list[dict[str, Any]] = []
         if isinstance(transcription, dict):
-            evidence = _load_transcript_evidence(
-                Path(transcription["timing_path"]),
-                Path(transcription["text_path"]),
+            evidence = load_transcript_evidence(
+                Path(transcription["document_path"]),
             )
             transcript_excerpt = [asdict(item) for item in _representative_transcript(evidence)]
         usage = ApiUsageLedger()
@@ -721,7 +620,7 @@ class HostedEditorialStageExecutor:
                     transcript_excerpt=transcript_excerpt,
                     temporal_bursts=bursts.get("bursts", []),
                     reference_context=reference_context,
-                    output_locale=str(project.get("output_locale", "en")),
+                    output_locale=str(project.get("processing_locale", "en")),
                 )
             except Exception as exc:
                 print(
@@ -771,17 +670,12 @@ class HostedEditorialStageExecutor:
         probe = prior_outputs.get("source_probe")
         if not isinstance(transcription, dict) or not isinstance(visual, dict) or not isinstance(probe, dict):
             raise SubtitlerError("Semantic analysis requires completed transcript, vision, and probe stages")
-        transcript = _load_transcript_evidence(
-            Path(transcription["timing_path"]),
-            Path(transcription["text_path"]),
+        transcript = load_transcript_evidence(
+            Path(transcription["document_path"]),
         )
-        transcript = _tighten_transcript_to_speech_activity(
+        transcript = tighten_transcript_to_speech(
             transcript,
-            _load_vad_speech_activity(
-                Path(transcription["timing_path"]).with_name(
-                    "transcript.vad_selection.csv"
-                )
-            ),
+            load_transcript_document(Path(transcription["transcript_path"])).speech_activity_ms(),
         )
         visuals = [
             VisualEvidence(
@@ -810,6 +704,9 @@ class HostedEditorialStageExecutor:
             semantic_progress_path,
             source_id=str(source["source_id"]),
             source_duration_ms=int(probe["duration_ms"]),
+            evidence_identity=content_digest({"transcript": [asdict(item) for item in transcript],
+                "visual": visual, "brief": project_brief(project), "cumulative_context": project["cumulative_context"],
+                "parameters": self.operation_parameters("semantic_spans")}),
         )
         semantic_progress_lock = threading.Lock()
 
@@ -822,7 +719,7 @@ class HostedEditorialStageExecutor:
                 ]
                 completed.append(window)
                 completed.sort(key=lambda item: int(item.get("base_window_index", -1)))
-                _write_json_atomic(semantic_progress_path, semantic_progress)
+                write_json_artifact(semantic_progress_path, semantic_progress)
 
         try:
             result = analyze_editorial_source(
@@ -851,7 +748,7 @@ class HostedEditorialStageExecutor:
                 ),
                 completed_windows=semantic_progress["completed_windows"],
                 window_completed=record_completed_window,
-                output_locale=str(project.get("output_locale", "en")),
+                output_locale=str(project.get("processing_locale", "en")),
             )
             print(
                 _message(
@@ -939,6 +836,8 @@ def _analyze_editorial_visual_windows(
         "model": model,
         "reasoning_effort": reasoning_effort,
         "window_seconds": EDITORIAL_VISUAL_WINDOW_SECONDS,
+        "processing_locale": output_locale,
+        "editorial_context": editorial_context,
     }
     cached = _load_visual_window_progress(progress_path, signature)
     progress_lock = threading.Lock()
@@ -955,7 +854,7 @@ def _analyze_editorial_visual_windows(
             return
         with progress_lock:
             cached[_visual_window_key(start, end)] = asdict(result)
-            _write_json_atomic(
+            write_json_artifact(
                 progress_path,
                 {**signature, "completed_windows": cached},
             )
@@ -1177,446 +1076,6 @@ def _message(project: dict[str, Any], english: str, japanese: str) -> str:
     return locale_label(project.get("output_locale"), english, japanese)
 
 
-def _load_transcript_evidence(timing_path: Path, text_path: Path) -> list[TranscriptEvidence]:
-    try:
-        numbered_text = text_path.read_text(encoding="utf-8").splitlines()
-        texts = []
-        for line in numbered_text:
-            _, separator, text = line.partition(". ")
-            texts.append(text if separator else line)
-        with timing_path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-    except (OSError, UnicodeError, csv.Error) as exc:
-        raise SubtitlerError(f"Could not load transcript evidence: {exc}") from exc
-    if len(rows) != len(texts):
-        raise SubtitlerError(
-            f"Transcript timing/text count mismatch: {len(rows)} timing rows, {len(texts)} text rows"
-        )
-    result = []
-    for row, text in zip(rows, texts):
-        try:
-            start_ms = round(float(row["start"]) * 1000)
-            end_ms = round(float(row["end"]) * 1000)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SubtitlerError("Transcript timing artifact contains an invalid row") from exc
-        if text.strip() and end_ms > start_ms:
-            result.append(TranscriptEvidence(start_ms, end_ms, text.strip()))
-    return result
-
-
-def _load_vad_speech_activity(path: Path) -> list[tuple[int, int]]:
-    """Load fine VAD regions used by transcription as acoustic speech evidence."""
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-    except (FileNotFoundError, OSError, UnicodeError, csv.Error):
-        return []
-    result: list[tuple[int, int]] = []
-    for row in rows:
-        if str(row.get("selected_for_transcription") or "").strip().casefold() not in {
-            "1",
-            "true",
-            "yes",
-        }:
-            continue
-        try:
-            start_ms = round(float(row["start"]) * 1000)
-            end_ms = round(float(row["end"]) * 1000)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if end_ms > start_ms:
-            result.append((start_ms, end_ms))
-    return sorted(result)
-
-
-def _tighten_transcript_to_speech_activity(
-    transcript: list[TranscriptEvidence],
-    speech_activity: list[tuple[int, int]],
-) -> list[TranscriptEvidence]:
-    """Remove acoustic silence stretched into the outside of aligned text ranges."""
-    if not speech_activity:
-        return transcript
-    tightened: list[TranscriptEvidence] = []
-    for item in transcript:
-        start_ms, end_ms = _tighten_range_to_speech_activity(
-            item.start_ms,
-            item.end_ms,
-            speech_activity,
-        )
-        tightened.append(TranscriptEvidence(start_ms, end_ms, item.text))
-
-    # Older cached transcription artifacts can contain a punctuation-only row
-    # forced-aligned after several seconds of silence. Preserve its text while
-    # attaching it to an adjacent spoken row instead of extending the range.
-    result: list[TranscriptEvidence] = []
-    pending_leading = ""
-    for index, item in enumerate(tightened):
-        acoustically_supported = any(
-            speech_start < item.end_ms and speech_end > item.start_ms
-            for speech_start, speech_end in speech_activity
-        )
-        if not _is_non_spoken_text(item.text) or acoustically_supported:
-            text = f"{pending_leading}{item.text}" if pending_leading else item.text
-            pending_leading = ""
-            result.append(TranscriptEvidence(item.start_ms, item.end_ms, text))
-            continue
-        if result and not _is_non_spoken_text(result[-1].text):
-            previous = result[-1]
-            result[-1] = TranscriptEvidence(
-                previous.start_ms,
-                previous.end_ms,
-                f"{previous.text}{item.text}",
-            )
-            continue
-        if any(not _is_non_spoken_text(candidate.text) for candidate in tightened[index + 1 :]):
-            pending_leading = f"{pending_leading}{item.text}"
-        else:
-            result.append(item)
-    return result
-
-
-def _tighten_range_to_speech_activity(
-    start_ms: int,
-    end_ms: int,
-    speech_activity: list[tuple[int, int]],
-) -> tuple[int, int]:
-    overlapping = [
-        (speech_start, speech_end)
-        for speech_start, speech_end in speech_activity
-        if speech_start < end_ms and speech_end > start_ms
-    ]
-    if not overlapping:
-        return start_ms, end_ms
-    tightened_start = max(start_ms, overlapping[0][0])
-    tightened_end = min(end_ms, overlapping[-1][1])
-    if tightened_end <= tightened_start:
-        return start_ms, end_ms
-    return tightened_start, tightened_end
-
-
-def _align_emphasized_phrases(
-    phrases: Any,
-    aligned_tokens_path: Path | None,
-) -> list[dict[str, Any]]:
-    """Verify verbatim phrase evidence and replace broad model ranges with token timing."""
-    if not isinstance(phrases, list) or aligned_tokens_path is None or not aligned_tokens_path.is_file():
-        return []
-    try:
-        with aligned_tokens_path.open("r", encoding="utf-8", newline="") as handle:
-            rows = [row for row in csv.DictReader(handle) if str(row.get("text") or "")]
-    except (OSError, UnicodeError, csv.Error):
-        return []
-    speech_activity = _load_vad_speech_activity(
-        aligned_tokens_path.with_name("transcript.vad_selection.csv")
-    )
-    stream_chars: list[str] = []
-    char_tokens: list[int] = []
-    for token_index, row in enumerate(rows):
-        for character in str(row.get("text") or "").casefold():
-            if character.isspace():
-                continue
-            stream_chars.append(character)
-            char_tokens.append(token_index)
-    stream = "".join(stream_chars)
-    result: list[dict[str, Any]] = []
-    for item in phrases:
-        if not isinstance(item, dict):
-            continue
-        source_text = str(item.get("source_text") or "")
-        needle, source_positions = _normalized_character_positions(source_text)
-        if not needle:
-            continue
-        candidates: list[int] = []
-        start = stream.find(needle)
-        while start >= 0:
-            candidates.append(start)
-            start = stream.find(needle, start + 1)
-        if not candidates:
-            continue
-        proposed_mid = (int(item.get("start_ms", 0)) + int(item.get("end_ms", 0))) // 2
-        def distance(position: int) -> float:
-            token = rows[char_tokens[position]]
-            try:
-                return abs(float(token["start"]) * 1000 - proposed_mid)
-            except (KeyError, TypeError, ValueError):
-                return float("inf")
-        match = min(candidates, key=distance)
-        aligned_segments: list[dict[str, Any]] = []
-        for character_start, character_end in _editorial_subtitle_character_ranges(
-            needle,
-            match=match,
-            char_tokens=char_tokens,
-        ):
-            first_index = char_tokens[match + character_start]
-            last_index = char_tokens[match + character_end - 1]
-            timing = _bounded_emphasis_timing(rows, first_index, last_index)
-            if timing is None:
-                continue
-            start_ms, end_ms = _tighten_range_to_speech_activity(
-                timing[0],
-                timing[1],
-                speech_activity,
-            )
-            if end_ms <= start_ms:
-                continue
-            chunk_text = _source_text_character_slice(
-                source_text,
-                source_positions,
-                character_start,
-                character_end,
-            )
-            if not chunk_text:
-                continue
-            normalized = dict(item)
-            normalized.update(
-                {
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "timing_verified": True,
-                    "source_text": chunk_text,
-                    "text": chunk_text,
-                    "parent_source_text": source_text,
-                }
-            )
-            aligned_segments.append(normalized)
-        segment_count = len(aligned_segments)
-        for segment_index, normalized in enumerate(aligned_segments, 1):
-            normalized["display_segment_index"] = segment_index
-            normalized["display_segment_count"] = segment_count
-            if normalized.get("id") and segment_count > 1:
-                normalized["id"] = f"{normalized['id']}-{segment_index}"
-            result.append(normalized)
-    return _deduplicate_emphasized_phrases(result)
-
-
-def _normalized_character_positions(value: str) -> tuple[str, list[int]]:
-    characters: list[str] = []
-    source_positions: list[int] = []
-    for source_index, character in enumerate(value):
-        for normalized in character.casefold():
-            if normalized.isspace():
-                continue
-            characters.append(normalized)
-            source_positions.append(source_index)
-    return "".join(characters), source_positions
-
-
-def _editorial_subtitle_character_ranges(
-    value: str,
-    *,
-    match: int,
-    char_tokens: list[int],
-) -> list[tuple[int, int]]:
-    """Split one selected thought into short, token-timed, single-line beats."""
-    length = len(value)
-    if length <= EDITORIAL_SUBTITLE_TARGET_CHARS:
-        return [(0, length)] if length else []
-    strong_breaks = set(".!?。！？")
-    soft_breaks = set(",、，:：;；…—-")
-    token_boundaries = {
-        index
-        for index in range(1, length)
-        if char_tokens[match + index - 1] != char_tokens[match + index]
-    }
-    ranges: list[tuple[int, int]] = []
-    cursor = 0
-    while length - cursor > EDITORIAL_SUBTITLE_TARGET_CHARS:
-        target = min(length, cursor + EDITORIAL_SUBTITLE_TARGET_CHARS)
-        maximum = min(length, cursor + EDITORIAL_SUBTITLE_MAX_CHARS)
-        minimum = min(length, cursor + EDITORIAL_SUBTITLE_MIN_CHARS)
-        semantic_before = [
-            index
-            for index in range(minimum, target + 1)
-            if value[index - 1] in strong_breaks | soft_breaks
-        ]
-        boundaries_before = [
-            index
-            for index in token_boundaries
-            if minimum <= index <= target
-        ]
-        semantic_after = [
-            index
-            for index in range(target + 1, maximum + 1)
-            if value[index - 1] in strong_breaks | soft_breaks
-        ]
-        boundaries_after = [
-            index
-            for index in token_boundaries
-            if target < index <= maximum
-        ]
-        if semantic_before:
-            end = semantic_before[-1]
-        elif boundaries_before:
-            end = boundaries_before[-1]
-        elif semantic_after:
-            end = semantic_after[0]
-        elif boundaries_after:
-            end = boundaries_after[0]
-        else:
-            end = target
-        if length - end < EDITORIAL_SUBTITLE_MIN_CHARS and length - cursor <= EDITORIAL_SUBTITLE_MAX_CHARS:
-            end = length
-        if end <= cursor:
-            end = min(length, cursor + EDITORIAL_SUBTITLE_TARGET_CHARS)
-        ranges.append((cursor, end))
-        cursor = end
-    if cursor < length:
-        ranges.append((cursor, length))
-    return ranges
-
-
-def _source_text_character_slice(
-    value: str,
-    source_positions: list[int],
-    start: int,
-    end: int,
-) -> str:
-    if not source_positions or start >= end:
-        return ""
-    raw_start = source_positions[start]
-    raw_end = source_positions[end] if end < len(source_positions) else len(value)
-    return " ".join(value[raw_start:raw_end].split())
-
-
-def _clean_selected_editorial_subtitles(
-    phrases: list[dict[str, Any]],
-    refiner: Any,
-    *,
-    batch_size: int = 64,
-) -> list[dict[str, Any]]:
-    """Clean only the verified phrases selected for the final editorial track."""
-    cleaned_phrases: list[dict[str, Any]] = []
-    for start in range(0, len(phrases), max(1, batch_size)):
-        batch = phrases[start : start + max(1, batch_size)]
-        originals = [str(item.get("text") or "").strip() for item in batch]
-        refined = refiner.refine(originals)
-        if not isinstance(refined, list) or len(refined) != len(originals):
-            refined = originals
-        for item, original, cleaned in zip(batch, originals, refined):
-            normalized = dict(item)
-            cleaned_text = " ".join(str(cleaned).split()) or original
-            if len("".join(cleaned_text.split())) > EDITORIAL_SUBTITLE_MAX_CHARS:
-                cleaned_text = original
-            normalized["text"] = cleaned_text
-            normalized["cleanup_applied"] = True
-            cleaned_phrases.append(normalized)
-    return cleaned_phrases
-
-
-def _bounded_emphasis_timing(
-    rows: list[dict[str, str]], first_index: int, last_index: int
-) -> tuple[int, int] | None:
-    """Keep trustworthy token timing while rejecting silence-stretched phrases."""
-    selected = rows[first_index:last_index + 1]
-    parsed: list[tuple[float, float, str]] = []
-    try:
-        for row in selected:
-            start = float(row["start"])
-            end = float(row["end"])
-            text = str(row.get("text") or "")
-            if end < start:
-                return None
-            parsed.append((start, end, text))
-    except (KeyError, TypeError, ValueError):
-        return None
-    spoken = [
-        index
-        for index, (_, _, text) in enumerate(parsed)
-        if any(not _is_punctuation(character) for character in text if not character.isspace())
-    ]
-    if not spoken:
-        return None
-    first_spoken = spoken[0]
-    last_spoken = spoken[-1]
-    for index in spoken[1:-1]:
-        start, end, text = parsed[index]
-        if end - start > _emphasis_token_limit(text, internal=True):
-            return None
-    for left, right in zip(spoken, spoken[1:]):
-        if parsed[right][0] - parsed[left][1] > 1.25:
-            return None
-    first_start, first_end, first_text = parsed[first_spoken]
-    last_start, last_end, last_text = parsed[last_spoken]
-    start = max(first_start, first_end - _emphasis_token_limit(first_text, internal=False))
-    end = min(last_end, last_start + _emphasis_token_limit(last_text, internal=False))
-    if end <= start:
-        return None
-    return round(start * 1000), round(end * 1000)
-
-
-def _emphasis_token_limit(text: str, *, internal: bool) -> float:
-    visible = sum(not character.isspace() and not _is_punctuation(character) for character in text)
-    per_character = 0.45 if internal else 0.22
-    floor = 1.5 if internal else 0.75
-    return max(floor, visible * per_character)
-
-
-def _is_punctuation(character: str) -> bool:
-    return unicodedata.category(character).startswith(("P", "S"))
-
-
-def _is_non_spoken_text(text: str) -> bool:
-    visible = [character for character in text if not character.isspace()]
-    return bool(visible) and all(_is_punctuation(character) for character in visible)
-
-
-def _deduplicate_emphasized_phrases(
-    phrases: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    selected: list[dict[str, Any]] = []
-    for item in sorted(
-        phrases,
-        key=lambda value: (
-            int(value.get("start_ms", 0)),
-            int(value.get("end_ms", 0)),
-            -len(str(value.get("text") or "")),
-        ),
-    ):
-        key = _emphasis_text_key(item.get("text"))
-        if not key:
-            continue
-        duplicate_index = next(
-            (
-                index
-                for index, existing in enumerate(selected)
-                if abs(int(existing.get("start_ms", 0)) - int(item.get("start_ms", 0))) <= 1500
-                and _emphasis_texts_overlap(key, _emphasis_text_key(existing.get("text")))
-            ),
-            None,
-        )
-        if duplicate_index is None:
-            selected.append(item)
-            continue
-        existing = selected[duplicate_index]
-        if _emphasis_preference(item) > _emphasis_preference(existing):
-            selected[duplicate_index] = item
-    return sorted(selected, key=lambda value: (int(value["start_ms"]), int(value["end_ms"])))
-
-
-def _emphasis_text_key(value: Any) -> str:
-    return "".join(
-        character.casefold()
-        for character in str(value or "")
-        if not character.isspace() and not _is_punctuation(character)
-    )
-
-
-def _emphasis_texts_overlap(left: str, right: str) -> bool:
-    if not left or not right:
-        return False
-    shorter, longer = sorted((left, right), key=len)
-    return shorter == longer or (len(shorter) >= 6 and shorter in longer)
-
-
-def _emphasis_preference(item: dict[str, Any]) -> tuple[int, float, int]:
-    text = str(item.get("text") or "")
-    return (
-        len(_emphasis_text_key(text)),
-        float(item.get("confidence") or 0.0),
-        len(text),
-    )
-
-
 def _representative_transcript(
     transcript: list[TranscriptEvidence], *, limit: int = 120
 ) -> list[TranscriptEvidence]:
@@ -1630,88 +1089,15 @@ def _representative_transcript(
     return [transcript[index] for index in sorted(indices)]
 
 
-def _failed_transcription_groups(run_metadata_path: Path) -> list[int]:
-    try:
-        payload = json.loads(run_metadata_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SubtitlerError(f"Could not inspect transcription completion metadata: {exc}") from exc
-    diagnostics = payload.get("backend", {}).get("diagnostics", []) if isinstance(payload, dict) else []
-    result = []
-    for item in diagnostics if isinstance(diagnostics, list) else []:
-        if not isinstance(item, dict) or item.get("code") != "transcription_failed":
-            continue
-        index = item.get("region_index")
-        if isinstance(index, int) and not isinstance(index, bool):
-            result.append(index)
-    return sorted(set(result))
-
-
-def _failed_group_ranges(path: Path, failed_groups: list[int]) -> list[str]:
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.DictReader(handle))
-    except (OSError, UnicodeError, csv.Error):
-        return [f"group {index}" for index in failed_groups]
-    by_index = {str(row.get("chunk_index")): row for row in rows}
-    result = []
-    for index in failed_groups:
-        row = by_index.get(str(index))
-        if row is None:
-            result.append(f"group {index}")
-            continue
-        try:
-            start = float(row["start"])
-            end = float(row["end"])
-            result.append(f"{start / 60:.1f}-{end / 60:.1f} min")
-        except (KeyError, TypeError, ValueError):
-            result.append(f"group {index}")
-    return result
-
-
-def _probe_frame_rate(path: Path) -> float:
-    try:
-        completed = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=avg_frame_rate,r_frame_rate", "-of", "json", str(path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        payload = json.loads(completed.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return 0.0
-    streams = payload.get("streams") if isinstance(payload, dict) else None
-    if not isinstance(streams, list) or not streams or not isinstance(streams[0], dict):
-        return 0.0
-    for field in ("avg_frame_rate", "r_frame_rate"):
-        value = _parse_frame_rate(streams[0].get(field))
-        if value > 0:
-            return value
-    return 0.0
-
-
-def _parse_frame_rate(value: Any) -> float:
-    if not isinstance(value, str):
-        return 0.0
-    numerator, separator, denominator = value.partition("/")
-    try:
-        result = float(numerator) / float(denominator) if separator else float(value)
-    except (ValueError, ZeroDivisionError):
-        return 0.0
-    return result if result > 0 else 0.0
-
-
 def _load_semantic_progress(
     path: Path,
     *,
     source_id: str,
     source_duration_ms: int,
+    evidence_identity: str = "",
 ) -> dict[str, Any]:
     expected = {
+        "evidence_identity": evidence_identity,
         "transcription_stage_version": EDITORIAL_STAGE_VERSIONS["transcription"],
         "semantic_stage_version": EDITORIAL_STAGE_VERSIONS["semantic_spans"],
         "visual_stage_version": EDITORIAL_STAGE_VERSIONS["visual_learning"],
@@ -1728,28 +1114,6 @@ def _load_semantic_progress(
         if isinstance(completed, list):
             return {**expected, "completed_windows": completed}
     return {**expected, "completed_windows": []}
-
-
-
-
-def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-
-
-def _sum_api_usage_cost(path: Path) -> float:
-    if not path.is_file():
-        return 0.0
-    try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            return sum(float(row.get("cost_usd") or 0.0) for row in csv.DictReader(handle))
-    except (OSError, UnicodeError, csv.Error, ValueError) as exc:
-        raise SubtitlerError(f"Could not read hosted API cost artifact {path}: {exc}") from exc
 
 
 def _print_console_safe(message: str) -> None:

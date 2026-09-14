@@ -10,6 +10,7 @@ from typing import Any
 from .config import default_config_path, load_workflow_config, validate_workflow_config
 from .env import load_env_file
 from .errors import SubtitlerError
+from .workflow_policy import workflow_definition
 from .run_artifacts import RunArtifactPaths, build_run_artifact_paths
 
 
@@ -29,6 +30,8 @@ class CliArguments:
     frontend_protocol: str | None = None
     cut_silence_encoder: str | None = None
     media_library_db: str | None = None
+    transcript_artifact: str | None = None
+    fresh_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,7 @@ def prepare_run_context(args: CliArguments, *, cwd: Path | None = None) -> RunCo
         config["audio"]["track"] = args.audio_track
     if args.profile:
         config["diagnostics"]["profile"] = True
-    validate_workflow_config(config, workflow=args.workflow)
+    validate_workflow_config(config, workflow=args.workflow, check_paths=False)
     cut_mode = config.get("additional_settings", {}).get("cut_silence_mode", "off")
     render_cut_video = bool(config.get("additional_settings", {}).get("render_cut_video", False))
     if cut_mode != "off" and render_cut_video and not args.cut_silence_encoder:
@@ -110,10 +113,5 @@ def configure_alignment_offline_mode(alignment: dict[str, Any]) -> bool:
 
 
 def default_output_path(input_path: Path, workflow: str) -> Path:
-    suffix = {
-        "local": "",
-        "hosted": "-hosted",
-        "local-long-stream": "-long-stream-local",
-        "hosted-long-stream": "-long-stream-hosted",
-    }[workflow]
+    suffix = workflow_definition(workflow).output_suffix
     return input_path.with_name(f"{input_path.stem}{suffix}.exo")

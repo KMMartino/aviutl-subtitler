@@ -58,9 +58,11 @@ describe("python command builder", () => {
       configPath: "C:/repo/config.json",
       envFile: "C:/repo/.env",
       profile: false,
+      freshRun: true,
       sidecarsEnabled: false
     });
     expect(command.args).toContain("--no-sidecars");
+    expect(command.args).toContain("--fresh-run");
     expect(command.args).not.toContain("--sidecar-dir");
   });
 
@@ -109,7 +111,7 @@ describe("python command builder", () => {
       outputPath: "C:/media/run.editorial.json",
       configPath: "C:/state/configs/hosted-long-stream.json",
       envFile: "C:/state/.env",
-      audioTrack: 1,
+      audioTrack: undefined,
       sidecarsEnabled: true,
       profile: true,
       cutSilenceEncoderPreset: "unconfigured",
@@ -124,11 +126,13 @@ describe("python command builder", () => {
         objective: "Finish with the selected restriction",
         targetDurationMinSeconds: 2400,
         targetDurationMaxSeconds: 4200,
-        outputLocale: "ja"
+        outputLocale: "ja",
+        processingLocale: "en"
       }
     });
 
     expect(command.args.slice(0, 4)).toEqual(["-m", "subtitler.editorial_project_cli", "start", "--checkpoint"]);
+    expect(command.args[command.args.indexOf("--audio-track") + 1]).toBe("0");
     expect(command.args.filter((value) => value === "--source-spec")).toHaveLength(2);
     const firstSpec = JSON.parse(command.args[command.args.indexOf("--source-spec") + 1]);
     expect(firstSpec).toMatchObject({ mode: "paired", audioPath: "C:/media/part-1-face.mp4", visualPath: "C:/media/part-1-game.mp4" });
@@ -136,6 +140,7 @@ describe("python command builder", () => {
     expect(command.args).not.toContain("--de-emphasize");
     expect(command.args.slice(command.args.indexOf("--subtitle-mode"), command.args.indexOf("--subtitle-mode") + 2)).toEqual(["--subtitle-mode", "full"]);
     expect(command.args.slice(command.args.indexOf("--output-locale"), command.args.indexOf("--output-locale") + 2)).toEqual(["--output-locale", "ja"]);
+    expect(command.args[command.args.indexOf("--processing-locale") + 1]).toBe("en");
     expect(command.args).not.toContain("--workflow");
   });
 
@@ -151,9 +156,13 @@ describe("python command builder", () => {
       cutSilenceEncoderPreset: "unconfigured",
       silencePreviewHeight: 360,
       silencePreviewFps: 8,
-      editorialCheckpoint: "C:/media/run.editorial.json"
+      editorialCheckpoint: "C:/media/run.editorial.json",
+      deliverablePath: "C:/media/run/editing-guide.exo"
     });
     expect(command.args.slice(0, 3)).toEqual(["-m", "subtitler.editorial_project_cli", "run"]);
+    expect(command.args[command.args.indexOf("--exo") + 1]).toBe("C:/media/run.editorial.exo");
+    expect(command.args).not.toContain("--report");
+    expect(command.args[command.args.indexOf("--audio-track") + 1]).toBe("0");
     expect(command.args).not.toContain("--source");
     expect(command.args.slice(command.args.indexOf("--restart-from"), command.args.indexOf("--restart-from") + 2)).toEqual(["--restart-from", "compatible"]);
   });

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Workspace workshop · SubUtl</title><style>
+:root{color-scheme:light dark;--bg:#f3f5f8;--paper:#fff;--ink:#202936;--muted:#5b6778;--line:#dbe1e9;--accent:#16629b;--code:#edf2f7}
+@media(prefers-color-scheme:dark){:root{--bg:#111820;--paper:#19232e;--ink:#e5edf6;--muted:#afbdcc;--line:#344454;--accent:#83c6fa;--code:#101923}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--accent);text-underline-offset:3px}a:hover{text-decoration-thickness:2px}a:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+header{max-width:1280px;margin:auto;padding:32px 32px 20px}.brand{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+nav{display:flex;flex-wrap:wrap;gap:10px 24px;margin-top:14px}nav a[aria-current]{font-weight:700}.subtitle{color:var(--muted);margin:12px 0 0}
+.layout{display:grid;grid-template-columns:245px minmax(0,1fr);gap:32px;max-width:1280px;margin:auto;padding:0 32px 60px}
+aside{position:sticky;top:20px;align-self:start;max-height:calc(100vh - 40px);overflow:auto;font-size:14px;padding:20px 0}
+aside strong{display:block;margin-bottom:12px}aside a{display:block;margin:0 0 12px;text-decoration:none}main{min-width:0;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:36px 42px}
+h1{font-size:32px;line-height:1.2;margin:0 0 24px;letter-spacing:-.025em}h2{font-size:24px;line-height:1.3;margin:44px 0 16px;padding-top:16px;border-top:1px solid var(--line)}h3{font-size:19px;margin-top:28px}
+p,li{overflow-wrap:anywhere}p{margin:14px 0}li{margin:8px 0}ul,ol{padding-left:24px}h1,h2,h3{scroll-margin-top:24px}
+code{font: .88em/1.5 ui-monospace,Consolas,monospace;background:var(--code);padding:2px 5px;border-radius:4px;overflow-wrap:anywhere}pre{overflow:auto;padding:16px;background:var(--code);border-radius:8px}pre code{padding:0;white-space:pre;overflow-wrap:normal}
+.table-scroll{overflow:auto;margin:24px 0}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;padding:12px;border:1px solid var(--line);min-width:130px}th{background:var(--code)}blockquote{margin:20px 0;padding:4px 20px;border-left:3px solid var(--accent);color:var(--muted)}
+footer{border-top:1px solid var(--line);padding-top:20px;margin-top:36px;color:var(--muted);font-size:13px}.skip{position:absolute;left:-10000px}.skip:focus{left:20px;top:10px;background:var(--paper);padding:8px}
+@media(max-width:850px){.layout{display:block;padding:0 16px 32px}header{padding:24px 18px}aside{position:static;max-height:none;padding:12px 0 20px}aside a{display:inline-block;margin:4px 16px 4px 0}main{padding:24px 20px}h1{font-size:28px}}
+@media print{body{background:white;color:black}header nav,aside{display:none}.layout{display:block;padding:0}main{border:0;padding:0}header{padding:0 0 16px}a{color:inherit}pre{white-space:pre-wrap}.table-scroll{overflow:visible}h2{break-after:avoid}tr{break-inside:avoid}}
+</style></head><body>
+<a class="skip" href="#document">Skip to document</a>
+<header><div class="brand">SubUtl · Project review</div><nav aria-label="Review documents"><a href="workflow-architecture.html">Implementation &amp; architecture</a><a href="creator-workspace-workshop.html" aria-current="page">Workspace workshop</a><a href="../testing-grounds/architecture-verification-2026-09-06/VERIFICATION.html">Verification evidence</a></nav><p class="subtitle">Phase 4 proposal · Phase 5 ideas</p></header>
+<div class="layout"><aside aria-label="Contents"><strong>On this page</strong><a href="#is-phase-4-a-frontend-redesign">Is phase 4 a frontend redesign?</a><a href="#recommended-product-shape">Recommended product shape</a><a href="#ui-alternatives">UI alternatives</a><a href="#interaction-details-to-settle">Interaction details to settle</a><a href="#first-ui-slice-after-agreement">First UI slice after agreement</a><a href="#phase-5-ideas-intentionally-not-implemented">Phase 5 ideas — intentionally not implemented</a><a href="#avoiding-unnecessary-processes">Avoiding unnecessary processes</a><a href="#future-acceptance-examples">Future acceptance examples</a></aside>
+<main id="document"><h1 id="creator-workspace-workshop">Creator workspace workshop</h1>
+<p>Status: design proposal only. No phase 4 UI or phase 5 feature implementation is
+included in this migration. These are options to discuss together later.</p>
+<h2 id="is-phase-4-a-frontend-redesign">Is phase 4 a frontend redesign?</h2>
+<p>Yes. Phase 4 substantially redesigns the frontend's navigation, information
+organization, and task flow around projects, sources, and results. It goes beyond
+visual styling. Existing source controls, settings, review tools, and editors can
+be reused within that structure. The completed backend migration supplies reusable
+processing and recovery; the frontend still needs project/result browsing and the
+adapters that connect those views to the stored work. This remains a proposal for
+our discussion, with implementation held until we agree on the direction.</p>
+<h2 id="recommended-product-shape">Recommended product shape</h2>
+<p>A project is a creator's working context: sources, transcripts, generated results,
+review decisions and exports. It can contain multiple recordings. A workflow is a
+named action available for those materials. The user sees their work and its next
+useful actions; process graphs remain internal.</p>
+<p>Suggested desktop structure:</p>
+<ul>
+<li>Home: recent projects, New project, and a quick one-off file/URL action.</li>
+<li>Project: a source list, a central result viewer, and a small activity/status area.</li>
+<li>Sources: local recordings or URLs, track selection, origin, and available results.</li>
+<li>Results: Transcript, Subtitles, Editing guide, and eventually Clips or Chapters.</li>
+<li>A result shows its source, creation time, current/stale status, and relevant actions
+such as Edit, Regenerate, Export, or Use in another task.</li>
+<li>Processing location and model details live in settings. The primary question is
+what the creator wants to make, rather than which engine to launch.</li>
+</ul>
+<p>Example: import a livestream once, create its transcript, generate subtitles, then
+create an editing guide from that transcript. Revising subtitle appearance should
+immediately reuse text. Changing the cleanup instructions creates new subtitle
+text. Editing source words creates a transcript successor and marks dependent
+results as needing an update, while preserving the previous exports.</p>
+<h2 id="ui-alternatives">UI alternatives</h2>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Strength</th>
+<th>Limitation</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Project with Sources and Results</td>
+<td>Makes reuse and multiple recordings visible; supports branching work</td>
+<td>Needs a clear distinction between current and previous results</td>
+<td>Primary workspace</td>
+</tr>
+<tr>
+<td>One guided wizard per task</td>
+<td>Fast for a first run</td>
+<td>Hides existing reusable work; becomes awkward with revisions</td>
+<td>Use within a task, not as the entire app</td>
+</tr>
+<tr>
+<td>Task dashboard with recent outputs</td>
+<td>Lowest initial navigation complexity</td>
+<td>Weak ownership when several outputs use the same recording</td>
+<td>Keep as Home/quick actions</td>
+</tr>
+</tbody>
+</table></div>
+<p>No node editor, connection drawing, or user-authored execution graph is proposed.</p>
+<h2 id="interaction-details-to-settle">Interaction details to settle</h2>
+<ol>
+<li>Project scope: one recording by default, or a broader series/session? Recommended:
+start with one recording and allow more sources later without changing projects.</li>
+<li>Project storage: a user-visible folder or app-managed storage? Recommended:
+app-managed by default, with a selectable project location. Source files may stay
+where they are; copied/downloaded media must be clearly distinguished.</li>
+<li>Result history: show every revision, or a current result with expandable history?
+Recommended: current result first; retain previous versions behind History.</li>
+<li>Review flow: one consolidated review screen or a task-specific viewer?
+Recommended: task-specific review using shared Save, Apply, Cancel and resume
+behavior. Subtitle text, silence cuts and footage references need different tools.</li>
+<li>Automation: automatically regenerate stale results or ask when opening them?
+Recommended: mark them stale and offer Update. Re-exporting unchanged text is
+cheap; new hosted analysis should show its estimated incremental cost.</li>
+<li>Quick use: must every single subtitle export require naming a project?
+Recommended: no. Create a lightweight project automatically and let the user
+rename or discard it later.</li>
+<li>External editing: how prominent should AviUtl round trips remain?
+Recommended: a first-class Import reviewed EXO action linked to its original
+export, alongside internal review where the app can do it well.</li>
+</ol>
+<p>These are discussion prompts, not questions that block backend implementation.</p>
+<h2 id="first-ui-slice-after-agreement">First UI slice after agreement</h2>
+<p>Build the project/source/result shell and connect the existing subtitle and editing
+workflows to it. Show which transcript will be reused before starting a task. Add
+clear interrupted/complete/stale states, reopen pending reviews, and preserve an
+existing result while a successor is running. Do not redesign every detailed editor
+at once. Acceptance example: one recording, one transcript, two outputs, close and
+reopen, change subtitle appearance, export again without transcription.</p>
+<p>The current migration supplies durable operation results and recovery. A project
+index, unified result browsing, user-selected revision history, and a UI for choosing
+an existing transcript still need this product design and implementation phase.</p>
+<h2 id="phase-5-ideas-intentionally-not-implemented">Phase 5 ideas — intentionally not implemented</h2>
+<div class="table-scroll"><table>
+<thead>
+<tr>
+<th>Idea</th>
+<th>Composition</th>
+<th>Why it may be useful</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Livestream highlights</td>
+<td>Acquire → transcribe → optional visual evidence → select ranges → review → export clips</td>
+<td>Directly addresses the original URL-to-clips request</td>
+</tr>
+<tr>
+<td>Find an explanation or reaction</td>
+<td>Existing transcript/evidence → select ranges with a user goal → review → export</td>
+<td>Reuses the same range selector with different parameters</td>
+</tr>
+<tr>
+<td>Chapters and show notes</td>
+<td>Existing timed evidence → summarize/group → review → export timestamps/text</td>
+<td>Useful without encoding another video</td>
+</tr>
+<tr>
+<td>Several output formats</td>
+<td>Approved ranges → layout/crop/subtitle parameters → export variants</td>
+<td>Reuses selections; avoids paying for repeated analysis</td>
+</tr>
+<tr>
+<td>Stream recap or narration outline</td>
+<td>Existing factual guide → summarize evidence for the desired audience → review</td>
+<td>Extends the current editing guide without pretending suggestions are a finished script</td>
+</tr>
+<tr>
+<td>Extract useful quotes/tutorial moments</td>
+<td>Existing transcript → select ranges under a topic and duration policy → review</td>
+<td>Same selection operation, not another canonical workflow</td>
+</tr>
+<tr>
+<td>Rework an existing edit</td>
+<td>Import reviewed artifact → recover source ranges → update selected text or references → export</td>
+<td>Builds on the AviUtl round trip already present</td>
+</tr>
+</tbody>
+</table></div>
+<p>Recommended first feature: a small batch of reviewable clip candidates from a saved
+transcript, with the source preview and exact start/end times. Add visual analysis
+when the requested moment cannot be identified from speech. The creator approves
+ranges before full-resolution rendering. Measure whether the candidates are useful
+and whether their boundaries play cleanly before expanding to many formats.</p>
+<h2 id="avoiding-unnecessary-processes">Avoiding unnecessary processes</h2>
+<p>Use one range-selection operation parameterized by goal, duration, count and evidence
+policy. Use one media export operation parameterized by accepted ranges, layout,
+resolution and subtitles. Use the same transcription operation with local/hosted
+provider settings. Keep a distinct operation when its artifact contract or review
+boundary is different: selecting ranges is not exporting a video, and generating
+subtitle text is not approving cuts. Sharing an LLM client alone does not make two
+semantically different results the same operation.</p>
+<h2 id="future-acceptance-examples">Future acceptance examples</h2>
+<ul>
+<li>Re-running selection with a different target length reuses transcription.</li>
+<li>Editing one candidate does not regenerate the other candidates.</li>
+<li>Exporting vertical and landscape versions reuses approved source ranges.</li>
+<li>Failed rendering preserves approved clips and all paid analysis.</li>
+<li>Every displayed clip can identify its source, selection revision and timing units.</li>
+<li>Project-wide cost includes failed and superseded attempts, separately from the
+estimated cost of producing the current result from scratch.</li>
+</ul>
+<footer>Review copy · 6 September 2026 · Internal Markdown source retained for maintenance.</footer></main></div>
+</body></html>

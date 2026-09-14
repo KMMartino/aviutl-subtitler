@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 from subtitler.errors import SubtitlerError
 from subtitler.models import ExoMarker, Subtitle
+from subtitler.silence_review import request_review
+from subtitler.review_exchange import FRONTEND_EVENT_PREFIX
 from subtitler.silence_cut import (
-    FRONTEND_EVENT_PREFIX,
     MARK_AND_REJECT_TEXT,
     TimelineMap,
     MediaStreamSummary,
@@ -23,7 +24,6 @@ from subtitler.silence_cut import (
     encode_cut_video,
     merge_cut_ranges,
     quantize_cuts_to_source_frames,
-    request_review,
 )
 from subtitler.transcription_backend import RawVadSpeechInterval
 
@@ -101,7 +101,7 @@ class SilenceTimelineTests(unittest.TestCase):
                 mode="automatic", candidates=[candidate], raw_intervals=[RawVadSpeechInterval(0.0, 1.0), RawVadSpeechInterval(4.0, 5.0)],
                 subtitles=[Subtitle(0.0, 1.0, "line")], chapter_markers=[], qa_markers=[], duration_sec=5.0,
                 input_path=Path("source.mkv"), exo_path=Path("out.exo"), encoder_preset=None,
-                frontend_protocol=None, render_cut_video=False, project_fps=60,
+                render_cut_video=False, project_fps=60,
             )
         encode.assert_not_called()
         self.assertEqual(outcome.output_strategy, "exo-source")
@@ -118,7 +118,7 @@ class SilenceTimelineTests(unittest.TestCase):
                 mode="automatic", candidates=[candidate], raw_intervals=[RawVadSpeechInterval(0.0, 1.0), RawVadSpeechInterval(4.0, 5.0)],
                 subtitles=[], chapter_markers=[], qa_markers=[], duration_sec=5.0,
                 input_path=Path("source.mkv"), exo_path=Path("out.exo"), encoder_preset="libx265-crf21",
-                frontend_protocol=None, render_cut_video=True, project_fps=60,
+                render_cut_video=True, project_fps=60,
             )
         encode.assert_called_once_with(Path("source.mkv"), Path("out.exo"), 5.0, outcome.requested_cuts, "libx265-crf21", 60)
         self.assertEqual(outcome.output_strategy, "rendered-mkv")
@@ -173,7 +173,7 @@ class SilenceReviewTests(unittest.TestCase):
             "decisions": [{"candidateId": self.candidate.id, "decision": "mark_and_reject"}],
         }
         with (
-            patch("subtitler.silence_cut.uuid.uuid4", return_value="fixed-review"),
+            patch("subtitler.review_exchange.uuid.uuid4", return_value="fixed-review"),
             patch("sys.stdin", io.StringIO(json.dumps(decision) + "\n")),
             redirect_stdout(io.StringIO()) as output,
         ):
@@ -188,7 +188,7 @@ class SilenceReviewTests(unittest.TestCase):
                 input_path=Path("unused.mp4"),
                 exo_path=Path("unused.exo"),
                 encoder_preset="libx265-crf21",
-                frontend_protocol="stdio-v1",
+                review_result=request_review([self.candidate], "stdio-v1"),
             )
         self.assertTrue(output.getvalue().startswith(FRONTEND_EVENT_PREFIX))
         self.assertEqual(outcome.accepted_cuts, [])

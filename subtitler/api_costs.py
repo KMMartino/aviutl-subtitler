@@ -40,7 +40,7 @@ OPENAI_PRICES: dict[str, TokenPrices] = {
     ),
     "gpt-5.5": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
     "gpt-5.4-mini": TokenPrices(input_per_1m=0.75, output_per_1m=4.50),
-    "gpt-5.6-sol": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
+    "gpt-5.6-sol": TokenPrices(input_per_1m=4.00, output_per_1m=20.00),
     "gpt-5.6-terra": TokenPrices(input_per_1m=2.00, output_per_1m=12.00),
     "gpt-5.6-luna": TokenPrices(input_per_1m=0.20, output_per_1m=1.20),
 }

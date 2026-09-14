@@ -4,13 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from aviutl_subtitle import _configure_alignment_offline_mode
+from subtitler.run_context import configure_alignment_offline_mode
 
 
 class AlignmentOfflineModeTests(unittest.TestCase):
     def test_remote_model_identifier_never_enables_offline_mode(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            enabled = _configure_alignment_offline_mode(
+            enabled = configure_alignment_offline_mode(
                 {"model": "MahmoudAshraf/mms-300m-1130-forced-aligner", "offline_model_cache": True}
             )
             self.assertFalse(enabled)
@@ -22,7 +22,7 @@ class AlignmentOfflineModeTests(unittest.TestCase):
             (root / "config.json").write_text("{}", encoding="utf-8")
             (root / "model.safetensors").write_bytes(b"model")
             (root / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-            enabled = _configure_alignment_offline_mode(
+            enabled = configure_alignment_offline_mode(
                 {"model": str(root), "offline_model_cache": True}
             )
             self.assertTrue(enabled)
@@ -37,7 +37,7 @@ class AlignmentOfflineModeTests(unittest.TestCase):
             (root / "model.safetensors").write_bytes(b"model")
             (root / "tokenizer_config.json").write_text("{}", encoding="utf-8")
 
-            enabled = _configure_alignment_offline_mode(
+            enabled = configure_alignment_offline_mode(
                 {"model": str(root), "offline_model_cache": True}
             )
 

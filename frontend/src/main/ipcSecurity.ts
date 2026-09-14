@@ -1,16 +1,17 @@
+import { workflows as workflowNames } from "../shared/workflowCatalog";
 import path from "node:path";
 import type { IpcMainInvokeEvent } from "electron";
 
-const workflows = new Set(["local", "hosted", "local-long-stream", "hosted-long-stream"]);
+const workflows = new Set(workflowNames);
 const backends = new Set(["vulkan", "cuda-12"]);
 const noArgs = new Set([
-  "dialog:file", "dialog:directory", "dialog:executable", "state:get", "state:reset",
+  "project:catalog", "dialog:file", "dialog:directory", "dialog:executable", "state:get", "state:reset",
   "local-models:list", "local-models:hf-downloader-status", "local-models:install-hf-downloader", "llama:list-backends",
   "llama:check-latest", "glossary:read", "glossary:import", "runtime:setup-status", "runtime:create-managed-python",
   "runtime:install-python-requirements", "runtime:delete-managed-python", "runtime:download-ffmpeg", "runtime:delete-ffmpeg",
   "runtime:update-ytdlp", "runtime:delete-ytdlp",
   "runtime:download-alignment", "runtime:delete-alignment",
-  "silence:probe-encoders",
+  "silence:probe-encoders", "source:cancel",
   "library:list-roots",
   "editorial:list-checkpoints",
   "editorial:list-games",
@@ -37,6 +38,22 @@ export function assertTrustedSender(event: Pick<IpcMainInvokeEvent, "senderFrame
 export function validateIpcArguments(channel: string, args: unknown[]): void {
   if (noArgs.has(channel)) return exact(args, 0);
   switch (channel) {
+    case "project:export-exo": exact(args, 2); assertAbsolutePath(args[0]); assertShortString(args[1]); return;
+    case "project:transcript": case "project:review": exact(args, 3); assertAbsolutePath(args[0]); assertShortString(args[1]); assertAbsolutePath(args[2]); return;
+    case "project:open": case "project:default-directory": return absolutePathArg(args);
+    case "project:create": exactRange(args, 1, 2); assertShortString(args[0]); if (args[1] !== undefined) assertAbsolutePath(args[1]); return;
+    case "project:update": {
+      exact(args, 1); assertPlainObject(args[0]); const update = args[0];
+      assertAbsolutePath(update.directory); assertShortString(update.name);
+      if (!Number.isSafeInteger(update.revision) || !Array.isArray(update.recordings) || update.recordings.length > 1000) fail();
+      for (const recording of update.recordings) { assertPlainObject(recording); assertShortString(recording.id); validateEditorialSources([recording.source]); }
+      assertPlainObject(update.editorial);
+      for (const field of ["titleOrGame", "objective"]) if (typeof update.editorial[field] !== "string" || String(update.editorial[field]).length > 20000) fail();
+      for (const field of ["targetDurationMinSeconds", "targetDurationMaxSeconds"]) if (typeof update.editorial[field] !== "number" || !Number.isFinite(update.editorial[field]) || Number(update.editorial[field]) <= 0) fail();
+      if (update.editorial.processingLocale !== undefined) assertEnum(update.editorial.processingLocale, new Set(["en", "ja"]));
+      if (update.editorial.outputLocale !== undefined) assertEnum(update.editorial.outputLocale, new Set(["en", "ja"]));
+      return;
+    }
     case "dialog:input-file": case "dialog:input-files": case "dialog:output-file": return optionalAbsolutePath(args);
     case "state:save-settings": return objectArg(args);
     case "config:get": return enumArg(args, workflows);
@@ -94,7 +111,7 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
       exact(args, 3); assertShortString(args[0]); validateAnalysisScope(args[1]);
       if (typeof args[2] !== "string" || !args[2].trim() || args[2].length > 4000 || args[2].includes("\0")) fail();
       return;
-    case "library:web-probe":
+    case "source:acquire": case "library:web-probe":
       exact(args, 1); assertWebUrl(args[0]); return;
     case "library:web-acquire":
       exact(args, 1); validateWebAcquireRequest(args[0]); return;
@@ -164,13 +181,16 @@ export function contentSecurityPolicy(packaged: boolean): string {
 function validateRunRequest(value: unknown): void {
   assertPlainObject(value);
   const request = value as Record<string, unknown>;
-  const allowed = new Set(["workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps", "editorialProject", "editorialCheckpoint", "editorialCheckpointSources", "editorialRestartFrom", "editorialExtend"]);
+  const allowed = new Set(["creatorResumeResultId", "creatorProjectDirectory", "creatorRecordingId", "freshRun", "workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps", "editorialProject", "editorialCheckpoint", "editorialCheckpointSources", "editorialRestartFrom", "editorialExtend"]);
   if (Object.keys(request).some((key) => !allowed.has(key))) fail();
   assertEnum(request.workflow, workflows);
-  if (request.workflow === "local-long-stream") fail();
+  if (request.creatorResumeResultId !== undefined) { assertShortString(request.creatorResumeResultId); assertAbsolutePath(request.creatorProjectDirectory); }
+  if (request.creatorProjectDirectory !== undefined) assertAbsolutePath(request.creatorProjectDirectory);
+  if (request.creatorRecordingId !== undefined) assertShortString(request.creatorRecordingId);
   for (const key of ["inputPath", "outputPath", "configPath", "envFile"]) assertAbsolutePath(request[key]);
   if (request.sidecarDir !== undefined) assertAbsolutePath(request.sidecarDir);
   if (request.audioTrack !== undefined && (!Number.isSafeInteger(request.audioTrack) || Number(request.audioTrack) < 0)) fail();
+  if (request.freshRun !== undefined && typeof request.freshRun !== "boolean") fail();
   if (typeof request.profile !== "boolean" || typeof request.sidecarsEnabled !== "boolean") fail();
   assertEnum(request.cutSilenceEncoderPreset, new Set(["unconfigured", "hevc-amf-cqp21", "hevc-nvenc-qp21", "hevc-qsv-q21", "libx265-crf21"]));
   if (![240, 360, 480, 720].includes(Number(request.silencePreviewHeight)) || ![4, 8, 12, 24].includes(Number(request.silencePreviewFps))) fail();
@@ -194,7 +214,7 @@ function validateRunRequest(value: unknown): void {
 function validateEditorialProjectRequest(workflow: unknown, value: unknown): void {
   if (workflow !== "hosted-long-stream") fail();
   assertPlainObject(value);
-  const allowed = new Set(["sources", "titleOrGame", "objective", "targetDurationMinSeconds", "targetDurationMaxSeconds", "outputLocale"]);
+  const allowed = new Set(["sources", "titleOrGame", "objective", "targetDurationMinSeconds", "targetDurationMaxSeconds", "outputLocale", "processingLocale"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) fail();
   const totalSeconds = validateEditorialSources(value.sources);
   for (const key of ["titleOrGame", "objective"] as const) {
@@ -204,6 +224,7 @@ function validateEditorialProjectRequest(workflow: unknown, value: unknown): voi
   const maximum = value.targetDurationMaxSeconds;
   if (typeof minimum !== "number" || !Number.isFinite(minimum) || minimum <= 0
     || typeof maximum !== "number" || !Number.isFinite(maximum) || maximum < minimum || maximum > totalSeconds + 1) fail();
+  if (value.processingLocale !== undefined) assertEnum(value.processingLocale, new Set(["en", "ja"]));
   if (value.outputLocale !== undefined) assertEnum(value.outputLocale, new Set(["en", "ja"]));
 }
 function validateEditorialSources(value: unknown): number {
@@ -213,7 +234,8 @@ function validateEditorialSources(value: unknown): number {
   for (const source of value) {
     assertPlainObject(source);
     const sourceFields = new Set(["path", "durationSeconds", "mode", "audioPath", "visualPath", "audioDurationSeconds", "visualDurationSeconds", "width", "height", "audioWidth", "audioHeight", "frameRate", "audioFrameRate", "pairingBasis", "roleConfirmed"]);
-    if (Object.keys(source).some((key) => !sourceFields.has(key)) || Object.keys(source).length !== sourceFields.size) fail();
+    if (Object.keys(source).some((key) => !sourceFields.has(key) && key !== "speechSource") || [...sourceFields].some((key) => !(key in source))) fail();
+    if (source.speechSource !== undefined) assertEnum(source.speechSource, new Set(["facecam", "gameplay"]));
     assertEnum(source.mode, new Set(["single", "paired"]));
     assertEnum(source.pairingBasis, new Set(["single", "filename", "resolution", "manual"]));
     for (const key of ["path", "audioPath", "visualPath"] as const) assertAbsolutePath(source[key]);

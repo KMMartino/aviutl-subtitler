@@ -43,6 +43,5 @@ it("builds the reviewed-cut application command without shell interpolation", ()
     "--config", "C:\\state\\configs\\hosted-long-stream.json",
     "--env-file", "C:\\state\\.env",
     "--workspace", "C:\\media\\run-editorial.files\\narration-review",
-    "--pipeline-script", "C:\\app\\backend\\aviutl_subtitle.py",
   ]);
 });

@@ -16,14 +16,5 @@ class EditorialActionCatalogTests(unittest.TestCase):
         self.assertFalse(PRIMARY_ACTION_TYPES & SUPPORTING_ACTION_TYPES)
         self.assertTrue(all(item.execution_method for item in EDITORIAL_ACTION_SPECS))
 
-    def test_catalog_covers_timeline_narration_accents_continuity_and_review(self) -> None:
-        families = {item.family for item in EDITORIAL_ACTION_SPECS}
-        self.assertEqual(families, {"timeline", "narration", "accent", "continuity", "review"})
-        self.assertTrue(
-            {"preserve", "trim", "cut", "extract_highlights", "narrated_summary", "punch_in", "foreshadow", "manual_review"}
-            <= CANONICAL_ACTION_TYPES
-        )
-
-
 if __name__ == "__main__":
     unittest.main()

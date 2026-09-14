@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import SubtitlerError
+from .artifact_io import write_json_artifact
 from .editorial_locale import editorial_locale, output_language_instruction
+from .game_wiki import game_title_matches
 
 
 GAME_KNOWLEDGE_SCHEMA_VERSION = 2
@@ -145,7 +145,7 @@ Completion: every existing claim has been retained, revised, or removed based on
         games.append(profile)
         games.sort(key=lambda item: str(item.get("last_used_at_utc") or ""), reverse=True)
         store["games"] = games[:MAX_GAMES]
-        _write_store(path, store)
+        write_json_artifact(path, store, indent=2)
     return profile
 
 
@@ -180,6 +180,20 @@ def _normalized_profile(value: dict[str, Any], fallback_title: str) -> dict[str,
     profile["reference_context"] = (
         value.get("reference_context") if isinstance(value.get("reference_context"), dict) else {}
     )
+    reference = profile["reference_context"]
+    if reference.get("status") == "complete" and not game_title_matches(
+        fallback_title, str(reference.get("page_title") or "")
+    ):
+        # The learned claims may have absorbed the wrong game's reference.
+        # Quarantine both in memory; preserve the original store until a normal
+        # successful learning update publishes a replacement revision.
+        profile["knowledge"] = {field: [] for field in GAME_KNOWLEDGE_FIELDS}
+        profile["reference_context"] = {
+            "status": "unavailable",
+            "detail": "Cached reference identity mismatch; associated learned knowledge withheld.",
+            "rejected_page_title": str(reference.get("page_title") or ""),
+            "rejected_profile_revision": profile["revision"],
+        }
     return profile
 
 
@@ -195,24 +209,6 @@ def _load_store(path: Path) -> dict[str, Any]:
         "schema_version": GAME_KNOWLEDGE_SCHEMA_VERSION,
         "games": games if isinstance(games, list) else [],
     }
-
-
-def _write_store(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_name, path)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except OSError:
-            pass
-        raise
 
 
 def _bounded_strings(value: Any) -> list[str]:

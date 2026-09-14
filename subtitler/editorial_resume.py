@@ -92,6 +92,7 @@ def inspect_editorial_resume(
             "targetDurationMinSeconds": artifact["target_duration_min_ms"] / 1000.0,
             "targetDurationMaxSeconds": artifact["target_duration_max_ms"] / 1000.0,
             "outputLocale": artifact.get("output_locale", "en"),
+            "processingLocale": artifact.get("processing_locale", "en"),
         },
     }
 
@@ -308,25 +309,12 @@ def _sources_match(
     ordered = sorted(artifact["sources"], key=lambda item: item["order"])
     if len(source_specs) != len(ordered):
         return False, "The selected source count does not match this checkpoint."
-    try:
-        for expected, supplied in zip(ordered, source_specs):
-            if supplied.get("mode") != expected["media_mode"]:
-                return False, "A selected source has a different single/paired structure."
-            roles = ("visual",) if expected["media_mode"] == "single" else ("audio", "visual")
-            for role in roles:
-                raw_path = supplied.get(f"{role}Path")
-                if not isinstance(raw_path, str) or not raw_path:
-                    return False, f"The selected source lacks its {role} file."
-                fingerprint = expected[f"{role}_fingerprint"]
-                actual = fingerprint_source(
-                    Path(raw_path).resolve(),
-                    sample_size=int(fingerprint["sample_size_bytes"]),
-                )
-                if actual.digest != fingerprint["digest"] or actual.size_bytes != fingerprint["size_bytes"]:
-                    return False, f"The selected {role} file does not match the checkpoint fingerprint."
-    except SubtitlerError as exc:
-        return False, str(exc)
+    for expected, supplied in zip(ordered, source_specs):
+        matches, error = _source_matches(expected, supplied)
+        if not matches:
+            return False, error
     return True, ""
+
 
 
 def _associated_sources(
@@ -355,6 +343,8 @@ def _associated_sources(
 
 
 def _source_matches(expected: dict[str, Any], supplied: dict[str, Any]) -> tuple[bool, str]:
+    if supplied.get("speechSource", "facecam") != expected.get("speech_source", "facecam"):
+        return False, "The selected speech audio source has changed."
     if supplied.get("mode") != expected["media_mode"]:
         return False, "A selected source has a different single/paired structure."
     roles = ("visual",) if expected["media_mode"] == "single" else ("audio", "visual")
@@ -396,6 +386,7 @@ def _artifact_source_selections(
                 "path": visual_path,
                 "durationSeconds": duration,
                 "mode": source["media_mode"],
+                "speechSource": source.get("speech_source", "facecam"),
                 "audioPath": audio_path,
                 "visualPath": visual_path,
                 "audioDurationSeconds": source["audio_duration_ms"] / 1000.0,

@@ -1,10 +1,12 @@
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 from subtitler.aligner import ForcedAligner, ctc_language_code, is_japanese_language, proportional_alignment
 from subtitler.errors import AlignmentError
 from subtitler.models import AudioChunk, TranscriptChunk
+import math
+from subtitler.aligner import _precise_emission_stride_ms
+from subtitler.alignment_pool import _split_transcript_for_subchunks
 
 
 try:
@@ -48,7 +50,6 @@ class AlignmentLanguageTests(unittest.TestCase):
                 )
 
 
-@unittest.skipIf(preprocess_text is None, "ctc_forced_aligner is not installed")
 class AlignmentStarFrequencyTests(unittest.TestCase):
     def test_edges_mode_only_adds_edge_wildcards_for_japanese_char_alignment(self):
         tokens, text = preprocess_text(
@@ -66,5 +67,48 @@ class AlignmentStarFrequencyTests(unittest.TestCase):
         self.assertEqual(tokens.count("<star>"), 2)
         self.assertEqual(text.count("<star>"), 2)
 
-if __name__ == "__main__":
-    unittest.main()
+
+class FakeSizedTensor:
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def size(self, dimension: int) -> int:
+        self.assert_dimension_zero(dimension)
+        return self._size
+
+    @staticmethod
+    def assert_dimension_zero(dimension: int) -> None:
+        if dimension != 0:
+            raise AssertionError(f"unexpected dimension: {dimension}")
+
+
+class AlignmentStrideTests(unittest.TestCase):
+    def test_precise_emission_stride_uses_actual_frame_count(self) -> None:
+        audio_waveform = FakeSizedTensor(16000 * 30 + 1)
+        emissions = FakeSizedTensor(1500)
+
+        stride = _precise_emission_stride_ms(audio_waveform, emissions)
+
+        expected = float(16000 * 30 + 1) * 1000.0 / 1500.0 / 16000.0
+        self.assertEqual(stride, expected)
+        self.assertNotEqual(stride, math.ceil(stride))
+
+
+class AlignmentRetrySplitTests(unittest.TestCase):
+    def test_japanese_transcript_is_partitioned_across_subchunk_durations(self):
+        samples = [0.0] * 16000
+        parent = AudioChunk(index=5, start=10.0, end=14.0, samples=samples)
+        subchunks = [
+            AudioChunk(index=5, start=10.0, end=11.0, samples=samples[:4000]),
+            AudioChunk(index=5, start=11.0, end=14.0, samples=samples[4000:]),
+        ]
+
+        transcripts = _split_transcript_for_subchunks(
+            TranscriptChunk(parent, "あいうえおかきく"),
+            subchunks,
+            "ja",
+        )
+
+        self.assertEqual([item.text for item in transcripts], ["あい", "うえおかきく"])
+        self.assertEqual([item.chunk.start for item in transcripts], [10.0, 11.0])
+        self.assertEqual([item.chunk.end for item in transcripts], [11.0, 14.0])

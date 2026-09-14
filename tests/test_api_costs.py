@@ -33,7 +33,7 @@ class ApiCostTests(unittest.TestCase):
 
     def test_gpt_56_cleanup_prices(self) -> None:
         for model, input_rate, output_rate in (
-            ("gpt-5.6-sol", 5.00, 30.00),
+            ("gpt-5.6-sol", 4.00, 20.00),
             ("gpt-5.6-terra", 2.00, 12.00),
             ("gpt-5.6-luna", 0.20, 1.20),
         ):

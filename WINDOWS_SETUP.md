@@ -2,12 +2,11 @@
 
 This project generates AviUtl `.exo` subtitles from local audio/video files on Windows.
 
-The supported app surface is four workflows:
+The app supports three workflow configurations:
 
 ```text
 local
 hosted
-local-long-stream
 hosted-long-stream
 ```
 
@@ -16,7 +15,6 @@ Use the batch files for normal runs:
 ```text
 run_subtitler_drop.bat
 run_subtitler_hosted_drop.bat
-run_subtitler_long_stream_drop.bat
 run_subtitler_long_stream_hosted_drop.bat
 ```
 
@@ -87,7 +85,7 @@ The default configs expect:
 C:\tools\llama-vulkan\llama-server.exe
 ```
 
-Update `configs/local.json` and `configs/local-long-stream.json` if your path differs and you are not using the frontend-managed path.
+Update `configs/local.json` if your path differs and you are not using the frontend-managed path.
 
 ## Local Model Paths
 
@@ -95,7 +93,6 @@ Local workflow paths live in:
 
 ```text
 configs/local.json
-configs/local-long-stream.json
 ```
 
 Edit these fields for your machine:
@@ -132,7 +129,6 @@ Direct CLI examples:
 ```powershell
 .\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow local
 .\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow hosted
-.\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow local-long-stream
 .\.venv-win\Scripts\python.exe aviutl_subtitle.py "C:\path\to\input.mkv" --workflow hosted-long-stream
 ```
 

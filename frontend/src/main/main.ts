@@ -1,3 +1,5 @@
+import { CreatorProjectStore } from "./creatorProjectStore";
+import { acquireSource } from "./sourceAcquisition";
 import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
@@ -112,8 +114,11 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
+let sourceAcquisition: AbortController | null = null;
+
 app.on("before-quit", (event) => {
   shutdownActiveRun();
+  sourceAcquisition?.abort();
   mediaAnalysis.cancel();
   silencePreview?.cleanupAll();
   if (quittingAfterDrain) return;
@@ -161,6 +166,37 @@ function registerIpc(): void {
     await Promise.all([...configWriters.values()].map((writer) => writer.flushNow()));
   };
   const paths = () => runtimePaths();
+  const projects = new CreatorProjectStore(paths().stateRoot, path.join(app.getPath("videos"), "SubUtl", "Projects"));
+  handle("project:transcript", (_event, directory: string, resultId: string, file: string) => projects.transcript(directory, resultId, file));
+  handle("project:export-exo", (_event, directory: string, resultId: string) => projects.exportExo(directory, resultId));
+  handle("project:catalog", () => projects.catalog());
+  handle("project:review", async (_event, directory: string, resultId: string, reviewedExo: string) => {
+    const project = projects.open(directory);
+    const parent = project.results.find((result) => result.id === resultId && result.workflow === "hosted-long-stream" && result.status === "complete" && !result.kind);
+    if (!parent) throw new Error("Select a completed editing guide to import its reviewed EXO.");
+    if (path.extname(reviewedExo).toLowerCase() !== ".exo") throw new Error("Choose an EXO exported from AviUtl.");
+    const checkpoint = JSON.parse(fs.readFileSync(parent.outputPath, "utf8"));
+    const mediaFiles = new Set(Array.from(new TextDecoder("shift_jis").decode(fs.readFileSync(reviewedExo)).matchAll(/^file=(.+)$/gm), (match) => match[1].trim().toLowerCase()));
+    const sources: { source_id: string; visual_path: string }[] = checkpoint.sources ?? [];
+    const present = sources.filter((source) => mediaFiles.has(source.visual_path.toLowerCase())).map((source) => source.source_id);
+    const groups: string[][] = checkpoint.outputs?.exo_parts?.map((part: { source_ids: string[] }) => part.source_ids) ?? [sources.map((source) => source.source_id)];
+    if (!present.length || !groups.some((group) => group.length === present.length && group.every((id) => present.includes(id)))) throw new Error("The reviewed EXO must contain one complete exported part's recordings.");
+    const python = await currentPython();
+    if (!python.ready || !python.requirementsInstalled) throw new Error("Python runtime is not ready.");
+    const attempt = projects.begin(directory, "hosted-long-stream", null, parent.id);
+    try {
+      const imported = path.join(path.dirname(attempt.result.outputPath), "reviewed.exo");
+      fs.copyFileSync(reviewedExo, imported, fs.constants.COPYFILE_EXCL);
+      const applied = await applyReviewedEditorialCuts(paths(), python.resolvedPath, imported, (stream, text) => {
+        requireWindow().webContents.send("run:event", { type: stream, runId: attempt.result.id, text });
+      }, parent.outputPath);
+      return await projects.finish(directory, attempt.result.id, "complete", applied.outputPath);
+    } catch (error) { await projects.finish(directory, attempt.result.id, "failed"); throw error; }
+  });
+  handle("project:create", (_event, name: string, parent?: string) => projects.create(name, parent));
+  handle("project:open", (_event, directory: string) => projects.open(directory));
+  handle("project:update", (_event, update) => projects.update(update));
+  handle("project:default-directory", (_event, directory: string) => projects.setDefaultDirectory(directory));
   const currentLocale = () => loadAppState().settings.appLocale;
   const currentPython = () => getPythonRuntimeStatus(loadAppState().settings.pythonPath);
   const currentYtDlp = async () => {
@@ -295,6 +331,18 @@ function registerIpc(): void {
   handle("library:add-segment", (_event, assetId: string, scope: MediaAnalysisScope, description: string) => (
     requireMediaLibrary().addUserSegment(assetId, scope, description)
   ));
+  handle("source:acquire", async (_event, sourceUrl: string) => {
+    if (sourceAcquisition) throw new Error("A source recording is already downloading.");
+    const controller = new AbortController();
+    sourceAcquisition = controller;
+    try {
+      return await acquireSource(await currentYtDlp(), path.join(path.dirname(paths().managedMediaRoot), "SubUtl Sources"), sourceUrl, controller.signal,
+        (percent) => { if (!_event.sender.isDestroyed()) _event.sender.send("source:progress", percent); });
+    } finally {
+      sourceAcquisition = null;
+    }
+  });
+  handle("source:cancel", () => { sourceAcquisition?.abort(); });
   handle("library:web-probe", async (_event, sourceUrl: string) => {
     return requireMediaLibrary().probeWebAsset(await currentYtDlp(), sourceUrl);
   });
@@ -375,12 +423,20 @@ function registerIpc(): void {
       startedAt: new Date(startedAt).toISOString(),
     });
     try {
-      const result = await applyReviewedEditorialCuts(
-        paths(),
-        python.resolvedPath,
-        reviewProject,
-        (stream, text) => send({ type: stream, runId, text }),
-      );
+      const matched = projects.findReviewedResult(reviewProject);
+      const attempt = projects.begin(matched.project.directory, "hosted-long-stream", null, matched.result.id);
+      let result;
+      try {
+        const imported = path.join(path.dirname(attempt.result.outputPath), "reviewed.exo");
+        fs.copyFileSync(reviewProject, imported, fs.constants.COPYFILE_EXCL);
+        result = await applyReviewedEditorialCuts(paths(), python.resolvedPath, imported,
+          (stream, text) => send({ type: stream, runId, text }), matched.result.outputPath);
+        await projects.finish(matched.project.directory, attempt.result.id, "complete", result.outputPath);
+        result = { ...result, outputPath: attempt.result.deliverablePath!, reportPath: attempt.result.deliverablePath!.replace(/\.exo$/i, ".html") };
+      } catch (error) {
+        await projects.finish(matched.project.directory, attempt.result.id, "failed");
+        throw error;
+      }
       send({ type: "stdout", runId, text: `Narration report: ${result.reportPath}\nApplied EXO: ${result.outputPath}\n` });
       send({ type: "exit", runId, code: 0, signal: null, elapsedMs: Date.now() - startedAt, cancelled: false });
       return result;
@@ -400,6 +456,26 @@ function registerIpc(): void {
     if (!python.requirementsInstalled) {
       throw new Error(python.error || "Python runtime is missing required packages. Install Python requirements in Settings.");
     }
+    const resuming = Boolean(request.creatorResumeResultId);
+    const projectRun = request.creatorProjectDirectory
+      ? resuming ? projects.resume(request.creatorProjectDirectory, request.creatorResumeResultId) : projects.begin(request.creatorProjectDirectory, request.workflow, request.creatorRecordingId ?? null) : null;
+    try {
+    if (projectRun && resuming) {
+      request = { ...JSON.parse(fs.readFileSync(path.join(path.dirname(projectRun.result.sidecarDir), "request.json"), "utf8")), freshRun: false };
+      if (request.editorialProject && fs.existsSync(projectRun.result.outputPath)) request = { ...request, editorialCheckpoint: projectRun.result.outputPath, editorialCheckpointSources: request.editorialProject.sources, editorialProject: undefined, editorialRestartFrom: "compatible" };
+    }
+    if (projectRun && !resuming) {
+      request = { ...request, outputPath: projectRun.result.outputPath, deliverablePath: projectRun.result.deliverablePath, sidecarDir: projectRun.result.sidecarDir, sidecarsEnabled: true, transcriptArtifacts: request.freshRun || request.workflow === "hosted-long-stream" ? [] : projects.reusableTranscripts(projectRun.project, request.creatorRecordingId ?? null, request.audioTrack ?? 1) };
+    }
+    if (projectRun && !resuming && request.editorialProject && projects.seedEditorialResult(projectRun.project, projectRun.result)) {
+      request = { ...request, editorialCheckpoint: projectRun.result.outputPath, editorialCheckpointSources: request.editorialProject.sources, editorialProject: undefined, editorialRestartFrom: "compatible", transcriptArtifacts: [] };
+    }
+    if (projectRun && !resuming) {
+      const snapshot = path.join(path.dirname(projectRun.result.sidecarDir), "settings.json");
+      fs.copyFileSync(request.configPath, snapshot, fs.constants.COPYFILE_EXCL);
+      request = { ...request, configPath: snapshot };
+      fs.writeFileSync(path.join(path.dirname(projectRun.result.sidecarDir), "request.json"), JSON.stringify(request, null, 2), { flag: "wx" });
+    }
     if (request.editorialCheckpoint || request.editorialProject) {
       registerEditorialCheckpoint(paths(), request.editorialCheckpoint || request.outputPath);
       if (request.editorialProject?.titleOrGame) rememberEditorialGame(paths(), request.editorialProject.titleOrGame);
@@ -412,10 +488,17 @@ function registerIpc(): void {
           silencePreview?.setBrollCandidates(controlEvent.runId, controlEvent.candidates);
         }
       },
-      onFinish: (runId) => silencePreview?.cleanupRun(runId),
+      onFinish: async (runId, status) => {
+        silencePreview?.cleanupRun(runId);
+        if (projectRun) await projects.finish(projectRun.project.directory, projectRun.result.id, status);
+      },
     });
     silencePreview?.registerRun(result.runId, request);
-    return result;
+    return { ...result, project: projectRun?.project, outputPath: request.deliverablePath ?? request.outputPath, sidecarDir: request.sidecarDir };
+    } catch (error) {
+      if (projectRun) await projects.finish(projectRun.project.directory, projectRun.result.id, "failed");
+      throw error;
+    }
   });
   handle("run:cancel", (_event, runId: string, immediate = false) => cancelRun(runId, Boolean(immediate)));
   handle("shell:open-path", (_event, target: string) => shell.openPath(target));

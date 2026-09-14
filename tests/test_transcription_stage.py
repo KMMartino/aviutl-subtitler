@@ -10,45 +10,26 @@ from subtitler.errors import SubtitlerError
 from subtitler.glossary import GlossaryEntry
 from subtitler.profiling import PipelineProfiler
 from subtitler.run_artifacts import build_run_artifact_paths
-from subtitler.run_context import CliArguments, RunContext
 from subtitler.transcription_backend import (
     BackendDiagnostic,
     BackendTranscriptResult,
     TranscriptSegment,
     TranscriptToken,
 )
-from subtitler.transcription_stage import run_transcription_stage
+from subtitler.transcription_stage import TranscriptionStageRequest, run_transcription_stage
 
 
-def _context(root: Path, *, diagnostics: bool = True) -> RunContext:
+def _context(root: Path, *, diagnostics: bool = True) -> TranscriptionStageRequest:
     input_path = root / "input.mkv"
     input_path.touch()
     output_path = root / "output.exo"
-    args = CliArguments(
-        input=str(input_path),
-        workflow="local",
-        output=str(output_path),
-        config=None,
-        env_file=".env",
-        profile=diagnostics,
-        audio_track=None,
-        sidecar_dir=str(root / "sidecars"),
-        no_sidecars=False,
-        glossary=None,
-        no_glossary=False,
-    )
-    return RunContext(
-        args=args,
+    return TranscriptionStageRequest(
         input_path=input_path,
-        output_path=output_path,
-        config_path=root / "config.json",
+        glossary=[GlossaryEntry("用語")],
         config={
             "audio": {"track": 2},
             "backend": {"name": "existing-pipeline", "language": "ja"},
         },
-        env_path=root / ".env",
-        loaded_env_keys=[],
-        sidecars_enabled=True,
         diagnostics_enabled=diagnostics,
         artifacts=build_run_artifact_paths(
             input_path,
@@ -88,10 +69,6 @@ class TranscriptionStageTests(unittest.TestCase):
             ) as extract, mock.patch(
                 "subtitler.transcription_stage.load_mono_16k_wav", return_value=([0, 1, 2, 3], 2)
             ), mock.patch(
-                "subtitler.transcription_stage.find_glossary", return_value=root / "glossary.txt"
-            ) as find_glossary, mock.patch(
-                "subtitler.transcription_stage.load_glossary", return_value=[GlossaryEntry("用語")]
-            ), mock.patch(
                 "subtitler.transcription_stage.build_backend", return_value=backend
             ), contextlib.redirect_stdout(output):
                 outcome = run_transcription_stage(
@@ -99,7 +76,6 @@ class TranscriptionStageTests(unittest.TestCase):
                     root / "temp",
                     ApiUsageLedger(),
                     PipelineProfiler(False, None),
-                    project_dir=root / "project",
                 )
 
             request = backend.transcribe.call_args.args[0]
@@ -107,11 +83,10 @@ class TranscriptionStageTests(unittest.TestCase):
 
         self.assertFalse(outcome.cost_estimate_only)
         self.assertEqual(outcome.duration_sec, 2.0)
-        self.assertEqual(outcome.glossary, [GlossaryEntry("用語")])
+        self.assertEqual(request.glossary, [GlossaryEntry("用語")])
         self.assertEqual([item.text for item in outcome.aligned], ["字幕です"])
         self.assertEqual(request.duration_sec, 2.0)
         self.assertEqual(request.sample_rate, 2)
-        self.assertEqual(request.workflow, "local")
         self.assertEqual(request.profile_enabled, True)
         self.assertEqual(request.sidecar_base, context.artifacts.base)
         self.assertEqual(request.metadata["samples"], [0, 1, 2, 3])
@@ -122,12 +97,6 @@ class TranscriptionStageTests(unittest.TestCase):
             2,
             duration=0.0,
             progress_callback=mock.ANY,
-        )
-        find_glossary.assert_called_once_with(
-            input_path=context.input_path,
-            explicit=None,
-            disabled=False,
-            project_dir=root / "project",
         )
         self.assertIn("Extracting mono 16 kHz audio...", output.getvalue())
         self.assertIn("Audio extraction progress: 10%", output.getvalue())
@@ -150,8 +119,6 @@ class TranscriptionStageTests(unittest.TestCase):
             ), mock.patch(
                 "subtitler.transcription_stage.load_mono_16k_wav", return_value=([0], 16_000)
             ), mock.patch(
-                "subtitler.transcription_stage.load_glossary", return_value=[]
-            ), mock.patch(
                 "subtitler.transcription_stage.build_backend", return_value=backend
             ), mock.patch(
                 "subtitler.transcription_stage.handle_backend_result_status"
@@ -163,7 +130,6 @@ class TranscriptionStageTests(unittest.TestCase):
                     root / "temp",
                     ApiUsageLedger(),
                     PipelineProfiler(False, None),
-                    project_dir=root,
                 )
 
             self.assertTrue(outcome.cost_estimate_only)
@@ -183,8 +149,8 @@ class TranscriptionStageTests(unittest.TestCase):
             ), mock.patch(
                 "subtitler.transcription_stage.load_mono_16k_wav", return_value=([0], 16_000)
             ), mock.patch(
-                "subtitler.transcription_stage.load_glossary", return_value=[]
-            ), mock.patch("subtitler.transcription_stage.build_backend", return_value=backend):
+                "subtitler.transcription_stage.build_backend", return_value=backend
+            ):
                 with self.assertRaisesRegex(
                     SubtitlerError, "selected speech produced no usable transcript segments"
                 ):
@@ -193,7 +159,6 @@ class TranscriptionStageTests(unittest.TestCase):
                         root / "temp",
                         ApiUsageLedger(),
                         PipelineProfiler(False, None),
-                        project_dir=root,
                     )
             self.assertFalse(context.artifacts.aligned_text.exists())
 

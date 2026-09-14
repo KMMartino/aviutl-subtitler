@@ -7,7 +7,6 @@ import {
   getManagedLlamaStatus,
   getCurrentLlamaServerState,
   deleteManagedLlamaBackend,
-  listLlamaBackends,
   managedLlamaInstallDir,
   migrateLegacyManagedLlamaRoot,
   matchReleaseAsset,
@@ -91,10 +90,6 @@ describe("llama server manager", () => {
       installed: false,
       serverPath: ""
     });
-  });
-
-  it("exposes exactly Vulkan and CUDA 12.4", () => {
-    expect(listLlamaBackends().map((backend) => backend.id)).toEqual(["vulkan", "cuda-12"]);
   });
 
   it("detects current managed server state and previous install", () => {

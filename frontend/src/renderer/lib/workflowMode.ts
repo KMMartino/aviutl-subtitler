@@ -1,13 +1,13 @@
+import { workflowCatalog, workflows } from "../../shared/workflowCatalog";
 import type { WorkflowName } from "./types";
 
 export function workflowToMode(workflow: WorkflowName): { hosted: boolean; longStream: boolean } {
-  return {
-    hosted: workflow === "hosted" || workflow === "hosted-long-stream",
-    longStream: workflow === "local-long-stream" || workflow === "hosted-long-stream"
-  };
+  return { hosted: workflowCatalog[workflow].engine === "hosted", longStream: workflowCatalog[workflow].process === "editorial" };
 }
 
 export function modeToWorkflow(hosted: boolean, longStream: boolean): WorkflowName {
-  if (longStream) return "hosted-long-stream";
-  return hosted ? "hosted" : "local";
+  const process = longStream ? "editorial" : "subtitles";
+  const engine = hosted ? "hosted" : "local";
+  return workflows.find((name) => workflowCatalog[name].process === process && workflowCatalog[name].engine === engine)
+    ?? workflows.find((name) => workflowCatalog[name].process === process)!;
 }

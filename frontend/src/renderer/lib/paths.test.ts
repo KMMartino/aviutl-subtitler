@@ -5,7 +5,6 @@ describe("paths", () => {
   it("computes workflow output names", () => {
     expect(defaultOutputPath("C:\\media\\clip.mkv", "local")).toBe("C:\\media\\clip.exo");
     expect(defaultOutputPath("C:\\media\\clip.mkv", "hosted")).toBe("C:\\media\\clip-hosted.exo");
-    expect(defaultOutputPath("C:\\media\\clip.mkv", "local-long-stream")).toBe("C:\\media\\clip-long-stream-local.exo");
     expect(defaultOutputPath("C:\\media\\clip.mkv", "hosted-long-stream")).toBe("C:\\media\\clip-long-stream-hosted.exo");
   });
 

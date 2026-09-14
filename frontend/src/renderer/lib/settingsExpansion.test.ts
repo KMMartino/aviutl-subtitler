@@ -35,13 +35,12 @@ describe("settings expansion state", () => {
 
   it("shares expansion state between short and long variants", () => {
     expect(workflowFamily("local")).toBe("local");
-    expect(workflowFamily("local-long-stream")).toBe("local");
     expect(workflowFamily("hosted")).toBe("hosted");
     expect(workflowFamily("hosted-long-stream")).toBe("hosted");
 
     const initial = defaultSettingsExpansion({ pythonReady: true, ffmpegReady: true, ytDlpReady: true, alignmentInstalled: true, envExists: true, serverExists: true });
     const states: SettingsExpansionByFamily = {};
-    const localFamily = workflowFamily("local-long-stream");
+    const localFamily = workflowFamily("local");
     states[localFamily] = updateSettingsExpansion(states[localFamily] ?? initial, "python");
 
     expect(states[workflowFamily("local")]?.python).toBe(true);

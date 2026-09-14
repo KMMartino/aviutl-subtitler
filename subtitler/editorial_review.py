@@ -6,12 +6,15 @@ import json
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from dataclasses import asdict, dataclass
 from html import escape
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .editorial_project import load_editorial_checkpoint
+from .api_usage import ApiUsageLedger
+from .operation_store import OperationStore
 from .errors import SubtitlerError
 from .exo import encode_text_for_exo
 
@@ -90,6 +93,8 @@ def apply_reviewed_editorial_cuts(
     checkpoint_path: Path | None = None,
     output_path: Path | None = None,
     narration_provider: NarrationReviewProvider | None = None,
+    provider_parameters: dict[str, Any] | None = None,
+    api_usage: ApiUsageLedger | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Read exact ``[CUT]`` EXO markers and compact the reviewed project itself."""
@@ -113,6 +118,8 @@ def apply_reviewed_editorial_cuts(
         "human_information",
     }:
         raise SubtitlerError("The matching checkpoint does not contain reviewed cut guides")
+    from .editorial_export_parts import project_for_review
+    project = project_for_review(project, text)
     fps = _exo_fps(text)
     narration_markers = _narration_markers(text)
     marker_frames = _cut_marker_frames(text)
@@ -141,6 +148,11 @@ def apply_reviewed_editorial_cuts(
         fps=fps,
         provider=narration_provider,
         progress=progress,
+        operations=OperationStore(review_project.with_suffix(".review-operations"), project["project_id"],
+                                  api_usage if api_usage is not None else ApiUsageLedger())
+        if narration_provider is None or provider_parameters is not None else None,
+        provider_parameters=provider_parameters,
+
     )
     report = output.with_suffix(".html")
     _write_narration_review_html(
@@ -330,6 +342,8 @@ def _build_narration_reviews(
     fps: float,
     provider: NarrationReviewProvider | None,
     progress: Callable[[str], None] | None = None,
+    operations: OperationStore | None = None,
+    provider_parameters: dict[str, Any] | None = None,
 ) -> dict[int, _NarrationReview]:
     reviews: dict[int, _NarrationReview] = {}
     for index, marker in enumerate(narration_markers, start=1):
@@ -337,13 +351,27 @@ def _build_narration_reviews(
             progress,
             f"Preparing narration brief {index}/{len(narration_markers)}…",
         )
-        reviews[marker.object_index] = _review_narration_marker(
-            marker,
-            project=project,
-            fps=fps,
-            provider=provider,
-        )
+        def produce():
+            return _review_narration_marker(marker, project=project, fps=fps, provider=provider)
+        if operations is None:
+            reviews[marker.object_index] = produce()
+        else:
+            inputs = {
+                "range": (marker.start, marker.end), "text": marker.text, "fps": fps,
+                "context": _narration_context(marker, project=project, fps=fps),
+                "candidates": [asdict(item) for item in _footage_candidates(marker, project=project, fps=fps)],
+                "locale": project.get("output_locale"), "provider": provider_parameters,
+            }
+            reviews[marker.object_index] = operations.execute("review_narration", 2, inputs,
+                lambda: asdict(produce()), _decode_narration_review)
     return reviews
+
+
+def _decode_narration_review(value: Any) -> _NarrationReview:
+    return _NarrationReview(
+        tuple((text, tuple(evidence)) for text, evidence in value["facts"]),
+        tuple(_FootageCandidate(**item) for item in value["references"]),
+    )
 
 
 def _review_narration_marker(
@@ -442,8 +470,13 @@ def _footage_candidates(
     ):
         source = source_by_id.get(source_id, {})
         result = source.get("result") if isinstance(source.get("result"), dict) else {}
-        graph = result.get("event_graph") if isinstance(result.get("event_graph"), dict) else {}
-        for item in graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []:
+        semantic = source.get('stages', {}).get('semantic_spans', {}).get('output') or result
+        graph = semantic.get("event_graph") if isinstance(semantic.get("event_graph"), dict) else {}
+        catalog = project.get('editorial_map', {}).get('editor_recommendations', {}).get('catalog', [])
+        collected = next((row for row in catalog if row['source_id'] == source_id), {})
+        nodes = [{**state, 'observed_label': ' / '.join(state.get('observations', []))}
+                 for state in collected.get('states', [])] or graph.get('nodes', [])
+        for item in nodes:
             if not isinstance(item, dict) or not _timed_item_overlaps(
                 item, local_start, local_end
             ):
@@ -491,7 +524,7 @@ def _footage_candidates(
                         (max(local_start, int(item.get("start_ms", 0))) + min(local_end, int(item.get("end_ms", 0)))) // 2,
                     )
                 )
-    return candidates[:240]
+    return _evenly_spaced_candidates(candidates, limit=240)
 
 
 def _evenly_spaced_candidates(
@@ -518,42 +551,39 @@ def _narration_context(
         if isinstance(item, dict)
     }
     activities: list[dict[str, Any]] = []
+    states: list[dict[str, Any]] = []
+    speech: list[dict[str, Any]] = []
     topics: list[dict[str, Any]] = []
+    catalog = project.get('editorial_map', {}).get('editor_recommendations', {}).get('catalog', [])
     for source_id, local_start, local_end, _ in intersections:
-        result = source_by_id.get(source_id, {}).get("result", {})
-        if not isinstance(result, dict):
-            continue
-        for item in result.get("activity_episodes", []):
-            if isinstance(item, dict) and _timed_item_overlaps(
-                item, local_start, local_end
-            ):
-                activities.append(
-                    {
-                        "start_ms": item.get("start_ms"),
-                        "end_ms": item.get("end_ms"),
-                        "label": item.get("label"),
-                        "summary": item.get("summary"),
-                    }
-                )
-        for item in result.get("semantic_spans", []):
-            if isinstance(item, dict) and _timed_item_overlaps(
-                item, local_start, local_end
-            ):
-                topics.append(
-                    {
-                        "start_ms": item.get("start_ms"),
-                        "end_ms": item.get("end_ms"),
-                        "label": item.get("label"),
-                        "summary": item.get("summary"),
-                    }
-                )
+        source = source_by_id.get(source_id, {})
+        result = source.get('result') or {}
+        semantic = source.get('stages', {}).get('semantic_spans', {}).get('output') or result
+        collected = next((row for row in catalog if row['source_id'] == source_id), {})
+        for key, fallback, destination in (
+            ('activities', semantic.get('activity_episodes', []), activities),
+            ('states', [], states),
+            ('speech', result.get('utterance_groups', []), speech),
+        ):
+            destination.extend({**row, 'source_id': source_id} for row in collected.get(key, fallback)
+                               if _timed_item_overlaps(row, local_start, local_end))
+        topics.extend(row for row in semantic.get('semantic_spans', [])
+                      if _timed_item_overlaps(row, local_start, local_end))
+
+    def bounded(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        return rows if len(rows) <= limit else [rows[i * (len(rows) - 1) // (limit - 1)] for i in range(limit)]
+
     return {
         "title_or_game": project.get("title_or_game"),
         "objective": project.get("objective"),
-        "activities": activities[:80],
-        "spoken_topics": topics[:120],
+        "activities": bounded(activities, 80),
+        "states": bounded(states, 120),
+        "spoken_evidence": bounded(speech, 120),
+        "spoken_topics": bounded(topics, 120),
+        "context_is_sampled": len(activities) > 80 or max(len(states), len(speech), len(topics)) > 120,
         "related_threads": _overlapping_thread_lines(project, intersections)[:12],
     }
+
 
 
 def _narration_direction(value: str) -> str:
@@ -889,6 +919,7 @@ def _compact_reviewed_exo(
     if length_match is None:
         raise SubtitlerError("Reviewed EXO is missing its timeline length")
     original_length = int(length_match.group(1))
+    fps = _exo_fps(text)
     removed_frames = sum(end - start + 1 for start, end in cuts)
     header = re.sub(
         r"(?m)^length=\d+$",
@@ -899,6 +930,21 @@ def _compact_reviewed_exo(
     next_index = 0
     group_ids: dict[tuple[int, int], int] = {}
     next_group = 1
+    # EXO chain=1 joins an object's midpoint to its preceding object on the
+    # same layer. A removed predecessor must not make it join unrelated media.
+    chain_predecessors: dict[int, bool] = {}
+    layers: dict[int, list[tuple[int, int, int]]] = {}
+    for item in _OBJECT.finditer(text):
+        body = item.group(2)
+        layers.setdefault(_integer_field(body, "layer"), []).append(
+            (_integer_field(body, "start"), _integer_field(body, "end"), int(item.group(1)))
+        )
+    for entries in layers.values():
+        previous_end = 0
+        for start, end, index in sorted(entries):
+            chain_predecessors[index] = previous_end == start - 1 and previous_end > 0
+            remaining = _subtract_frame_ranges(start, end, cuts)
+            previous_end = remaining[-1][1] if remaining else 0
     for match in _OBJECT.finditer(text):
         old_index = int(match.group(1))
         body = match.group(2).rstrip("\n")
@@ -909,22 +955,24 @@ def _compact_reviewed_exo(
         if start <= 0 or end < start:
             continue
         old_group = _integer_field(body, "group")
-        for piece_ordinal, (piece_start, piece_end) in enumerate(
-            _subtract_frame_ranges(start, end, cuts)
-        ):
+        for piece_start, piece_end in _subtract_frame_ranges(start, end, cuts):
             shifted_start = piece_start - _frames_removed_before(piece_start, cuts)
             shifted_end = piece_end - _frames_removed_before(piece_end, cuts)
             piece = re.sub(r"(?m)^start=\d+$", f"start={shifted_start}", body, count=1)
             piece = re.sub(r"(?m)^end=\d+$", f"end={shifted_end}", piece, count=1)
+            if piece_start != start or not chain_predecessors.get(old_index):
+                piece = re.sub(r"(?m)^chain=1\n?", "", piece, count=1)
             if old_group > 0:
-                group_key = (old_group, piece_ordinal)
+                # A grouped overlay may start later than its video/audio peers.
+                # Local piece ordinals would attach it to the wrong surviving group.
+                group_key = (old_group, sum(cut_end < piece_start for _, cut_end in cuts))
                 if group_key not in group_ids:
                     group_ids[group_key] = next_group
                     next_group += 1
                 piece = re.sub(
                     r"(?m)^group=\d+$", f"group={group_ids[group_key]}", piece, count=1
                 )
-            piece = _advance_media_source(piece, piece_start - start)
+            piece = _advance_media_source(piece, piece_start - start, fps)
             piece = re.sub(
                 rf"(?m)^\[{old_index}(?P<suffix>(?:\.\d+)?)\]$",
                 lambda found: f"[{next_index}{found.group('suffix')}]",
@@ -980,14 +1028,30 @@ def _frames_removed_before(frame: int, cuts: list[tuple[int, int]]) -> int:
     )
 
 
-def _advance_media_source(body: str, frame_delta: int) -> str:
-    if frame_delta <= 0 or "_name=動画ファイル" not in body:
+def _advance_media_source(body: str, frame_delta: int, fps: float) -> str:
+    """Advance each source filter in its own units, leaving linked audio to video."""
+    if frame_delta <= 0:
         return body
-    match = re.search(r"(?m)^再生位置=(-?\d+)$", body)
-    if match is None:
-        return body
-    advanced = int(match.group(1)) + frame_delta
-    return re.sub(r"(?m)^再生位置=-?\d+$", f"再生位置={advanced}", body, count=1)
+    sections = re.split(r"(?m)(?=^\[\d+\.\d+\]$)", body)
+    for index, section in enumerate(sections):
+        video = re.search(r"(?m)^_name=動画ファイル$", section) is not None
+        audio = re.search(r"(?m)^_name=音声ファイル$", section) is not None
+        if not (video or audio) or audio and re.search(r"(?m)^動画ファイルと連携=1$", section):
+            continue
+        position = re.search(r"(?m)^再生位置=([^\n]+)$", section)
+        speed = re.search(r"(?m)^再生速度=([^\n]+)$", section)
+        if position is None:
+            raise SubtitlerError("Cannot split an EXO media filter without its source playback position")
+        try:
+            rate = Decimal(speed.group(1)) / 100 if speed else Decimal(1)
+            advanced = Decimal(position.group(1)) + Decimal(frame_delta) * rate / (Decimal(1) if video else Decimal(str(fps)))
+            if not advanced.is_finite():
+                raise InvalidOperation
+        except InvalidOperation as exc:
+            raise SubtitlerError("Cannot safely split EXO media with animated or invalid playback position/speed") from exc
+        value = str(advanced.quantize(Decimal(1), rounding=ROUND_HALF_UP)) if video else format(advanced, ".6f")
+        sections[index] = section[:position.start(1)] + value + section[position.end(1):]
+    return "".join(sections)
 
 
 def _decode_exo_text(value: str) -> str:

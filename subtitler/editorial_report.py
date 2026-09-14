@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .editorial_presentation import (
     PresentedEditorialItem,
@@ -29,6 +30,14 @@ def write_editorial_html(path: Path, artifact: dict[str, Any]) -> None:
         else presented_editorial_items(artifact)
     )
     screenshots = _write_editorial_screenshots(path, presented, artifact)
+    from .editorial_recommendation_view import write_recommendation_frames
+    screenshots.update(write_recommendation_frames(path, artifact))
+    adaptive_report = artifact.get("editorial_map", {}).get("adaptive_report_path")
+    if adaptive_report and Path(adaptive_report).is_file():
+        localized = path.with_suffix(".cuts.html")
+        if Path(adaptive_report).resolve() != localized.resolve():
+            shutil.copyfile(adaptive_report, localized)
+        screenshots["adaptive_report"] = quote(localized.name)
     path.write_text(render_editorial_html(artifact, screenshots), encoding="utf-8")
 
 
@@ -162,6 +171,9 @@ def _render_human_information_html(
     artifact: dict[str, Any], screenshots: dict[str, str], locale: str
 ) -> str:
     editorial_map = artifact.get("editorial_map", {})
+    if 'editor_recommendations' in editorial_map:
+        from .editorial_recommendation_view import render_recommendation_page
+        return render_recommendation_page(artifact, screenshots, locale)
     sources = sorted(artifact["sources"], key=lambda item: item["order"])
     total_ms = sum(int(item.get("duration_ms", 0)) for item in sources)
     phase_cards = "".join(
@@ -175,7 +187,7 @@ def _render_human_information_html(
         if isinstance(item, dict)
     )
     narration_cards = "".join(
-        f'''<article class="card"><div class="source-head"><h3>{_tr(locale,"Narration possibility","ナレーション候補")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><p>{_escape(item.get("instruction") or _tr(locale,"Use the reviewed range to generate a factual narration brief.","採用した範囲から事実ベースのナレーション資料を作成します。"))}</p></article>'''
+        f'''<article class="card"><div class="source-head"><h3>{_tr(locale,"Narration possibility","ナレーション候補")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div>{_narration_briefs(item, {}, locale)}</article>'''
         for item in editorial_map.get("final_actions", [])
         if isinstance(item, dict)
         and str(item.get("action_type") or "")
@@ -184,9 +196,17 @@ def _render_human_information_html(
     source_cards = "".join(_source_card(source, locale) for source in sources)
     selected_count = len(editorial_map.get("emphasized_phrases", []))
     cut_count = len(editorial_map.get("confirmed_cuts", []))
-    direction = editorial_map.get("progression_summary") or editorial_map.get(
-        "editorial_direction_summary", ""
-    )
+    adaptive = editorial_map.get("cutting_mode") == "adaptive"
+    adaptive_link = ""
+    if adaptive and editorial_map.get("adaptive_report_path"):
+        url = screenshots.get("adaptive_report") or Path(editorial_map["adaptive_report_path"]).resolve().as_uri()
+        adaptive_link = f'<p><a href="{html.escape(url, quote=True)}">Adaptive decisions and preserved uncertainties</a></p>'
+    direction = editorial_map.get("editorial_direction_summary") or editorial_map.get("progression_summary", "")
+    from .editorial_recommendation_view import recommendation_html
+    recommendations = recommendation_html(editorial_map['editor_recommendations'], screenshots) if 'editor_recommendations' in editorial_map else ''
+    legacy_threads = '' if recommendations else f'''<section><h2>{_tr(locale,"Story threads","ストーリーのつながり")}</h2><div class="cards">{thread_cards or f'<p class="muted">{_tr(locale,"No long-horizon thread was established.","長期的なつながりは特定されませんでした。")}</p>'}</div></section>'''
+    legacy_phases = '' if recommendations else f'''<section><h2>{_tr(locale,"Progression phases","展開フェーズ")}</h2><div class="cards">{phase_cards or f'<p class="muted">{_tr(locale,"No project-wide phases have been generated yet.","プロジェクト全体の展開はまだ生成されていません。")}</p>'}</div></section>'''
+    legacy_narration = '' if recommendations else f'''<section><h2>{_tr(locale,"Narration possibilities","ナレーション候補")}</h2><div class="cards">{narration_cards or f'<p class="muted">{_tr(locale,"No narration span is suggested.","ナレーション範囲の提案はありません。")}</p>'}</div></section>'''
     return f'''<!doctype html>
 <html lang="{locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{_escape(artifact["title_or_game"])} — {_tr(locale,"Editing information dashboard","編集情報ダッシュボード")}</title>
@@ -199,20 +219,23 @@ h1,h2,h3,h4 {{ line-height:1.25 }} .subtitle,.muted {{ color:#9da8b5 }}
 .sources,.cards {{ display:grid;gap:14px }} .source-head {{ display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap }}
 .badge {{ border-radius:999px;background:#293544;padding:4px 10px;font-size:.82rem }}
 .thread {{ border-left:4px solid #55ccff }}
+details {{ margin:12px 0; overflow-wrap:anywhere }} summary {{ cursor:pointer }} details details {{ margin-left:16px;border-top:1px solid #303946;padding:12px }}
 @media(prefers-color-scheme:light) {{ body {{ background:#f5f7fa;color:#18202a }} .metric,.card {{ background:#fff;border-color:#d9e0e8 }} .muted,.subtitle {{ color:#596776 }} }}
 </style></head><body><main>
 <header><h1>{_escape(artifact["title_or_game"])}</h1><p class="subtitle">{_escape(artifact["objective"])}</p></header>
 <section class="summary">
 <div class="metric">{_tr(locale,"Source duration","素材時間")}<strong>{_duration(total_ms,locale)}</strong></div>
 <div class="metric">{_tr(locale,"Selected display subtitles","選択表示字幕")}<strong>{selected_count}</strong></div>
-<div class="metric">{_tr(locale,"Voice-free review markers","無音確認マーカー")}<strong>{cut_count}</strong></div>
+<div class="metric">{_tr(locale,"Adaptive cut markers" if adaptive else "Voice-free review markers","適応カットマーカー" if adaptive else "無音確認マーカー")}<strong>{cut_count}</strong></div>
 <div class="metric">{_tr(locale,"End-to-end hosted API cost","処理全体のホスト API 費用")}<strong>${float(artifact.get("run_provenance",{}).get("actual_cost_usd",0)):.2f}</strong></div>
 </section>
 <section><h2>{_tr(locale,"Factual progression","事実ベースの進行")}</h2><article class="card"><p>{_escape(direction)}</p></article></section>
-<section><h2>{_tr(locale,"Story threads","ストーリーのつながり")}</h2><div class="cards">{thread_cards or f'<p class="muted">{_tr(locale,"No long-horizon thread was established.","長期的なつながりは特定されませんでした。")}</p>'}</div></section>
-<section><h2>{_tr(locale,"Progression phases","展開フェーズ")}</h2><div class="cards">{phase_cards or f'<p class="muted">{_tr(locale,"No project-wide phases have been generated yet.","プロジェクト全体の展開はまだ生成されていません。")}</p>'}</div></section>
-<section><h2>{_tr(locale,"Narration possibilities","ナレーション候補")}</h2><div class="cards">{narration_cards or f'<p class="muted">{_tr(locale,"No narration span is suggested.","ナレーション範囲の提案はありません。")}</p>'}</div></section>
-<section><h2>{_tr(locale,"Cut-marker workflow","カットマーカーの使い方")}</h2><article class="card"><p>{_tr(locale,"Every initial [CUT] object marks a voice-free gap of at least two seconds after speech handles. Initial cut markers remain visible even underneath narration possibilities. Move, resize, duplicate, or delete markers in AviUtl; reviewed markers may be shorter, and only narration objects retained in the reviewed EXO invalidate overlapping cuts when reapplied.","初期 [CUT] オブジェクトは、発話前後の余白を除いて2秒以上の音声未検出区間を示します。初期カットマーカーはナレーション候補の下にも残ります。AviUtlでマーカーを移動・長さ変更・複製・削除でき、確認後のマーカーは2秒未満でも有効です。再適用時に確認済みEXOへ残されたナレーションだけが重複カットを無効にします。")}</p></article></section>
+{legacy_threads}
+{legacy_phases}
+{legacy_narration}
+{adaptive_link}
+{recommendations}
+<section><h2>{_tr(locale,"Cut-marker workflow","カットマーカーの使い方")}</h2><article class="card"><p>{_tr(locale,"Adaptive [CUT] objects may remove spoken or quiet material. Review the linked decisions; unchanged narration suggestions remain available. Reviewed EXO markers remain authoritative." if adaptive else "Every initial [CUT] object marks a detected speech gap that meets the configured minimum after fixed or acoustic edge protection. Recommendations never change cut markers. Move, resize, duplicate, or delete markers in AviUtl, then reprocess the EXO to apply them. Existing manually retained narration objects still protect overlapping ranges.","適応 [CUT] オブジェクトは、発話のある区間も静かな区間も削除候補にします。リンク先で判断理由を確認してください。既存のナレーション候補は引き続き利用でき、確認済みEXOのマーカーが優先されます。" if adaptive else "初期 [CUT] は、固定または音量に応じた余白を除き、設定した最小時間を満たす発話未検出区間です。編集提案はマーカーを変更しません。AviUtlで移動・長さ変更・複製・削除し、EXOを再処理して適用します。手動で残したナレーションは重複区間を保護します。")}</p></article></section>
 <section><h2>{_tr(locale,"Sources","素材")}</h2><div class="sources">{source_cards}</div></section>
 </main></body></html>'''
 
@@ -282,7 +305,7 @@ def _render_cutting_assistant_html(
             f"<li>{_escape(value)}</li>" for value in guidance.get("representative_visuals", [])
         )
         narration_cards.append(
-            f'''<article class="card narration"><div class="source-head"><h3>{_tr(locale, "Narration brief", "ナレーション案")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><div class="narration-grid">{screenshot}<div><h4>{_escape(guidance.get("purpose") or item.get("instruction"))}</h4><p>{_escape(guidance.get("vision"))}</p>{f"<ul>{points}</ul>" if points else ""}{f'<h4>{_tr(locale, "Suggested source visuals", "使用する素材映像の候補")}</h4><ul>{visuals}</ul>' if visuals else ""}</div></div></article>'''
+            f'''<article class="card narration"><div class="source-head"><h3>{_tr(locale, "Narration brief", "ナレーション案")}</h3><span class="badge">{_timecode(item.get("start_ms"))}–{_timecode(item.get("end_ms"))}</span></div><div class="narration-grid">{screenshot}<div><h4>{_escape(guidance.get("purpose"))}</h4><p><strong>{_tr(locale, "For the editor", "編集者向け")}</strong>: {_escape(item.get("instruction"))}</p><p><strong>{_tr(locale, "For the narrator", "ナレーター向け")}</strong>: {_escape(guidance.get("narrator_direction"))}</p><p><strong>{_tr(locale, "Added value", "追加する価値")}</strong>: {_escape(guidance.get("added_value"))}</p><details><summary>{_tr(locale, "Editor evidence notes", "編集者用の根拠メモ")}</summary><p>{_escape(guidance.get("vision"))}</p><p>{_escape("; ".join(guidance.get("evidence_notes", [])))}</p></details>{f"<ul>{points}</ul>" if points else ""}{f'<h4>{_tr(locale, "Suggested source visuals", "使用する素材映像の候補")}</h4><ul>{visuals}</ul>' if visuals else ""}</div></div></article>'''
         )
     direction = editorial_map.get("editorial_direction_summary") or ""
     source_cards = "".join(_source_card(source, locale) for source in sources)
@@ -558,8 +581,13 @@ def _narration_briefs(
             else ""
         )
         return (
-            f'<div class="narration-brief"><strong>{_tr(locale, "Narration vision", "ナレーションの狙い")}: '
-            f'{_escape(guidance.get("purpose"))}</strong><p>{_escape(guidance.get("vision"))}</p>'
+            f'<div class="narration-brief"><strong>{_tr(locale, "Narration purpose", "ナレーションの目的")}: '
+            f'{_escape(guidance.get("purpose"))}</strong>'
+            f'<p><strong>{_tr(locale, "For the editor", "編集者向け")}</strong>: {_escape(item.get("instruction"))}</p>'
+            f'<p><strong>{_tr(locale, "For the narrator", "ナレーター向け")}</strong>: {_escape(guidance.get("narrator_direction"))}</p>'
+            f'<p><strong>{_tr(locale, "Added value", "追加する価値")}</strong>: {_escape(guidance.get("added_value"))}</p>'
+            f'<details><summary>{_tr(locale, "Editor evidence notes", "編集者用の根拠メモ")}</summary><p>{_escape(guidance.get("vision"))}</p>'
+            f'<p>{_escape("; ".join(guidance.get("evidence_notes", [])))}</p></details>'
             f'{f"<ul>{bullets}</ul>" if bullets else ""}'
             f"{visuals_html}</div>"
         )

@@ -25,6 +25,7 @@ export function updatePackageVersion(packageJson, version) {
 function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
+  const check = args.includes("--check");
   const explicitTag = args.find((argument) => !argument.startsWith("--"));
   const tag =
     explicitTag ?? process.env.RELEASE_TAG ?? process.env.GITHUB_REF_NAME;
@@ -33,8 +34,26 @@ function main() {
   const packagePath = path.resolve(scriptDir, "..", "package.json");
   const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
   const updated = updatePackageVersion(packageJson, version);
+  const lockPath = path.resolve(scriptDir, "..", "package-lock.json");
+  const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  if (check) {
+    if (
+      [packageJson.version, lock.version, lock.packages[""].version].some(
+        (value) => value !== version,
+      )
+    ) {
+      throw new Error(
+        `Commit package.json and package-lock.json at ${version} before tagging.`,
+      );
+    }
+    process.stdout.write(`Release metadata matches ${tag}\n`);
+    return;
+  }
+  lock.version = version;
+  lock.packages[""].version = version;
 
   if (!dryRun) {
+    fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, "utf8");
     fs.writeFileSync(
       packagePath,
       `${JSON.stringify(updated, null, 2)}\n`,

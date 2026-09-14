@@ -1,4 +1,4 @@
-"""VAD-derived silence cutting, review transport, and timeline remapping."""
+"""VAD-derived silence cutting and source/output timeline remapping."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import json
 import math
 import os
 import subprocess
-import sys
 import tempfile
 import uuid
 from dataclasses import asdict, dataclass
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
 from .errors import SubtitlerError
+from .speech_gaps import SpeechGapPolicy, find_speech_gaps
 from .models import ExoMarker, ExoMediaPlan, ExoMediaSegment, Subtitle
 from .transcription_backend import RawVadSpeechInterval
 
@@ -25,7 +25,6 @@ TRAILING_PROTECTION_SEC = 0.2
 NEXT_SPEECH_LEAD_IN_SEC = 0.2
 MIN_PROPOSED_CUT_SEC = 0.5
 POLICY_VERSION = 2
-FRONTEND_EVENT_PREFIX = "@@SUBUTL_EVENT@@"
 MARK_AND_REJECT_TEXT = "無音カット要確認"
 
 CutSilenceMode = Literal["off", "automatic", "review"]
@@ -131,81 +130,12 @@ class SilenceCutOutcome:
 
 
 def build_cut_candidates(raw_intervals: Sequence[RawVadSpeechInterval]) -> list[SilenceCutCandidate]:
-    ordered = sorted(
-        (item for item in raw_intervals if item.end > item.start),
-        key=lambda item: (item.start, item.end),
-    )
-    if len(ordered) < 2:
-        return []
-    merged: list[RawVadSpeechInterval] = []
-    for item in ordered:
-        if merged and item.start <= merged[-1].end:
-            previous = merged[-1]
-            merged[-1] = RawVadSpeechInterval(previous.start, max(previous.end, item.end))
-        else:
-            merged.append(item)
-    candidates: list[SilenceCutCandidate] = []
-    for previous, following in zip(merged, merged[1:]):
-        raw_gap = following.start - previous.end
-        if raw_gap < MIN_RAW_SILENCE_SEC:
-            continue
-        cut_start = previous.end + TRAILING_PROTECTION_SEC
-        cut_end = following.start - NEXT_SPEECH_LEAD_IN_SEC
-        if cut_end - cut_start + 1e-9 < MIN_PROPOSED_CUT_SEC:
-            continue
-        candidates.append(
-            SilenceCutCandidate(
-                id=f"silence-{len(candidates) + 1:04d}",
-                silence_start=previous.end,
-                silence_end=following.start,
-                cut_start=cut_start,
-                cut_end=cut_end,
-            )
-        )
-    return candidates
+    policy = SpeechGapPolicy(NEXT_SPEECH_LEAD_IN_SEC, TRAILING_PROTECTION_SEC,
+                             MIN_RAW_SILENCE_SEC, MIN_PROPOSED_CUT_SEC)
+    return [SilenceCutCandidate(f"silence-{index:04d}", gap.silence_start, gap.silence_end,
+                               gap.cut_start, gap.cut_end)
+            for index, gap in enumerate(find_speech_gaps(((item.start, item.end) for item in raw_intervals), policy), 1)]
 
-
-def emit_frontend_event(event_type: str, **payload: Any) -> None:
-    print(
-        FRONTEND_EVENT_PREFIX + json.dumps({"type": event_type, **payload}, ensure_ascii=False, separators=(",", ":")),
-        flush=True,
-    )
-
-
-def request_review(candidates: Sequence[SilenceCutCandidate], frontend_protocol: str | None) -> SilenceReviewResult:
-    if frontend_protocol != "stdio-v1":
-        raise SubtitlerError("Cut silence review mode requires the SubUtl desktop review interface")
-    review_id = str(uuid.uuid4())
-    emit_frontend_event(
-        "silence-review-required",
-        reviewId=review_id,
-        candidates=[candidate.to_frontend() for candidate in candidates],
-    )
-    line = sys.stdin.readline()
-    if not line:
-        raise SubtitlerError("Cut silence review ended before decisions were submitted")
-    try:
-        value = json.loads(line)
-    except json.JSONDecodeError as exc:
-        raise SubtitlerError("Cut silence review returned invalid JSON") from exc
-    if not isinstance(value, dict) or value.get("type") != "silence-review-result" or value.get("reviewId") != review_id:
-        raise SubtitlerError("Cut silence review response did not match the active review")
-    raw_decisions = value.get("decisions")
-    if not isinstance(raw_decisions, list):
-        raise SubtitlerError("Cut silence review response is missing decisions")
-    decisions: dict[str, SilenceCutDecision] = {}
-    valid_ids = {candidate.id for candidate in candidates}
-    valid_decisions = {"accept_cut", "reject_cut", "mark_and_reject"}
-    for item in raw_decisions:
-        if not isinstance(item, dict) or item.get("candidateId") not in valid_ids or item.get("decision") not in valid_decisions:
-            raise SubtitlerError("Cut silence review response contains an invalid decision")
-        candidate_id = str(item["candidateId"])
-        if candidate_id in decisions:
-            raise SubtitlerError("Cut silence review response contains a duplicate candidate")
-        decisions[candidate_id] = item["decision"]
-    if set(decisions) != valid_ids:
-        raise SubtitlerError("Cut silence review requires a decision for every candidate")
-    return SilenceReviewResult(review_id, decisions)
 
 
 def merge_cut_ranges(ranges: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -478,9 +408,9 @@ def execute_silence_cut(
     input_path: Path,
     exo_path: Path,
     encoder_preset: str | None,
-    frontend_protocol: str | None,
     render_cut_video: bool = False,
     project_fps: int = 60,
+    review_result: SilenceReviewResult | None = None,
 ) -> SilenceCutOutcome:
     if mode == "off":
         return SilenceCutOutcome(
@@ -493,7 +423,11 @@ def execute_silence_cut(
     if mode == "automatic":
         decisions = {candidate.id: "accept_cut" for candidate in candidates}
     else:
-        decisions = request_review(candidates, frontend_protocol).decisions if candidates else {}
+        decisions = dict(review_result.decisions) if review_result is not None else {}
+        if set(decisions) != {candidate.id for candidate in candidates} or any(
+            decision not in ("accept_cut", "reject_cut", "mark_and_reject") for decision in decisions.values()
+        ):
+            raise SubtitlerError("Cut silence requires valid review decisions for every candidate")
     requested = merge_cut_ranges(
         (candidate.cut_start, candidate.cut_end)
         for candidate in candidates

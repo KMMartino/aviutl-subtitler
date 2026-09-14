@@ -5,6 +5,33 @@ from subtitler.errors import SubtitlerError
 
 
 class WorkflowConfigValidationTests(unittest.TestCase):
+    def test_invalid_single_field_configs(self):
+        cases = [
+            ('local', 'backend', 'name', 'old-pipeline', False),
+            ('local', 'backend', 'transcriber', 'gemini', False),
+            ('local', 'backend', 'model', '', False),
+            ('local', 'backend', 'model', 'C:/definitely/missing/model.gguf', True),
+            ('hosted', 'backend', 'transcription_model', '', False),
+            ('hosted', 'backend', 'transcription_model', 'gemini-something-else', False),
+            ('local', 'workflow', 'mode', 'preview', False),
+            ('local', 'cleanup', 'backend', 'legacy', False),
+        ]
+        for workflow, section, field, value, check_paths in cases:
+            with self.subTest(workflow=workflow, section=section, field=field, value=value):
+                config = load_workflow_config(workflow)
+                config[section][field] = value
+                with self.assertRaises(SubtitlerError):
+                    validate_workflow_config(config, workflow=workflow, check_paths=check_paths)
+
+    def test_workflows_allow_subtitles_without_model_cleanup(self):
+        for workflow in WORKFLOWS:
+            with self.subTest(workflow=workflow):
+                config = load_workflow_config(workflow)
+                config['cleanup']['backend'] = 'none'
+                config['cleanup']['api_model'] = ''
+                config['cleanup']['model'] = ''
+                validate_workflow_config(config, workflow=workflow, check_paths=False)
+
     def assert_invalid_field(self, section, field, value, *, workflow="hosted"):
         config = load_workflow_config(workflow)
         config[section][field] = value
@@ -14,42 +41,11 @@ class WorkflowConfigValidationTests(unittest.TestCase):
     def test_all_default_configs_validate_without_path_checks(self):
         for workflow in WORKFLOWS:
             with self.subTest(workflow=workflow):
-                validate_workflow_config(load_workflow_config(workflow), workflow=workflow, check_paths=False)
+                config = load_workflow_config(workflow)
+                validate_workflow_config(config, workflow=workflow, check_paths=False)
+                self.assertEqual(config["workflow"]["name"], workflow)
+                self.assertEqual(config["workflow"]["mode"], "long-stream" if workflow == "hosted-long-stream" else "full")
 
-    def test_unknown_backend_is_rejected(self):
-        config = load_workflow_config("local")
-        config["backend"]["name"] = "old-pipeline"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=False)
-
-    def test_wrong_workflow_backend_pairing_is_rejected(self):
-        config = load_workflow_config("local")
-        config["backend"]["transcriber"] = "gemini"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=False)
-
-    def test_local_missing_model_path_is_rejected(self):
-        config = load_workflow_config("local")
-        config["backend"]["model"] = ""
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=False)
-
-    def test_local_missing_model_file_is_rejected_when_checking_paths(self):
-        config = load_workflow_config("local")
-        config["backend"]["model"] = "C:/definitely/missing/model.gguf"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=True)
-
-    def test_hosted_missing_transcription_model_is_rejected(self):
-        config = load_workflow_config("hosted")
-        config["backend"]["transcription_model"] = ""
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="hosted", check_paths=False)
 
     def test_hosted_openai_transcription_and_gemini_cleanup_are_allowed(self):
         config = load_workflow_config("hosted")
@@ -68,12 +64,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         with self.assertRaises(SubtitlerError):
             validate_workflow_config(config, workflow="hosted", check_paths=False)
 
-    def test_unapproved_hosted_model_is_rejected(self):
-        config = load_workflow_config("hosted")
-        config["backend"]["transcription_model"] = "gemini-something-else"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="hosted", check_paths=False)
 
     def test_new_approved_cleanup_models_are_allowed(self):
         for backend, model in (
@@ -136,19 +126,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         with self.assertRaises(SubtitlerError):
             validate_workflow_config(config, workflow="local", check_paths=False)
 
-    def test_invalid_workflow_mode_is_rejected(self):
-        config = load_workflow_config("local")
-        config["workflow"]["mode"] = "preview"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=False)
-
-    def test_invalid_cleanup_backend_is_rejected(self):
-        config = load_workflow_config("local")
-        config["cleanup"]["backend"] = "legacy"
-
-        with self.assertRaises(SubtitlerError):
-            validate_workflow_config(config, workflow="local", check_paths=False)
 
     def test_hosted_short_youtube_chapters_are_allowed(self):
         config = load_workflow_config("hosted")
@@ -157,7 +134,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
         validate_workflow_config(config, workflow="hosted", check_paths=False)
 
     def test_youtube_chapters_are_rejected_outside_hosted_short(self):
-        for workflow in ("local", "local-long-stream", "hosted-long-stream"):
+        for workflow in ("local", "hosted-long-stream"):
             with self.subTest(workflow=workflow):
                 config = load_workflow_config(workflow)
                 config["additional_settings"]["youtube_chapters"] = True
@@ -173,7 +150,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
                     validate_workflow_config(config, workflow=workflow, check_paths=False)
 
     def test_cut_silence_is_rejected_for_long_stream_workflows(self):
-        for workflow in ("local-long-stream", "hosted-long-stream"):
+        for workflow in ("hosted-long-stream",):
             config = load_workflow_config(workflow)
             config["additional_settings"]["cut_silence_mode"] = "automatic"
             with self.assertRaises(SubtitlerError):
@@ -187,7 +164,7 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             config = load_workflow_config(workflow)
             config["additional_settings"]["render_cut_video"] = True
             validate_workflow_config(config, workflow=workflow, check_paths=False)
-        for workflow in ("local-long-stream", "hosted-long-stream"):
+        for workflow in ("hosted-long-stream",):
             config = load_workflow_config(workflow)
             config["additional_settings"]["render_cut_video"] = True
             with self.assertRaises(SubtitlerError):
