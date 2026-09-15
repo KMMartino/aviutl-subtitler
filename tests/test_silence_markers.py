@@ -38,7 +38,7 @@ class SilenceMarkerTests(unittest.TestCase):
             self.assertGreater(len(saved['silence_markers']['cuts']), 0)
             self.assertFalse(checkpoint.with_suffix('.html').exists())
             exo = checkpoint.with_suffix('.exo').read_text(encoding='shift_jis')
-            self.assertIn(str(media), exo)
+            self.assertIn(str(media.resolve()), exo)
             texts = re.findall(r'^text=(.*)$', exo, re.M)
             self.assertTrue(texts)
             self.assertTrue(all(not value.strip('0\r') for value in texts))
