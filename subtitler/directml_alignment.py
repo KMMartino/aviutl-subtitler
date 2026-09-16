@@ -61,6 +61,7 @@ class DirectMLAlignmentModel:
         import torch
 
         options = ort.SessionOptions()
+        options.logid = f"aligner pid={os.getpid()}"
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         self._session = ort.InferenceSession(

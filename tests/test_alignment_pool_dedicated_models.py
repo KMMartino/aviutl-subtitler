@@ -10,6 +10,26 @@ from subtitler.profiling import PipelineProfiler
 
 
 class AlignmentPoolDedicatedModelTests(unittest.TestCase):
+    def test_model_startup_waits_for_shared_lock_and_labels_messages(self) -> None:
+        startup_lock = threading.Lock()
+        config = AlignmentConfig("unused", "eng", "cpu", "word", Path("."), 16000, 1, 1)
+        with (
+            mock.patch("subtitler.alignment_pool.ForcedAligner") as aligner,
+            mock.patch("builtins.print") as output,
+        ):
+            with startup_lock:
+                pool = _InProcessAlignmentPool(2, config, PipelineProfiler(False, None), startup_lock)
+                aligner.assert_not_called()
+            pool.close_and_collect()
+        self.assertEqual(aligner.call_count, 2)
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertEqual(len(messages), 4)
+        self.assertTrue(all("aligner pid=" in message for message in messages))
+        self.assertIn("Loading", messages[0])
+        self.assertIn("Ready", messages[1])
+        self.assertIn("Loading", messages[2])
+        self.assertIn("Ready", messages[3])
+
     def test_longest_processing_time_balances_isolated_process_lanes(self) -> None:
         pool = AlignmentPool.__new__(AlignmentPool)
         pool._pending = [
@@ -53,6 +73,9 @@ class AlignmentPoolDedicatedModelTests(unittest.TestCase):
                 raise AssertionError("clean child must not be terminated")
 
         class FakeContext:
+            def Lock(self):
+                return threading.Lock()
+
             def __init__(self) -> None:
                 self.child_worker_counts: list[int] = []
 
@@ -172,6 +195,9 @@ class AlignmentPoolDedicatedModelTests(unittest.TestCase):
         child_connection = FakeConnection()
 
         class FakeContext:
+            def Lock(self):
+                return threading.Lock()
+
             def Pipe(self) -> tuple[FakeConnection, FakeConnection]:
                 return parent_connection, child_connection
 

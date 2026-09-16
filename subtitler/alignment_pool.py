@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import queue
 import threading
 import traceback
@@ -44,10 +45,14 @@ class AlignmentProfile:
 
 
 class _InProcessAlignmentPool:
-    def __init__(self, workers: int, config: AlignmentConfig, profiler: PipelineProfiler) -> None:
+    def __init__(
+        self, workers: int, config: AlignmentConfig, profiler: PipelineProfiler, startup_lock=None,
+    ) -> None:
         self.workers = max(1, min(2, workers))
         self.config = config
         self.profiler = profiler
+        self._startup_lock = startup_lock or threading.Lock()
+        self._log_label = f"aligner pid={os.getpid()}"
         self._jobs: queue.Queue[TranscriptChunk | None] = queue.Queue()
         self._results: dict[int, list[AlignedChunk]] = {}
         self._errors: list[BaseException] = []
@@ -55,7 +60,6 @@ class _InProcessAlignmentPool:
         self._threads: list[threading.Thread] = []
         self._submitted = 0
         self._completed = 0
-        print(f"Loading {self.workers} dedicated aligner model(s)...", flush=True)
         for worker_id in range(1, self.workers + 1):
             thread = threading.Thread(target=self._worker, args=(worker_id,), name=f"aligner-{worker_id}")
             thread.start()
@@ -77,22 +81,25 @@ class _InProcessAlignmentPool:
 
     def _worker(self, worker_id: int) -> None:
         try:
-            aligner = ForcedAligner(
-                model_name=self.config.model_name,
-                language=self.config.language,
-                device=self.config.device,
-                split_size=self.config.split_size,
-                temp_dir=self.config.temp_dir,
-                sample_rate=self.config.sample_rate,
-                emission_batch_size=self.config.emission_batch_size,
-                torch_threads=self.config.torch_threads,
-            )
+            # Native ONNX logging writes messages in fragments. Serialize model
+            # startup across runtimes so their diagnostics cannot overlap.
+            with self._startup_lock:
+                print(f"[{self._log_label}, worker={worker_id}] Loading dedicated aligner model...", flush=True)
+                aligner = ForcedAligner(
+                    model_name=self.config.model_name,
+                    language=self.config.language,
+                    device=self.config.device,
+                    split_size=self.config.split_size,
+                    temp_dir=self.config.temp_dir,
+                    sample_rate=self.config.sample_rate,
+                    emission_batch_size=self.config.emission_batch_size,
+                    torch_threads=self.config.torch_threads,
+                )
+                print(f"[{self._log_label}, worker={worker_id}] Ready with dedicated model.", flush=True)
         except BaseException as exc:
             with self._lock:
                 self._errors.append(exc)
             return
-        with self._lock:
-            print(f"Aligner worker {worker_id} ready with dedicated model.", flush=True)
 
         while True:
             item = self._jobs.get()
@@ -160,12 +167,13 @@ def _alignment_process_main(
     connection: Connection,
     workers: int,
     config: AlignmentConfig,
+    startup_lock=None,
 ) -> None:
     """Own all alignment runtime state so process exit releases it deterministically."""
     profiler = PipelineProfiler(enabled=True, output_path=None)
     child_config = replace(config, vad_session=VadSession())
     try:
-        pool = _InProcessAlignmentPool(workers, child_config, profiler)
+        pool = _InProcessAlignmentPool(workers, child_config, profiler, startup_lock)
         while True:
             message, payload = connection.recv()
             if message == "submit":
@@ -209,6 +217,7 @@ class AlignmentPool:
         self._original_chunks: dict[int, AudioChunk] = {}
         self._pending: list[TranscriptChunk] = []
         self._context = get_context("spawn")
+        self._startup_lock = self._context.Lock()
         process_count = self.workers if config.isolate_models and self.workers > 1 else 1
         child_workers = 1 if process_count > 1 else self.workers
         self._connections: list[Connection] = []
@@ -218,7 +227,7 @@ class AlignmentPool:
             parent_connection, child_connection = self._context.Pipe()
             process = self._context.Process(
                 target=_alignment_process_main,
-                args=(child_connection, child_workers, child_config),
+                args=(child_connection, child_workers, child_config, self._startup_lock),
                 name=(
                     f"alignment-runtime-{process_index + 1}"
                     if process_count > 1

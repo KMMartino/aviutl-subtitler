@@ -5,6 +5,7 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import crypto from "node:crypto";
 import type { BrollCandidate, BrollReviewDecision, RunEvent, RunRequest, SilenceCutDecision, SilenceCutCandidate } from "../renderer/lib/types";
 import { buildRunCommand } from "./python";
+import { logStream } from "./logStream";
 import type { RuntimePaths } from "./paths";
 
 type ActiveRun = {
@@ -58,24 +59,17 @@ export function startRun(window: BrowserWindow, paths: RuntimePaths, pythonPath:
   };
   emit(window, { type: "started", runId, commandPreview: command.preview, startedAt: new Date(startedAtMs).toISOString() });
 
-  let stdoutBuffer = "";
-  child.stdout.on("data", (data: Buffer) => {
-    stdoutBuffer += data.toString("utf8");
-    let newline = stdoutBuffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = stdoutBuffer.slice(0, newline + 1);
-      stdoutBuffer = stdoutBuffer.slice(newline + 1);
-      handleStdoutLine(window, runId, line, callbacks?.onControlEvent);
-      newline = stdoutBuffer.indexOf("\n");
-    }
-  });
-  child.stderr.on("data", (data: Buffer) => emit(window, { type: "stderr", runId, text: data.toString("utf8") }));
+  const stdout = logStream((line) => handleStdoutLine(window, runId, line, callbacks?.onControlEvent));
+  const stderr = logStream((text) => emit(window, { type: "stderr", runId, text }));
+  child.stdout.on("data", (data: Buffer) => stdout.write(data));
+  child.stderr.on("data", (data: Buffer) => stderr.write(data));
   child.on("error", (error) => {
     emit(window, { type: "error", runId, message: `Could not start workflow process: ${error.message}` });
     finish(null, null);
   });
   child.on("close", (code, signal) => {
-    if (stdoutBuffer) handleStdoutLine(window, runId, stdoutBuffer, callbacks?.onControlEvent);
+    stdout.end();
+    stderr.end();
     finish(code, signal);
   });
   return { runId };

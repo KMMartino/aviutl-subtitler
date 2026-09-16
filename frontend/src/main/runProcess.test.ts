@@ -50,6 +50,19 @@ function setPlatform(value: NodeJS.Platform): void {
 }
 
 describe("workflow process lifecycle", () => {
+  it("emits clean complete lines and flushes the last stderr message before exit", () => {
+    const child = new FixtureChild();
+    mocks.spawn.mockReturnValue(child);
+    const send = vi.fn();
+    startRun(fixtureWindow(send) as never, {} as never, "python.exe", {} as never);
+    for (const byte of Buffer.from("\x1b[93m警告\x1b[m\n")) child.stderr.emit("data", Buffer.from([byte]));
+    child.stderr.emit("data", Buffer.from("last error"));
+    child.emit("close", 1, null);
+    const events = send.mock.calls.map((call) => call[1]);
+    expect(events.filter((event) => event.type === "stderr").map((event) => event.text)).toEqual(["警告\n", "last error"]);
+    expect(events.at(-1).type).toBe("exit");
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     mocks.spawn.mockReset();
