@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import threading
+import unicodedata
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,12 @@ from .text_refiner import (
 )
 
 
+# At 60pt, 16 full-width characters plus padding round to 980px;
+# the extra 20px background width brings this to the 1000px limit.
+# Count full-width characters as two units and half-width characters as one.
+CHAPTER_TITLE_MAX_WIDTH_UNITS = 32
+
+
 YOUTUBE_CHAPTER_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -42,7 +49,7 @@ YOUTUBE_CHAPTER_RESPONSE_SCHEMA = {
                 "properties": {
                     "start_line": {"type": "integer"},
                     "end_line": {"type": "integer"},
-                    "title": {"type": "string"},
+                    "title": {"type": "string", "maxLength": CHAPTER_TITLE_MAX_WIDTH_UNITS},
                 },
                 "required": ["start_line", "end_line", "title"],
                 "additionalProperties": False,
@@ -224,25 +231,38 @@ class HostedTextRefiner(TextRefiner):
     def suggest_chapters(self, numbered_subtitles: list[tuple[int, float, float, str]]) -> list[ChapterSuggestion]:
         if not numbered_subtitles:
             return []
+        self.last_youtube_chapters_raw = ""
+        self.last_youtube_chapter_cuts = []
         prompt = self._youtube_chapters_prompt(numbered_subtitles)
-        try:
-            raw = self._chat(
-                prompt,
-                max_tokens=2048,
-                operation="youtube_chapters",
-                response_schema=YOUTUBE_CHAPTER_RESPONSE_SCHEMA,
-            )
-        except Exception as exc:
-            print(f"Warning: YouTube chapter generation failed; continuing without chapter markers. {exc}", flush=True)
-            self.last_youtube_chapters_raw = ""
-            self.last_youtube_chapter_cuts = []
-            return []
-        self.last_youtube_chapters_raw = raw
-        chapters, cuts = parse_youtube_chapter_response(raw, numbered_subtitles)
-        self.last_youtube_chapter_cuts = cuts
-        if not chapters:
-            print("Warning: YouTube chapter generation returned no usable chapters.", flush=True)
-        return chapters
+        for attempt in range(3):
+            try:
+                raw = self._chat(
+                    prompt,
+                    max_tokens=2048,
+                    operation="youtube_chapters",
+                    response_schema=YOUTUBE_CHAPTER_RESPONSE_SCHEMA,
+                )
+            except Exception as exc:
+                print(f"Warning: YouTube chapter generation failed; continuing without chapter markers. {exc}", flush=True)
+                return []
+            self.last_youtube_chapters_raw = raw
+            try:
+                chapters, cuts = parse_youtube_chapter_response(raw, numbered_subtitles)
+            except ValueError as exc:
+                print(f"Warning: chapter titles rejected (attempt {attempt + 1}/3): {exc}", flush=True)
+                prompt = (
+                    self._youtube_chapters_prompt(numbered_subtitles)
+                    + f"\nPrevious response was rejected: {exc}\n"
+                    + "Regenerate the chapter JSON with shorter meaningful titles; preserve topic spans and cuts.\n"
+                    + f"Previous response:\n{raw}"
+                )
+                continue
+            self.last_youtube_chapter_cuts = cuts
+            if not chapters:
+                print("Warning: YouTube chapter generation returned no usable chapters.", flush=True)
+            return chapters
+        print("Warning: chapter title retries exhausted; continuing without chapter markers.", flush=True)
+        return []
 
     def complete_structured(
         self,
@@ -302,6 +322,9 @@ class HostedTextRefiner(TextRefiner):
             "- Use the entire transcript so chapter titles share a consistent through line.\n"
             "- Return topic spans that cover the transcript in order.\n"
             "- Titles must be short phrases suitable for YouTube chapter names.\n"
+            f"- Every title must fit within {CHAPTER_TITLE_MAX_WIDTH_UNITS} half-width units: "
+            "count full-width characters as 2 and half-width characters as 1, including spaces and punctuation "
+            "(up to 16 full-width or 32 half-width characters, or a mix).\n"
             "- Prefer meaningful topic changes over frequent small cuts.\n"
             "- Do not translate unless the transcript itself changes language.\n"
             "- Complete coverage means every supplied line belongs to one ordered chapter span.\n"
@@ -468,7 +491,13 @@ def _extract_json_object(raw: str) -> str:
 def _chapter_title(value: Any, index: int) -> str:
     title = str(value or "").strip()
     title = " ".join(title.split())
-    if not title or len(title) > 60:
+    width_units = sum(2 if unicodedata.east_asian_width(char) in {"W", "F", "A"} else 1 for char in title)
+    if width_units > CHAPTER_TITLE_MAX_WIDTH_UNITS:
+        raise ValueError(
+            f"Chapter {index} title uses {width_units} half-width units; maximum is {CHAPTER_TITLE_MAX_WIDTH_UNITS}. "
+            "Shorten it without losing its topic."
+        )
+    if not title:
         return f"Chapter {index}"
     return title
 

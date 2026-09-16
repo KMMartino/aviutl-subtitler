@@ -152,7 +152,7 @@ def _chapter_background_width(text: str, settings: ExoSettings) -> int:
     text_width = float(measured) if measured is not None else _estimated_text_width(text, settings.font_size)
     padded_width = max(settings.font_size * 2.0, text_width + settings.font_size)
     grid = max(1, round(_CHAPTER_WIDTH_GRID * settings.layout_scale))
-    return max(grid, int(math.floor(padded_width / grid + 0.5)) * grid)
+    return max(grid, int(math.floor(padded_width / grid + 0.5)) * grid) + 20
 
 
 def _chapter_layouts(

@@ -1,8 +1,9 @@
 import re
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from subtitler.exo import _chapter_marker_frame_ranges, _marker_frame_ranges, encode_text_for_exo, generate_exo_file
+from subtitler.exo import _chapter_background_width, _chapter_marker_frame_ranges, _marker_frame_ranges, encode_text_for_exo, generate_exo_file
 from subtitler.models import BrollPlacement, ExoMarker, ExoMediaPlan, ExoMediaSegment, ExoSettings, Subtitle
 
 
@@ -117,6 +118,16 @@ class ExoMarkerTests(unittest.TestCase):
         self.assertIn("color=ff0000", content)
         self.assertIn("Y=642.0", content)
 
+    def test_chapter_width_padding_and_character_limit(self) -> None:
+        with patch("subtitler.exo._measure_windows_text_width", return_value=None):
+            self.assertEqual(_chapter_background_width("章" * 16, ExoSettings()), 1000)
+            self.assertGreater(_chapter_background_width("章" * 17, ExoSettings()), 1000)
+        for measured, expected in [(0, 140), (500, 580), (720, 800), (920, 1000)]:
+            with self.subTest(measured=measured), patch(
+                "subtitler.exo._measure_windows_text_width", return_value=measured
+            ):
+                self.assertEqual(_chapter_background_width("Title", ExoSettings()), expected)
+
     def test_chapter_style_matches_reference_geometry_and_transition_timing(self) -> None:
         content = generate_exo_file(
             [],
@@ -131,17 +142,17 @@ class ExoMarkerTests(unittest.TestCase):
         self.assertEqual(content.count("_name=カスタムオブジェクト"), 6)
         self.assertEqual(content.count("_name=斜めクリッピング"), 4)
         self.assertEqual(
-            content.count("track0=560.00,780.00,15@イージング（通常）@イージング,23"),
+            content.count("track0=580.00,800.00,15@イージング（通常）@イージング,23"),
             2,
         )
-        self.assertIn("中心X=-330,330,1", content)
-        self.assertIn("中心X=-440,440,1", content)
-        self.assertIn("中心X=280,-280,15@イージング（通常）@イージング,23", content)
-        self.assertIn("中心X=-390,390,15@イージング（通常）@イージング,23", content)
+        self.assertIn("中心X=-340,340,1", content)
+        self.assertIn("中心X=-450,450,1", content)
+        self.assertIn("中心X=290,-290,15@イージング（通常）@イージング,23", content)
+        self.assertIn("中心X=-400,400,15@イージング（通常）@イージング,23", content)
 
         background_heads = re.findall(
             r"start=601\nend=648\nlayer=([45]).*?"
-            r"track0=560\.00,780\.00,15@イージング（通常）@イージング,23",
+            r"track0=580\.00,800\.00,15@イージング（通常）@イージング,23",
             content,
             flags=re.DOTALL,
         )
