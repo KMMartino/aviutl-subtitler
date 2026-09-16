@@ -231,7 +231,6 @@ def _run_editorial_stage(
     print(locale_label(locale, f"Editorial stage {number}/8 - {label} started.",
                        f"編集段階 {number}/8 - {label}を開始。"), flush=True)
     started = time.monotonic()
-    _ensure_cost_ceiling(project)
     transition("in_progress")
     project["editorial_map"]["status"] = "in_progress"
     write_editorial_checkpoint(checkpoint_path, project)
@@ -355,22 +354,6 @@ def _record_stage_cost(
         flush=True,
     )
 
-
-def _ensure_cost_ceiling(project: dict[str, Any]) -> None:
-    provenance = project["run_provenance"]
-    source_hours = sum(int(source["duration_ms"]) for source in project["sources"]) / 3_600_000.0
-    ceiling = source_hours * float(provenance.get("max_cost_per_source_hour_usd", 10.0))
-    actual = float(provenance.get("actual_cost_usd", 0.0))
-    if actual >= ceiling:
-        raise SubtitlerError(
-            locale_label(
-                project.get("output_locale"),
-                f"Editorial API cost ceiling reached (${actual:.2f} of ${ceiling:.2f}). "
-                "Resume only after explicitly revising the project cost policy.",
-                f"編集 API 費用の上限に達しました (${actual:.2f} / ${ceiling:.2f})。"
-                "プロジェクトの費用設定を明示的に変更してから再開してください。",
-            )
-        )
 
 
 def _stage_label(stage: str, locale: str) -> str:

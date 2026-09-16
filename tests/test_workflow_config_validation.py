@@ -177,7 +177,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("cleanup", "llm_split_planning"),
             ("diagnostics", "profile"),
             ("diagnostics", "llm_split_diagnostics"),
-            ("cost", "allow_api_spend"),
             ("cost", "estimate_cost_only"),
             ("additional_settings", "youtube_chapters"),
             ("additional_settings", "render_cut_video"),
@@ -230,7 +229,6 @@ class WorkflowConfigValidationTests(unittest.TestCase):
             ("subtitles", "regroup_gap_sec"),
             ("subtitles", "chain_lead_in_sec"),
             ("exo", "y_position"),
-            ("cost", "max_estimated_api_cost_usd"),
         )
         for section, field in fields:
             for value in (float("nan"), float("inf"), float("-inf")):

@@ -42,8 +42,6 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
       profile: Boolean(config.diagnostics?.profile)
     },
     cost: {
-      maxEstimatedApiCostUsd: Number(config.cost?.max_estimated_api_cost_usd ?? 5),
-      allowApiSpend: Boolean(config.cost?.allow_api_spend),
       estimateCostOnly: Boolean(config.cost?.estimate_cost_only)
     },
     additionalSettings: {
@@ -116,8 +114,8 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
     next.cleanup.thinking_level = tuning?.thinkingLevel ?? null;
   }
   next.diagnostics.profile = settings.diagnostics.profile;
-  next.cost.max_estimated_api_cost_usd = settings.cost?.maxEstimatedApiCostUsd ?? next.cost.max_estimated_api_cost_usd ?? 5;
-  next.cost.allow_api_spend = settings.cost?.allowApiSpend ?? false;
+  delete next.cost.max_estimated_api_cost_usd;
+  delete next.cost.allow_api_spend;
   next.cost.estimate_cost_only = settings.cost?.estimateCostOnly ?? false;
   next.additional_settings.youtube_chapters = supportsWorkflowFeature(workflow, "chapters") ? settings.additionalSettings?.youtubeChapters ?? false : false;
   next.additional_settings.cut_silence_mode = supportsWorkflowFeature(workflow, "silence")

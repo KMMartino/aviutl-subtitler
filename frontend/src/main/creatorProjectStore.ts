@@ -76,6 +76,17 @@ export class CreatorProjectStore {
     return catalog;
   }
 
+  async delete(directory: string, trash: (directory: string) => Promise<void>): Promise<void> {
+    const target = path.resolve(directory);
+    const catalog = this.catalog();
+    if (target === path.parse(target).root || !catalog.recent.some(item => path.resolve(item.directory) === target)
+      || fs.lstatSync(target).isSymbolicLink()) throw new Error("Open a registered project folder before deleting it.");
+    const project = this.open(target);
+    if (project.results.some(result => result.status === "running")) throw new Error("Wait for the active task before deleting its project.");
+    await trash(target);
+    writeJson(this.catalogFile, { ...catalog, recent: catalog.recent.filter(item => path.resolve(item.directory) !== target) });
+  }
+
   create(name: string, parentDirectory?: string): CreatorProject {
     const cleanName = Array.from(name.trim(), (character) => character.charCodeAt(0) < 32 ? "-" : character).join("").replace(/[<>:"/\\|?*]/g, "-").replace(/[. ]+$/, "").slice(0, 100) || "Untitled project";
     const parent = parentDirectory || this.catalog().defaultDirectory;

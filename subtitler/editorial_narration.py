@@ -39,7 +39,7 @@ def generate_narration(project: dict[str, Any], workspace: Path,
     directory = workspace / revision
     usage = ApiUsageLedger()
     store = OperationStore(directory / 'operations', revision, usage)
-    provider = HostedInspectionProvider(usage, float(settings.get('narration_budget_usd', 4)), directory / 'requests')
+    provider = HostedInspectionProvider(usage, directory / 'requests')
     model = str(settings.get('narration_model', 'gpt-5.6-terra'))
     overview = catalog_overview(recommendations['catalog'])
     briefs: list[dict[str, Any]] = []

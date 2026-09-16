@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moment extraction — implementation and verification</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;color:#20252a}h1,h2{line-height:1.2}code{overflow-wrap:anywhere}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;padding:.6rem;border-bottom:1px solid #ccc}a{color:#0969a2}.note{padding:1rem;background:#f0f4f5;border-left:4px solid #547f84}</style>
+</head><body>
+<h1>Extract moments</h1>
+<p>Implementation completed September 15, 2026. The packaged rebuild and real-model quality evaluation have not been run.</p>
+<h2>What the feature does</h2>
+<ul>
+<li>A third top-bar button opens extraction. Existing panels, themes, resizing and run controls remain. The Local/Hosted LLM selector is now inside the subtitle screen; silence-marker settings omit LLM controls.</li>
+<li>Choose one recording, optionally with a synchronized facecam, or download an archived livestream. Describe the spoken topic or visual events to retrieve.</li>
+<li>An optional start/end range restricts both analysis and URL downloads. Local analysis copies are decoded for the selected range; EXO media still references the original local recording. Downloaded excerpts retain their original VOD offset.</li>
+<li>The existing visual sampler runs with its defaults, alongside a complete timed transcript. Selection scans overlapping evidence windows exhaustively. It does not optimize entertainment value, repetition or final duration.</li>
+<li>Matches include explanations, supporting evidence and separate Low/Medium/High confidence and relevance labels. Overlapping discoveries are merged; separated passages remain separate. Intertwined detours receive manual-cut markers.</li>
+<li>Output includes JSON evidence, an HTML timestamp report and an EXO. Each excerpt’s gameplay, facecam, audio, explanation and detour objects share an AviUtl group. Excerpts appear consecutively in source order. Subtitles and in-app cut review are omitted.</li>
+<li>Outputs use a fresh timestamped name beside the source. Expanding scope requires a fresh run. Earlier outputs are preserved; follow-up refinement, recovery and multiple-recording searches remain outside this iteration.</li>
+</ul>
+<h2>yt-dlp and spending</h2>
+<p>The application already manages a verified yt-dlp nightly executable and updater. Age warnings are now detected, including warnings split across log chunks, and offer a one-click update. Warning suppression was removed. Partial downloads use <code>--download-sections</code> with <code>--force-keyframes-at-cuts</code>; the acquired duration is checked before model processing. See the <a href="https://github.com/yt-dlp/yt-dlp/blob/master/README.md">official yt-dlp documentation</a>.</p>
+<p>Application spending limits and their enforcement have been removed, including transcription admission, editorial ceilings and inspection budgets. Legacy monetary-limit settings are ignored or removed during configuration migration. Cost estimates, usage accounting, estimate-only transcription and request-shape validation remain. Failed extraction runs explicitly note that unfinished visual requests may not be fully accounted for.</p>
+<h2>Verification</h2>
+<table><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody>
+<tr><td>Backend Ruff and mypy</td><td>Pass; mypy includes all three new backend modules.</td></tr>
+<tr><td>Backend unit/integration suite</td><td>591 tests passed.</td></tr>
+<tr><td>Frontend quality checks</td><td>TypeScript, ESLint and configured formatting checks passed.</td></tr>
+<tr><td>Frontend tests</td><td>212 tests across 44 files passed.</td></tr>
+<tr><td>Real FFmpeg with mocked hosted responses</td><td>Selected-range preparation, transcript/visual scope, original timestamps, boundary flags, usage aggregation and EXO output passed.</td></tr>
+<tr><td>Browser interaction check</td><td>Verified request construction for 01:00–02:00, navigation locking, completion links, draft preservation across Settings, and the outdated-downloader update action. The three navigation buttons fit in one row at the app’s minimum 1080-pixel width.</td></tr>
+<tr><td>EXO structural checks</td><td>Paired layer assignments, per-source frame offsets, contiguous output and shared excerpt groups passed. A synthetic paired-media sample is available below.</td></tr>
+</tbody></table>
+<p>The system Python lacks Ruff and mypy; backend checks ran successfully with <code>.venv-win/Scripts/python.exe</code>. No paid hosted calls were made. Browser checks used mocked desktop APIs, so they do not replace packaged application testing.</p>
+<h2>Artifacts for inspection</h2>
+<ul><li><a href="../testing-grounds/moments-visual-check/moments.html">Synthetic timestamp report</a></li>
+<li><a href="../testing-grounds/moments-visual-check/moments.exo">Synthetic paired-media EXO</a> — blue gameplay, green facecam, explanation and detour text. Keep both MP4 files in that folder.</li>
+<li><a href="../testing-grounds/moments-backend-tests.log">Backend test log</a> and <a href="../testing-grounds/moments-frontend-tests.log">frontend test log</a></li></ul>
+<h2>Checkpoint compatibility and remaining validation</h2>
+<p>Extraction has its own selection contract, version 1. Removing monetary admission failures changes the earliest existing editorial execution boundary, so <code>transcription</code> was incremented from 14 to 15. Resuming an older editorial checkpoint invalidates transcription and its downstream boundaries.</p>
+<p>Visual matches remain limited by the existing sampling density. Brief unsampled events can be missed. Potential variable-frame-rate sources receive a warning to inspect EXO positions. Actual relevance, exhaustiveness and cut quality still require a representative recording and an authorized hosted evaluation.</p>
+<div class="note"><strong>Status updated 16 September 2026:</strong> The feature and subsequent UI/download/project changes were rebuilt and installed during implementation. The commit-preparation review added an estimate-only guard that has not yet been rebuilt. No commit, push or release has been performed in this work. See <a href="commit-preparation-review-2026-09-16.html">the current review</a> for verification and commit scope.</div>
+</body></html>

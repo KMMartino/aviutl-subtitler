@@ -1,4 +1,4 @@
-"""Budgeted, inspectable hosted evidence requests without automatic paid retries."""
+"""Inspectable hosted evidence requests without automatic paid retries."""
 
 from __future__ import annotations
 
@@ -71,11 +71,8 @@ def _validate(value: Any, schema: dict[str, Any]) -> bool:
 
 
 class HostedInspectionProvider:
-    def __init__(self, usage: ApiUsageLedger, budget_usd: float, diagnostics_dir: Path, ffmpeg: str = "ffmpeg"):
-        if not math.isfinite(budget_usd) or budget_usd <= 0:
-            raise SubtitlerError("Inspection budget must be finite and positive")
+    def __init__(self, usage: ApiUsageLedger, diagnostics_dir: Path, ffmpeg: str = "ffmpeg"):
         self.usage = usage
-        self.budget_usd = budget_usd
         self.diagnostics_dir = diagnostics_dir
         self.ffmpeg = ffmpeg
         self._lock = threading.Lock()
@@ -114,8 +111,6 @@ class HostedInspectionProvider:
                    "reasoning": {"effort": reasoning_effort}, "max_output_tokens": max_output_tokens,
                    "text": {"format": {"type": "json_schema", "name": "inspection", "strict": True, "schema": schema}}}
         with self._lock:
-            if self.usage.total_cost_usd + ceiling > self.budget_usd:
-                raise SubtitlerError("Inspection request would exceed the remaining hosted budget")
             api_key = require_api_key("OPENAI_API_KEY")
             self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
             name = re.sub(r"[^a-zA-Z0-9_-]", "_", operation)[:60] or "inspection"

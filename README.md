@@ -41,6 +41,8 @@ subtitle modes share explicit transcription and subtitle-planning requests. Long
 
 The editorial analysis backend is shelved for future workflows. Its CLI requires `--analysis` on `start` or `run`; the desktop does not invoke it. EXO re-import is not part of the active silence-marker workflow.
 
+**Extract moments** reuses timed transcription and visual event analysis for exhaustive, request-based extraction from a recording or VOD, with optional facecam and time ranges. It exports timestamps, explanations, and grouped EXO excerpts. See the [implementation and verification notes](plans/moment-extraction-implementation-2026-09-15.html).
+
 ### Transcription segment policy
 
 All providers use the same normalized transcript, forced-alignment, and subtitle-planning pipeline. Provider-specific behavior is kept in adapters and segment policy rather than separate backends.

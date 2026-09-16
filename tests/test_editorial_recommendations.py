@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from subtitler.acoustic_edges import refine_gap
 from subtitler.api_usage import ApiUsageLedger
 from subtitler.editorial_cutting import build_human_information_plan
-from subtitler.editorial_recommendations import generate_recommendations, recommendation_budget
+from subtitler.editorial_recommendations import generate_recommendations
 from subtitler.editorial_recommendation_view import recommendation_html, marker_labels, write_recommendation_frames
 from subtitler.errors import SubtitlerError
 from subtitler.speech_gaps import SpeechGap
@@ -132,8 +132,6 @@ class RecommendationWorkflowTests(unittest.TestCase):
                         'text': str(child) + 'x' * 700} for j in range(2))
             catalog.append({'source_id': sid, 'name': sid, 'activities': activities, 'states': states, 'speech': speech})
         project = {'sources': sources, 'title_or_game': 'Game', 'objective': 'Casual play'}
-        self.assertEqual(recommendation_budget(project, {}), 40)
-        self.assertEqual(recommendation_budget(project, {'recommendation_budget_usd': 3}), 3)
         provider = Mock()
         prompts = []
         def respond(**kwargs):

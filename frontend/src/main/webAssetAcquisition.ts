@@ -11,6 +11,7 @@ const WHOLE_SOURCE_LIMIT_SEC = 20 * 60;
 const LONG_SOURCE_WINDOW_SEC = 20 * 60;
 
 export type YtDlpInvocation = {
+  onOutdated?: () => void;
   executablePath: string;
   denoPath?: string;
   cookiesBrowser?: string;
@@ -22,7 +23,7 @@ export async function probeWebAsset(invocation: YtDlpInvocation, sourceUrl: stri
   const url = validatedWebUrl(sourceUrl);
   const result = await runYtDlp(
     invocation,
-    ["--dump-single-json", "--no-playlist", "--skip-download", "--no-warnings", url],
+    ["--dump-single-json", "--no-playlist", "--skip-download", url],
     120_000, signal,
   );
   let metadata: Record<string, unknown>;
@@ -32,6 +33,9 @@ export async function probeWebAsset(invocation: YtDlpInvocation, sourceUrl: stri
     throw new Error("yt-dlp returned invalid source metadata.");
   }
   const duration = finiteNumber(metadata.duration);
+  if (metadata.is_live === true || metadata.live_status === "is_live" || metadata.live_status === "is_upcoming") {
+    throw new Error("Use a completed video or archived livestream (VOD).");
+  }
   return {
     sourceUrl: url,
     sourcePageUrl: stringValue(metadata.webpage_url) || url,
@@ -78,7 +82,6 @@ export async function stageSourceMedia(
   const outputTemplate = path.join(jobRoot, "download.%(ext)s");
   const args = [
     "--no-playlist",
-    "--no-warnings",
     "--restrict-filenames",
     // Bound individual HTTP requests when downloading multi-GB recordings.
     "--http-chunk-size", "10M",
@@ -89,7 +92,7 @@ export async function stageSourceMedia(
     "-o", outputTemplate,
   ];
   if (onProgress) args.push("--progress", "--newline", "--progress-delta", "1", "--progress-template", "download:SUBUTL_PROGRESS %(progress._percent_str)s");
-  if (sourceEndSec !== null) args.push("--download-sections", `*${sourceStartSec}-${sourceEndSec}`);
+  if (sourceEndSec !== null) args.push("--download-sections", `*${sourceStartSec}-${sourceEndSec}`, "--force-keyframes-at-cuts");
   args.push(sourceUrl);
   try {
     const result = await runYtDlp(invocation, args, 60 * 60_000, signal, onProgress);
@@ -140,6 +143,10 @@ async function runYtDlp(
     const child = spawn(invocation.executablePath, [...commonArgs, ...args], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let outdatedNotified = false;
+    const checkOutdated = () => {
+      if (!outdatedNotified && isYtDlpOutdatedWarning(stderr)) { outdatedNotified = true; invocation.onOutdated?.(); }
+    };
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
     let progressBuffer = "";
@@ -180,17 +187,22 @@ async function runYtDlp(
     child.stderr.on("data", (chunk: Buffer) => {
       captureBytes += chunk.length;
       if (captureBytes > MAX_CAPTURE_BYTES) terminateProcessTree(child, true);
-      else stderr += stderrDecoder.write(chunk);
+      else { stderr += stderrDecoder.write(chunk); checkOutdated(); }
     });
     child.on("error", (error) => finish(() => reject(new Error(`Could not start yt-dlp: ${error.message}`))));
     child.on("close", (code) => finish(() => {
       stdout += stdoutDecoder.end();
       stderr += stderrDecoder.end();
+      checkOutdated();
       if (captureBytes > MAX_CAPTURE_BYTES) reject(new Error("yt-dlp produced too much output."));
       else if (code !== 0) reject(new Error(`yt-dlp failed: ${stderr.trim() || `exit code ${code}`}`));
       else resolve({ stdout, stderr });
     }));
   });
+}
+
+export function isYtDlpOutdatedWarning(text: string): boolean {
+  return /(?:yt-dlp.{0,120}(?:older than|outdated|out.of.date)|(?:older than|outdated|out.of.date).{0,120}yt-dlp)/isu.test(text);
 }
 
 function validatedWebUrl(value: string): string {

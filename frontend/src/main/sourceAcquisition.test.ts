@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ spawn: vi.fn(), spawnSync: vi.fn() }));
 vi.mock("node:child_process", () => mocks);
 import { acquireSource } from "./sourceAcquisition";
-import { stageSourceMedia, stageWebAsset } from "./webAssetAcquisition";
+import { isYtDlpOutdatedWarning, stageSourceMedia, stageWebAsset } from "./webAssetAcquisition";
 
 let root: string;
 beforeEach(() => {
@@ -41,6 +41,51 @@ afterEach(() => {
 });
 
 describe("source acquisition", () => {
+  it("stores downloaded media and its manifest inside the chosen project or external folder", async () => {
+    for (const directory of [path.join(root, "project", "Sources"), path.join(root, "persistent-downloads")]) {
+      const result = await acquireSource({ executablePath: "yt-dlp" }, directory, "https://example.com/recording");
+      const relative = path.relative(directory, result.path);
+      expect(relative.startsWith("..")).toBe(false);
+      expect(path.isAbsolute(relative)).toBe(false);
+      expect(fs.readFileSync(result.path, "utf8")).toBe("downloaded media");
+      expect(JSON.parse(fs.readFileSync(path.join(path.dirname(result.path), "source.json"), "utf8")).path).toBe(result.path);
+    }
+  });
+  it("downloads a requested VOD range and preserves its original time offset", async () => {
+    const result = await acquireSource({ executablePath: "yt-dlp" }, root, "https://example.com/recording", undefined, undefined,
+      { startSec: 3600, endSec: 3900 });
+    expect(result.sourceStartSec).toBe(3600);
+    expect(result.sourceEndSec).toBe(3900);
+    expect(mocks.spawn.mock.calls[1][1]).toEqual(expect.arrayContaining(["--download-sections", "*3600-3900", "--force-keyframes-at-cuts"]));
+    expect(mocks.spawn.mock.calls[0][1]).not.toContain("--no-warnings");
+  });
+
+  it("rejects ranges outside the VOD before downloading", async () => {
+    await expect(acquireSource({ executablePath: "yt-dlp" }, root, "https://example.com/recording", undefined, undefined,
+      { startSec: 100, endSec: 22000 })).rejects.toThrow("within the recording");
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("recognizes age warnings without treating unrelated errors as an update request", () => {
+    expect(isYtDlpOutdatedWarning("WARNING: Your yt-dlp version (2025.01.01) is older than 90 days! Please update")).toBe(true);
+    expect(isYtDlpOutdatedWarning("WARNING: yt-dlp is out-of-date")).toBe(true);
+    expect(isYtDlpOutdatedWarning("ERROR: Sign in to confirm your age")).toBe(false);
+  });
+
+  it("reports outdated warnings split across chunks once per process", async () => {
+    const original = mocks.spawn.getMockImplementation()!;
+    mocks.spawn.mockImplementation((...args) => {
+      const child = original(...args);
+      queueMicrotask(() => {
+        child.stderr.emit("data", Buffer.from("WARNING: Your yt-dlp version is older "));
+        child.stderr.emit("data", Buffer.from("than 90 days. Update yt-dlp.\n"));
+      });
+      return child;
+    });
+    const outdated = vi.fn();
+    await acquireSource({ executablePath: "yt-dlp", onOutdated: outdated }, root, "https://example.com/recording");
+    expect(outdated).toHaveBeenCalled();
+  });
   it("downloads a complete long recording and preserves its origin without library admission", async () => {
     const result = await acquireSource({ executablePath: "yt-dlp" }, root, "https://example.com/recording");
     expect(result.sourceStartSec).toBe(0);

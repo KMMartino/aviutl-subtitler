@@ -1,43 +1,25 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { FolderOpen } from "lucide-react";
 import { useI18n } from "../i18n";
-
-export default function SourceUrlInput({ disabled, onInput, onBusyChange }: { disabled?: boolean; onInput(path: string): void | Promise<void>; onBusyChange?(busy: boolean): void }) {
+export type SourceDownload = { url: string; directory: string };
+export type SourceUrlProps = { disabled?: boolean; defaultLocation: string; value: SourceDownload; onChange(value: SourceDownload): void };
+export default function SourceUrlInput({ disabled, value, onChange, defaultLocation }: SourceUrlProps) {
   const { t } = useI18n();
-  const [url, setUrl] = useState("");
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [percent, setPercent] = useState<number | null>(null);
-  useEffect(() => {
-    if (loading) return window.subtitler.onSourceProgress(setPercent);
-  }, [loading]);
-  async function acquire() {
-    setLoading(true);
-    onBusyChange?.(true);
-    setError("");
-    setPercent(null);
+  async function chooseDirectory() {
     try {
-      const source = await window.subtitler.acquireSource(url.trim());
-      await onInput(source.path);
-      setUrl("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLoading(false);
-      onBusyChange?.(false);
-    }
+      const directory = await window.subtitler.chooseDirectory();
+      if (directory) onChange({ ...value, directory });
+      setError("");
+    } catch (cause) { setError(String(cause)); }
   }
   return <div className="stack">
-    <label>{t("input.sourceUrl")}
-      <div className="row">
-        <input type="url" value={url} disabled={disabled || loading} placeholder="https://…" onChange={(event) => setUrl(event.target.value)} />
-        <button disabled={disabled || loading || !url.trim()} onClick={acquire}>{t(loading ? "input.downloadingSource" : "input.downloadSource")}</button>
-        {loading && <button onClick={() => void window.subtitler.cancelSourceAcquisition()}>{t("run.cancel")}</button>}
-      </div>
-    </label>
-    {loading && percent !== null && <div role="status">
-      {t("input.sourceProgress", { percent: Math.floor(percent) })}
-      <progress value={percent} max={100} aria-label={t("input.downloadingSource")} />
-    </div>}
+    <label>{t("input.sourceUrl")}<div className="row">
+      <input type="url" value={value.url} disabled={disabled} placeholder="https://…" onChange={(event) => onChange({ ...value, url: event.target.value })} />
+      <button disabled={disabled} onClick={() => void chooseDirectory()}><FolderOpen size={16} />{t("input.downloadLocation")}</button>
+    </div></label>
+    <small className="moment-path">{t("input.downloadFolder", { path: value.directory || defaultLocation })}</small>
+    <small>{t("input.downloadStorageHelp")}</small>
     {error && <div className="field-error" role="alert">{error}</div>}
   </div>;
 }

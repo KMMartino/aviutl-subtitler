@@ -50,6 +50,9 @@ def load_workflow_config(workflow: str, explicit_path: Path | None = None) -> di
         raise SubtitlerError(f"Workflow config must be a JSON object: {path}")
     merged = _defaults()
     _deep_update(merged, data)
+    if isinstance(merged.get("cost"), dict):
+        merged["cost"].pop("max_estimated_api_cost_usd", None)
+        merged["cost"].pop("allow_api_spend", None)
     merged.setdefault("workflow", {})["name"] = workflow
     return merged
 
@@ -79,10 +82,8 @@ def validate_workflow_config(
     _boolean(editorial.get('recommendations_enabled', True), 'editorial.recommendations_enabled')
     for key, milliseconds in (('voice_gap_min_ms', 2000), ('voice_leading_handle_ms', 50), ('voice_trailing_handle_ms', 100)):
         _optional_int_min(editorial.get(key, milliseconds), 1 if key == 'voice_gap_min_ms' else 0, 'editorial.' + key)
-    _optional_float_min(editorial.get('recommendation_budget_usd'), 0.01, 'editorial.recommendation_budget_usd')
     _choice(editorial.get('recommendation_model', 'gpt-5.6-terra'), {'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'}, 'editorial.recommendation_model')
     _optional_int_min(editorial.get("game_audio_track"), 0, "editorial.game_audio_track")
-    _optional_float_min(editorial.get("adaptive_budget_usd"), 0.01, "editorial.adaptive_budget_usd")
     _boolean(editorial.get("trim_utterance_pauses", False), "editorial.trim_utterance_pauses")
     for key, default in (("collection_model", "gpt-5.6-luna"), ("cutting_model", "gpt-5.6-terra"), ("escalation_model", "gpt-5.6-sol")):
         _choice(editorial.get(key, default), {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}, "editorial." + key)
@@ -164,8 +165,6 @@ def validate_workflow_config(
     _int_min(exo.get("font_size"), 1, "exo.font_size")
     _non_empty_string(exo.get("font"), "exo.font")
     _finite_number(exo.get("y_position"), "exo.y_position")
-    _non_negative(cost.get("max_estimated_api_cost_usd"), "cost.max_estimated_api_cost_usd")
-    _boolean(cost.get("allow_api_spend"), "cost.allow_api_spend")
     _boolean(cost.get("estimate_cost_only"), "cost.estimate_cost_only")
     _boolean(additional_settings.get("youtube_chapters"), "additional_settings.youtube_chapters")
     _choice(
@@ -364,8 +363,6 @@ def _defaults() -> dict[str, Any]:
             "y_position": 717.0,
         },
         "cost": {
-            "max_estimated_api_cost_usd": 5.0,
-            "allow_api_spend": False,
             "estimate_cost_only": False,
         },
         "additional_settings": {

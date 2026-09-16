@@ -53,7 +53,6 @@ export default function CreatorWorkspace({ project, suggestedName, disabled, sel
     await saveSources([...(project?.recordings.map((recording) => recording.source) ?? []), ...sources]);
   }
   const locked = disabled || busy;
-  const current = project?.results.filter((result, index, results) => !results.slice(index + 1).some((later) => later.workflow === result.workflow && later.recordingId === result.recordingId && later.status === "complete")) ?? [];
   function resultRow(result: NonNullable<typeof project>["results"][number]) {
     const output = result.deliverablePath ?? result.outputPath;
     const stale = project && (result.sourceRevision !== projectSourceRevision(project, result.recordingId) || (result.workflow === "hosted-long-stream" && result.editorialRevision !== JSON.stringify(project.editorial)));
@@ -76,6 +75,9 @@ export default function CreatorWorkspace({ project, suggestedName, disabled, sel
       <strong>{t("project.workspace")}</strong>
       {project && <><input aria-label={t("project.name")} value={name} disabled={locked} onChange={(event) => setName(event.target.value)} onBlur={() => { if (name.trim() && name !== project.name) void act(async () => onProject(await window.subtitler.updateProject({ ...project, name }))); }} />
         <button disabled={locked} onClick={() => onProject(null)}>{t("project.close")}</button>
+        <button disabled={locked} onClick={() => void act(async () => { if (await window.subtitler.deleteProject(project.directory)) onProject(null); })}>{t("project.delete")}</button>
+        <button disabled={locked} onClick={() => void act(async () => onProject(await window.subtitler.createProject(t("project.untitled"))))}>{t("project.new")}</button>
+        <button disabled={locked} onClick={() => void act(async () => { const directory = await window.subtitler.chooseDirectory(); if (directory) onProject(await window.subtitler.openProject(directory)); })}>{t("project.open")}</button>
         <button onClick={() => void window.subtitler.openPath(project.directory)}>{t("project.folder")}</button></>}
       {!project && <>
         <input aria-label={t("project.name")} placeholder={t("project.newName")} value={name} onChange={(event) => setName(event.target.value)} />
@@ -91,7 +93,8 @@ export default function CreatorWorkspace({ project, suggestedName, disabled, sel
       {project.outputDirectory && <button disabled={locked} onClick={() => void act(async () => onProject(await window.subtitler.updateProject({ ...project, outputDirectory: "" })))}>{t("project.mediaFolder")}</button>}
     </div>}
     {!project && <div className="creator-home"><small>{t("project.workspace")}: {catalog?.defaultDirectory}</small><p>{t("project.startHint")}</p>{catalog?.recent.map((item) => <button disabled={locked} key={item.directory} title={item.directory} onClick={() => void act(async () => onProject(await window.subtitler.openProject(item.directory)))}>{item.name}</button>)}</div>}
-    {project && expanded && <div className="creator-columns"><div>
+    {project && <div className="creator-project-sections" key={project.directory}><details>
+      <summary>{t("project.recordings")} ({project.recordings.length})</summary>
       <div className="creator-toolbar"><strong>{t("project.recordings")}</strong><button disabled={locked} onClick={() => void act(addSources)}>{t("project.addRecordings")}</button>
         <button disabled={locked} onClick={() => void act(async () => { const selected = await window.subtitler.chooseInputFile(); if (selected) setPairGameplay(selected); })}>{t("project.addPair")}</button>
       </div>
@@ -110,9 +113,9 @@ export default function CreatorWorkspace({ project, suggestedName, disabled, sel
         <button disabled={locked} onClick={() => void act(async () => saveSources(project.recordings.filter((item) => item.id !== recording.id).map((item) => item.source)))}>{t("project.remove")}</button>
       </div>)}
       {!project.recordings.length && <p>{t("project.addHint")}</p>}
-    </div><div><strong>{t("project.results")}</strong>{current.map(resultRow)}{!current.length && <p>{t("project.emptyResults")}</p>}
-      <details><summary>{t("project.history", { count: project.results.length })}</summary>{project.results.slice().reverse().map(resultRow)}</details>
-    </div></div>}
+    </details>
+      <details><summary>{t("project.history", { count: project.results.length })}</summary>{project.results.slice().reverse().map(resultRow)}{!project.results.length && <p>{t("project.emptyResults")}</p>}</details>
+    </div>}
     </>}
     {transcript && <dialog ref={transcriptDialog} onCancel={() => setTranscript(null)} className="creator-transcript" aria-label={t("project.transcript")}><div className="creator-toolbar"><strong>{t("project.transcript")}</strong><button autoFocus onClick={() => setTranscript(null)}>{t("project.closeTranscript")}</button></div><p>{transcript.source}</p>{transcript.segments.map((segment, index) => <p key={index}><small>{segment.start.toFixed(2)}–{segment.end.toFixed(2)}</small><br />{segment.text}</p>)}</dialog>}
     {error && <p role="alert">{error}</p>}

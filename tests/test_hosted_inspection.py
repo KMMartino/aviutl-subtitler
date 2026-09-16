@@ -27,7 +27,7 @@ class HostedInspectionTests(unittest.TestCase):
             image = root / "frame-000000001200.jpg"
             image.write_bytes(b"jpeg")
             ledger = ApiUsageLedger()
-            provider = HostedInspectionProvider(ledger, 1, root / "diagnostics")
+            provider = HostedInspectionProvider(ledger, root / "diagnostics")
             with patch("subtitler.hosted_inspection.require_api_key", return_value="secret-key"), \
                  patch("subtitler.hosted_inspection.request_json", return_value=response()) as request:
                 self.assertEqual(provider.inspect(operation="../verify", model="gpt-5.6-terra", prompt="inspect",
@@ -56,13 +56,13 @@ class HostedInspectionTests(unittest.TestCase):
                 provider.inspect(operation="cache-read", model="gpt-5.6-terra", prompt="inspect", schema=SCHEMA)
             self.assertAlmostEqual(ledger.rows[-1].cost_usd, .00242)
 
-    def test_budget_model_and_schema_rejected_before_network(self):
+    def test_model_and_schema_rejected_before_network(self):
         with tempfile.TemporaryDirectory() as temporary:
-            for overrides in ({"budget": .000001}, {"model": "unknown"}, {"reasoning_effort": "high"},
+            for overrides in ({"model": "unknown"}, {"reasoning_effort": "high"},
                               {"schema": {"type": "object", "$ref": "anything"}}):
                 with self.subTest(overrides=overrides):
                     options = dict(overrides)
-                    provider = HostedInspectionProvider(ApiUsageLedger(), options.pop("budget", 1), Path(temporary))
+                    provider = HostedInspectionProvider(ApiUsageLedger(), Path(temporary))
                     arguments = dict(operation="verify", model="gpt-5.6-terra", prompt="inspect", schema=SCHEMA)
                     arguments.update(options)
                     with patch("subtitler.hosted_inspection.request_json") as request:
@@ -75,24 +75,24 @@ class HostedInspectionTests(unittest.TestCase):
             for data in (response(status="incomplete"), response("garbage"), response('{"visible": 1}'),
                          response('{"visible": true, "extra": 1}')):
                 ledger = ApiUsageLedger()
-                provider = HostedInspectionProvider(ledger, 1, Path(temporary))
+                provider = HostedInspectionProvider(ledger, Path(temporary))
                 with patch("subtitler.hosted_inspection.require_api_key", return_value="key"), \
                      patch("subtitler.hosted_inspection.request_json", return_value=data):
                     with self.assertRaises(SubtitlerError):
                         provider.inspect(operation="verify", model="gpt-5.6-terra", prompt="inspect", schema=SCHEMA)
                 self.assertAlmostEqual(ledger.total_cost_usd, .0026)
 
-    def test_unknown_usage_retains_reservation_and_prevents_retry(self):
+    def test_unknown_usage_is_recorded_and_no_automatic_retry_occurs(self):
         with tempfile.TemporaryDirectory() as temporary:
             ledger = ApiUsageLedger()
-            provider = HostedInspectionProvider(ledger, .13, Path(temporary))
+            provider = HostedInspectionProvider(ledger, Path(temporary))
             with patch("subtitler.hosted_inspection.require_api_key", return_value="key"), \
                  patch("subtitler.hosted_inspection.request_json", side_effect=SubtitlerError("timeout")) as request:
                 for _ in range(2):
                     with self.assertRaises(SubtitlerError):
                         provider.inspect(operation="verify", model="gpt-5.6-terra", prompt="inspect", schema=SCHEMA)
-                    provider = HostedInspectionProvider(ledger, .13, Path(temporary))
-                self.assertEqual(request.call_count, 1)
+                    provider = HostedInspectionProvider(ledger, Path(temporary))
+                self.assertEqual(request.call_count, 2)
             self.assertEqual(ledger.rows[0].operation, "verify:unconfirmed_estimate")
             self.assertGreater(ledger.total_cost_usd, .1)
             diagnostic = json.loads(next(Path(temporary).glob("*.json")).read_text())

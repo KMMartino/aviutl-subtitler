@@ -11,6 +11,9 @@ select = ["E4", "E7", "E9", "F"]
 [tool.mypy]
 python_version = "3.11"
 files = [
+  "subtitler/moment_selection.py",
+  "subtitler/moment_export.py",
+  "subtitler/moments_cli.py",
   "subtitler/api_costs.py",
   "subtitler/config.py",
   "subtitler/run_artifacts.py",

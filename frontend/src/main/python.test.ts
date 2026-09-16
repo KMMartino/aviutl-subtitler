@@ -26,6 +26,19 @@ const paths: RuntimePaths = {
 };
 
 describe("python command builder", () => {
+  it("routes extraction directly to its CLI and preserves the request as one argument", () => {
+    const moments = { sourcePath: "C:/media/stream.mp4", query: 'find "topic four"', speechSource: "gameplay" as const,
+      startSec: 30, endSec: 60, originOffsetSec: 3600, locale: "en" as const };
+    const command = buildRunCommand(paths, "python", {
+      workflow: "hosted-long-stream", moments, inputPath: moments.sourcePath, outputPath: "C:/media/moments.json",
+      configPath: "C:/state/hosted-long-stream.json", envFile: "C:/state/.env", profile: true, sidecarsEnabled: true,
+      cutSilenceEncoderPreset: "unconfigured", silencePreviewHeight: 360, silencePreviewFps: 8,
+    });
+    expect(command.args.slice(0, 3)).toEqual(["-m", "subtitler.moments_cli", "--spec"]);
+    expect(JSON.parse(command.args[3])).toEqual(moments);
+    expect(command.args).not.toContain("--analysis");
+    expect(command.args).not.toContain("subtitler.editorial_project_cli");
+  });
   it("emits only supported CLI flags", () => {
     const command = buildRunCommand(paths, "python", {
       workflow: "local",

@@ -1,8 +1,11 @@
+import MomentExtractionPanel, { type MomentDraft, type MomentExtractionHandle } from "./components/MomentExtractionPanel";
+import type { SourceDownload } from "./components/SourceUrlInput";
+import type { MomentExtractionRequest } from "./lib/types";
 import CreatorWorkspace from "./components/CreatorWorkspace";
 import { speechPath } from "../shared/creatorProject";
 import type { CreatorProject, ProjectResult } from "../shared/creatorProject";
 import { buildEditorialSources } from "./lib/editorialPairing";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { ArrowLeft, Library, Settings as SettingsIcon } from "lucide-react";
 import ModeSelector from "./components/ModeSelector";
 import ThemeSelector from "./components/ThemeSelector";
@@ -18,7 +21,7 @@ import SilenceReviewScreen from "./components/SilenceReviewScreen";
 import MediaLibraryScreen from "./components/MediaLibraryScreen";
 import BrollReviewScreen from "./components/BrollReviewScreen";
 import { applyCoreSettings, extractCoreSettings } from "./lib/configPatch";
-import { defaultEditorialCheckpointPath, defaultOutputPath, defaultSidecarDir } from "./lib/paths";
+import { defaultEditorialCheckpointPath, defaultOutputPath, defaultSidecarDir, joinPath } from "./lib/paths";
 import type { AppSettings, BrollCandidate, BrollReviewDecision, CoreWorkflowSettings, CutSilenceEncoderPreset, EditorialCutApplicationResult, EditorialProjectRequest, EditorialRestartMode, EncoderProbeResult, PathStatus, RunEvent, RunState, SilenceCutCandidate, SilenceCutDecision, WorkflowConfig, WorkflowName } from "./lib/types";
 import { isLocalWorkflow } from "../shared/workflowCatalog";
 import { useBatchedLog } from "./hooks/useBatchedLog";
@@ -37,6 +40,31 @@ export default function App() {
   const creatorProjectRef = useRef<CreatorProject | null>(null);
   const projectSaveQueue = useRef(Promise.resolve());
   const [projectSaving, setProjectSaving] = useState(false);
+  const [extraction, setExtraction] = useState(false);
+  const momentPanel = useRef<MomentExtractionHandle>(null);
+  const [subtitleDownload, setSubtitleDownload] = useState<SourceDownload>({ url: "", directory: "" });
+  const [momentDownload, setMomentDownload] = useState<SourceDownload>({ url: "", directory: "" });
+  const [defaultProjectDirectory, setDefaultProjectDirectory] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const downloadCancelled = useRef(false);
+  useEffect(() => {
+    void window.subtitler.projectCatalog().then(catalog => setDefaultProjectDirectory(catalog.defaultDirectory))
+      .catch((error: unknown) => setNotice(String(error)));
+    return window.subtitler.onSourceProgress(setDownloadProgress);
+  }, []);
+  const momentDraft = useRef<MomentDraft | null>(null);
+  const onMomentDraft = useCallback((value: MomentDraft) => { momentDraft.current = value; }, []);
+  const [momentSpec, setMomentSpec] = useState<MomentExtractionRequest | null>(null);
+  const [momentAudioTrack, setMomentAudioTrack] = useState(0);
+  const [momentOutput, setMomentOutput] = useState("");
+  const [ytDlpOutdated, setYtDlpOutdated] = useState(false);
+  const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
+  const lastSubtitleWorkflow = useRef<WorkflowName>("hosted");
+  const onMomentReady = useCallback((value: MomentExtractionRequest | null, track: number) => {
+    setMomentSpec(value); setMomentAudioTrack(track);
+  }, []);
+  useEffect(() => window.subtitler.onYtDlpOutdated(() => setYtDlpOutdated(true)), []);
   function changeEditorialProject(value: EditorialProjectRequest) {
     setEditorialProject(value);
     const directory = creatorProjectRef.current?.directory;
@@ -71,6 +99,7 @@ export default function App() {
   const pathRequest = useRef(0);
   const [projectRoot, setProjectRoot] = useState("");
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  useEffect(() => { if (settings?.selectedWorkflow && settings.selectedWorkflow !== "hosted-long-stream") lastSubtitleWorkflow.current = settings.selectedWorkflow; }, [settings?.selectedWorkflow]);
   const [configs, setConfigs] = useState<Record<WorkflowName, WorkflowConfig> | null>(null);
   const [configPaths, setConfigPaths] = useState<Record<WorkflowName, string> | null>(null);
   const [coreSettings, setCoreSettings] = useState<CoreWorkflowSettings | null>(null);
@@ -106,7 +135,7 @@ export default function App() {
   const [probingEncoders, setProbingEncoders] = useState(false);
   const [silenceReview, setSilenceReview] = useState<{ runId: string; reviewId: string; candidates: SilenceCutCandidate[] } | null>(null);
   const [brollReview, setBrollReview] = useState<{ runId: string; reviewId: string; candidates: BrollCandidate[] } | null>(null);
-  const workflow = settings?.selectedWorkflow ?? "local";
+  const workflow = extraction ? "hosted-long-stream" : settings?.selectedWorkflow ?? "local";
   const { envStatus, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
   const {
     localModelStatus,
@@ -164,7 +193,7 @@ export default function App() {
   const localReady = workflow !== "local" || Boolean(localModelStatus?.installed && pathStatus.llamaServer?.exists);
   const ffmpegReady = Boolean(runtimeStatus?.ffmpeg.ready);
   const pythonRequirementsReady = Boolean(runtimeStatus?.python.requirementsInstalled);
-  const alignmentReady = workflow === "hosted-long-stream" || Boolean(
+  const alignmentReady = (workflow === "hosted-long-stream" && !extraction) || Boolean(
     coreSettings?.alignment
     && (!coreSettings.alignment.offlineModelCache
       || (runtimeStatus?.alignment.installed && coreSettings.alignment.model === runtimeStatus.alignment.modelPath))
@@ -182,13 +211,17 @@ export default function App() {
     && editorialProject.sources.every((source) => source.roleConfirmed)
 )
   );
-  const canRun = Boolean(!projectSaving && !acquiringSource && settings && configs && configPaths && pythonReady && pythonRequirementsReady && hostedReady && localReady && (
+  const projectDownloadLocation = creatorProject ? joinPath(creatorProject.directory, "Sources") : t("input.newProjectDownload", { path: defaultProjectDirectory });
+  const pendingDownload = extraction ? momentDownload : subtitleDownload;
+  const downloadRequested = (extraction || !editorialMapEnabled) && Boolean(pendingDownload.url.trim());
+  const downloadReady = !downloadRequested || Boolean(/^https?:\/\/\S+$/i.test(pendingDownload.url.trim()));
+  const canRun = downloadReady && (extraction ? Boolean(momentSpec && !acquiringSource && pythonReady && pythonRequirementsReady && ffmpegReady && envStatus.keysPresent.OPENAI_API_KEY && (configs?.["hosted-long-stream"].backend?.transcriber !== "gemini" || envStatus.keysPresent.GEMINI_API_KEY) && alignmentReady) : Boolean(!projectSaving && !acquiringSource && settings && configs && configPaths && pythonReady && pythonRequirementsReady && hostedReady && localReady && (
     reviewedEditorialProject
       ? editorialMapEnabled
-      : (inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && outputPath && ffmpegReady && alignmentReady && cutSilenceReady && editorialReady
-  ));
+      : (downloadRequested || inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && (downloadRequested || outputPath) && ffmpegReady && alignmentReady && (downloadRequested ? (!renderCutVideo || Boolean(selectedEncoderProbe?.available)) : cutSilenceReady) && editorialReady
+  )));
 
-  const runBlockedReason = canRun || !(inputPath || editorialResumeCheckpoint || reviewedEditorialProject) ? ""
+  const runBlockedReason = extraction ? (canRun ? "" : t("moments.ready")) : canRun || !(inputPath || editorialResumeCheckpoint || reviewedEditorialProject) ? ""
     : !settings || !configs || !configPaths || !runtimeStatus ? t("run.loading")
     : projectSaving || acquiringSource ? t("run.preparing")
     : !pythonReady || !pythonRequirementsReady ? t("run.pythonBlocked")
@@ -210,8 +243,8 @@ export default function App() {
 
   useEffect(() => {
     if (!settings || !configs) return;
-    setCoreSettings(extractCoreSettings(configs[settings.selectedWorkflow]));
-  }, [settings?.selectedWorkflow, configs]);
+    setCoreSettings(extractCoreSettings(configs[workflow]));
+  }, [workflow, configs]);
 
   useEffect(() => {
     if (settings) document.documentElement.dataset.theme = settings.theme;
@@ -365,6 +398,8 @@ export default function App() {
 
   function setWorkflow(nextWorkflow: WorkflowName) {
     if (!settings) return;
+    if (settings.selectedWorkflow !== "hosted-long-stream") lastSubtitleWorkflow.current = settings.selectedWorkflow;
+    if (nextWorkflow !== "hosted-long-stream") lastSubtitleWorkflow.current = nextWorkflow;
     if (creatorProject) {
       setEditorialProject({ ...creatorProject.editorial, sources: creatorProject.recordings.map((recording) => recording.source) });
       const recording = creatorProject.recordings.find((recording) => recording.id === creatorRecordingId) ?? creatorProject.recordings[0];
@@ -415,7 +450,57 @@ export default function App() {
 
   async function startRun() {
     if (!settings || !configPaths || !coreSettings) return;
+    downloadCancelled.current = false;
     try {
+      let runInputPath = inputPath;
+      let runAnalysis = analysis;
+      let runMomentSpec = momentSpec;
+      let runOutputPath = outputPath;
+      let runSidecarDir = sidecarDir;
+      if (downloadRequested) {
+        clearLogs(); setRunState("running"); setElapsedMs(0); setActiveRunId("");
+        setDownloading(true); setAcquiringSource(true); setDownloadProgress(null); downloadCancelled.current = false;
+        try {
+          await projectSaveQueue.current;
+          let downloadProject = creatorProjectRef.current;
+          if (!downloadProject) {
+            downloadProject = await window.subtitler.createProject(t("input.downloadProject"));
+            creatorProjectRef.current = downloadProject; setCreatorProject(downloadProject);
+          }
+          const downloadDirectory = pendingDownload.directory || joinPath(downloadProject.directory, "Sources");
+          if (downloadCancelled.current) { setRunState("cancelled"); return; }
+          if (extraction) {
+            if (!momentPanel.current) throw new Error(t("moments.ready"));
+            runMomentSpec = await momentPanel.current.download(downloadDirectory);
+            const downloadedAnalysis = await window.subtitler.analyzeMedia(runMomentSpec.sourcePath);
+            const sources = buildEditorialSources([{ path: runMomentSpec.sourcePath, analysis: downloadedAnalysis }]);
+            const saved = await window.subtitler.updateProject({ ...downloadProject, recordings: [...downloadProject.recordings, ...sources.map(source => ({ id: crypto.randomUUID(), source }))] });
+            creatorProjectRef.current = saved; setCreatorProject(saved);
+          } else {
+            const acquired = await window.subtitler.acquireSource(subtitleDownload.url.trim(), undefined, downloadDirectory);
+            runInputPath = acquired.path;
+            runAnalysis = await window.subtitler.analyzeMedia(runInputPath);
+            handleInput(runInputPath);
+            setSubtitleDownload(value => ({ ...value, url: "" }));
+            runOutputPath = defaultOutputPath(runInputPath, workflow);
+            runSidecarDir = defaultSidecarDir(runInputPath);
+          }
+          if (downloadCancelled.current) { setRunState("cancelled"); return; }
+        } finally { setDownloading(false); setAcquiringSource(false); }
+      }
+      if (extraction && runMomentSpec) {
+        await persistWorkflowSettings(false);
+        clearLogs(); setRunState("running"); setElapsedMs(0); setMomentOutput("");
+        const output = runMomentSpec.sourcePath.replace(/\.[^\\/.]+$/, "") + `.moments-${Date.now()}.json`;
+        const result = await window.subtitler.startRun({
+          workflow: "hosted-long-stream", moments: runMomentSpec, inputPath: runMomentSpec.sourcePath, outputPath: output,
+          configPath: configPaths["hosted-long-stream"], envFile: settings.envFile, audioTrack: downloadRequested ? 0 : momentAudioTrack,
+          profile: true, sidecarsEnabled: true, cutSilenceEncoderPreset: settings.cutSilenceEncoderPreset,
+          silencePreviewHeight: settings.silencePreviewHeight, silencePreviewFps: settings.silencePreviewFps,
+        });
+        setMomentOutput(output); setActiveRunId(result.runId);
+        return;
+      }
       if (reviewedEditorialProject) {
         clearLogs();
         setRunState("running");
@@ -429,11 +514,11 @@ export default function App() {
       await projectSaveQueue.current;
       let project = creatorProjectRef.current;
       if (!editorialResumeCheckpoint && !editorialExtensionCheckpoint) {
-        const sources = editorialMapEnabled ? editorialProject.sources : buildEditorialSources([{ path: inputPath, analysis: analysis ?? await window.subtitler.analyzeMedia(inputPath) }]);
-        if (!project) project = await window.subtitler.createProject((inputPath.split(/[\\/]/).pop() ?? "Untitled project").replace(/\.[^.]+$/, ""));
+        const sources = editorialMapEnabled ? editorialProject.sources : buildEditorialSources([{ path: runInputPath, analysis: runAnalysis ?? await window.subtitler.analyzeMedia(runInputPath) }]);
+        if (!project) project = await window.subtitler.createProject((runInputPath.split(/[\\/]/).pop() ?? "Untitled project").replace(/\.[^.]+$/, ""));
         const recordings = editorialMapEnabled
           ? sources.map((source) => ({ id: project!.recordings.find((recording) => recording.source.visualPath === source.visualPath)?.id ?? crypto.randomUUID(), source }))
-          : project.recordings.some((recording) => speechPath(recording.source) === inputPath)
+          : project.recordings.some((recording) => speechPath(recording.source) === runInputPath)
             ? project.recordings : [...project.recordings, ...sources.map((source) => ({ id: crypto.randomUUID(), source }))];
         project = await window.subtitler.updateProject({ ...project, recordings, editorial: editorialMapEnabled ? editorialProject : project.editorial });
         creatorProjectRef.current = project; setCreatorProject(project);
@@ -443,15 +528,15 @@ export default function App() {
       setElapsedMs(0);
       const result = await window.subtitler.startRun({
         creatorProjectDirectory: !editorialResumeCheckpoint && !editorialExtensionCheckpoint ? project?.directory : undefined,
-        creatorRecordingId: !editorialMapEnabled ? project?.recordings.find((recording) => speechPath(recording.source) === inputPath)?.id : undefined,
+        creatorRecordingId: !editorialMapEnabled ? project?.recordings.find((recording) => speechPath(recording.source) === runInputPath)?.id : undefined,
         workflow,
         freshRun: false,
-        inputPath: editorialResumeCheckpoint || editorialExtensionCheckpoint || inputPath,
-        outputPath,
+        inputPath: editorialResumeCheckpoint || editorialExtensionCheckpoint || runInputPath,
+        outputPath: runOutputPath,
         configPath: configPaths[workflow],
         envFile: settings.envFile,
-        audioTrack: coreSettings.audioTrack,
-        sidecarDir: settings.sidecarsEnabled ? sidecarDir : undefined,
+        audioTrack: downloadRequested ? 0 : coreSettings.audioTrack,
+        sidecarDir: settings.sidecarsEnabled ? runSidecarDir : undefined,
         sidecarsEnabled: settings.sidecarsEnabled,
         profile: coreSettings.diagnostics.profile,
         cutSilenceEncoderPreset: settings.cutSilenceEncoderPreset,
@@ -472,7 +557,7 @@ export default function App() {
       setActiveRunId(result.runId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setRunState("failed");
+      setRunState(downloadCancelled.current ? "cancelled" : "failed");
       setActiveRunId("");
       if (!reviewedEditorialProject) replaceLogs(message ? `${message}\n` : "");
       setNotice(message || t("notice.runStartFailed"));
@@ -480,6 +565,7 @@ export default function App() {
   }
 
   async function cancelRun(immediate = false, requestedRunId = activeRunId) {
+    if (downloading) { downloadCancelled.current = true; await window.subtitler.cancelSourceAcquisition(); return; }
     if (!requestedRunId) return;
     await window.subtitler.cancelRun(requestedRunId, immediate);
   }
@@ -635,14 +721,14 @@ export default function App() {
   });
 
   return (
-    <main className={view === "main" ? "app creator-app" : "app"}>
+    <main className={view === "main" ? (extraction ? "app creator-app moments-app" : "app creator-app") : "app"}>
       <header className="topbar">
         <div>
           <h1>SubUtl</h1>
           <div className="subtle" title={projectRoot}>{creatorProject?.name ?? t("project.workspace")}</div>
         </div>
         <div className="topbar-controls">
-          <ModeSelector workflow={workflow} onChange={setWorkflow} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} />
+          <ModeSelector workflow={workflow} extraction={extraction} onExtract={() => { setExtraction(true); setView("main"); }} onChange={(next) => { setExtraction(false); setView("main"); setWorkflow(next === "hosted-long-stream" ? next : lastSubtitleWorkflow.current); }} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} />
           <ThemeSelector value={settings.theme} onChange={(theme) => {
             const next = { ...settings, theme };
             setSettings(next);
@@ -657,13 +743,16 @@ export default function App() {
             <button className="topbar-button" onClick={() => setView("main")}><ArrowLeft size={16} /> {t("common.back")}</button>
           )}
         </div>
+      {ytDlpOutdated && <section className="row" style={{ gridColumn: "1 / -1" }} role="status"><span>{t("moments.outdated")}</span><button disabled={ytDlpUpdating || Boolean(runtimeAction) || acquiringSource || runState === "running"} onClick={() => { setYtDlpUpdating(true); void window.subtitler.installOrUpdateYtDlp().then(() => { setYtDlpOutdated(false); void refreshRuntimeStatus(); }).catch((error: unknown) => setNotice(String(error))).finally(() => setYtDlpUpdating(false)); }}>{t("moments.update")}</button></section>}
       </header>
-      {view === "main" && <CreatorWorkspace suggestedName={inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "")} onResume={resumeProjectResult} onBusyChange={setAcquiringSource} project={creatorProject} selectedRecording={creatorRecordingId} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} onProject={receiveProject} onSelect={(id, source) => { setCreatorRecordingId(id); handleInput(editorialMapEnabled ? source.visualPath : speechPath(source)); }} />}
+      {view === "main" && !extraction && <CreatorWorkspace suggestedName={inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "")} onResume={resumeProjectResult} onBusyChange={setAcquiringSource} project={creatorProject} selectedRecording={creatorRecordingId} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} onProject={receiveProject} onSelect={(id, source) => { setCreatorRecordingId(id); handleInput(editorialMapEnabled ? source.visualPath : speechPath(source)); }} />}
+
       {view === "library" ? (
         <MediaLibraryScreen />
       ) : view === "settings" ? (
         <div className="settings-view">
           <SettingsPanel
+            momentAnalysisModel={extraction ? String(configs?.["hosted-long-stream"].editorial?.analysis_model ?? "gpt-5.6-luna") : undefined}
             workflow={workflow}
             appLocale={settings.appLocale}
             settings={coreSettings}
@@ -794,24 +883,31 @@ export default function App() {
       <div className="main-workspace" style={{ "--logs-height": `${logsHeight}%` } as React.CSSProperties}>
         <div className="primary-flow" style={{ "--input-width": `${inputWidth}%` } as React.CSSProperties}>
           <div className="input-stack">
-            {editorialMapEnabled ? <SilenceProjectPanel value={editorialProject} disabled={runState === "running"}
+            {extraction ? <MomentExtractionPanel ref={momentPanel} download={momentDownload} onDownload={setMomentDownload} defaultDownloadLocation={projectDownloadLocation} initial={momentDraft.current} onDraft={onMomentDraft} disabled={runState === "running"} onBusy={setAcquiringSource} onReady={onMomentReady} /> : editorialMapEnabled ? <SilenceProjectPanel value={editorialProject} disabled={runState === "running"}
               onChange={changeEditorialProject} onPrimarySource={handleInput} /> : <InputPanel
-              onSourceBusyChange={setAcquiringSource}
+              download={subtitleDownload} onDownload={setSubtitleDownload} defaultDownloadLocation={projectDownloadLocation}
               inputPath={inputPath}
               audioTrack={coreSettings.audioTrack}
               analysis={analysis}
               analyzing={analyzing}
               analysisError={analysisError}
               disabled={runState === "running"}
-              onInput={handleInput}
+              onInput={(path) => { setSubtitleDownload(value => ({ ...value, url: "" })); handleInput(path); }}
               onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
             />}
-            <RunPanel blockedReason={runBlockedReason} onConfigure={() => setView("settings")} state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun}
+            <RunPanel download={downloadRequested || downloading} downloadProgress={downloading ? downloadProgress : undefined} blockedReason={runBlockedReason} onConfigure={() => setView("settings")} state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun}
                />
           </div>
           <div className="resize-divider column-divider" role="separator" aria-label={t("shell.resizeColumns")} aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={t("shell.inputWidth", { percent: Math.round(inputWidth) })} tabIndex={0} title={t("shell.resizeColumnsHelp")} onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
           <div className="flow-side">
-          {(editorialResumeCheckpoint || editorialExtensionCheckpoint || reviewedEditorialProject) ? <OutputPanel
+            {!extraction && !editorialMapEnabled && <section className="panel"><label>{t("moments.llm")}</label><div className="segmented">
+              <button disabled={runState === "running"} className={workflow === "local" ? "active" : ""} onClick={() => setWorkflow("local")}>{t("mode.local")}</button>
+              <button disabled={runState === "running"} className={workflow === "hosted" ? "active" : ""} onClick={() => setWorkflow("hosted")}>{t("mode.hosted")}</button>
+            </div></section>}
+
+          {extraction ? <section className="panel stack"><div className="panel-title">{t("project.results")}</div><p>{t("moments.outputHelp")}</p>
+            {momentOutput && runState === "succeeded" && <><button onClick={() => void window.subtitler.openPath(momentOutput.replace(/\.json$/, ".html"))}>{t("moments.report")}</button><button onClick={() => void window.subtitler.openPath(momentOutput.replace(/\.json$/, ".exo"))}>{t("moments.exo")}</button><button onClick={() => void window.subtitler.showItemInFolder(momentOutput)}>{t("project.files")}</button></>}
+          </section> : (editorialResumeCheckpoint || editorialExtensionCheckpoint || reviewedEditorialProject) ? <OutputPanel
             outputPath={outputPath}
             editorial={editorialMapEnabled}
             disabled={runState === "running" || Boolean(editorialResumeCheckpoint || editorialExtensionCheckpoint)}
@@ -822,8 +918,8 @@ export default function App() {
               <button onClick={() => void window.subtitler.showItemInFolder(file)}>{t("project.files")}</button>
             </div>)) : <p>{t("project.emptyResults")}</p>}
           </section>}
-           {<AdditionalSettingsPanel audioTracks={analysis?.audioTracks} paired={editorialProject.sources.length > 0 && editorialProject.sources.every((source) => source.mode === "paired" && source.roleConfirmed)} workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />}
-          {!editorialMapEnabled && <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />}
+           {!extraction && <AdditionalSettingsPanel audioTracks={analysis?.audioTracks} paired={editorialProject.sources.length > 0 && editorialProject.sources.every((source) => source.mode === "paired" && source.roleConfirmed)} workflow={workflow} settings={coreSettings} encoder={settings.cutSilenceEncoderPreset} encoderReady={Boolean(selectedEncoderProbe?.available) && !probingEncoders} encoderChecking={probingEncoders} hasVideo={Boolean(analysis?.videoCodec)} frameRateMode={analysis?.frameRateMode ?? "unknown"} disabled={runState === "running"} onConfigure={openCutSilenceSettings} onChange={setCoreSettings} />}
+          {!extraction && !editorialMapEnabled && <GlossaryPanel value={glossary} onChange={setGlossary} onSave={saveGlossary} onImport={importGlossary} />}
           </div>
         </div>
         <div className="resize-divider log-divider" role="separator" aria-label={t("shell.resizeLogs")} aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={t("shell.logHeight", { percent: Math.round(logsHeight) })} tabIndex={0} title={t("shell.resizeLogsHelp")} onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />

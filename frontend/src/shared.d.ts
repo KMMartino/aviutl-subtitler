@@ -13,6 +13,7 @@ declare global {
       projectCatalog(): Promise<ProjectCatalog>;
       createProject(name: string, parentDirectory?: string): Promise<CreatorProject>;
       openProject(directory: string): Promise<CreatorProject>;
+      deleteProject(directory: string): Promise<boolean>;
       updateProject(update: ProjectUpdate): Promise<CreatorProject>;
       setProjectDirectory(directory: string): Promise<ProjectCatalog>;
       chooseInputFile(defaultPath?: string): Promise<string | null>;
@@ -38,7 +39,8 @@ declare global {
       getMediaAssetThumbnails(assetIds: string[]): Promise<Record<string, string>>;
       updateMediaAssetDescription(assetId: string, description: string): Promise<MediaAssetDetail>;
       addMediaAssetSegment(assetId: string, scope: MediaAnalysisScope, description: string): Promise<MediaAssetDetail>;
-      acquireSource(sourceUrl: string): Promise<AcquiredSource>;
+      acquireSource(sourceUrl: string, range?: { startSec: number; endSec?: number }, directory?: string): Promise<AcquiredSource>;
+      onYtDlpOutdated(callback: () => void): () => void;
       cancelSourceAcquisition(): Promise<void>;
       onSourceProgress(callback: (percent: number) => void): () => void;
       probeWebAsset(sourceUrl: string): Promise<WebAssetProbe>;

@@ -16,6 +16,12 @@ export function buildRunCommand(paths: RuntimePaths, pythonPath: string, request
   if (ffmpegBin) {
     env.PATH = `${ffmpegBin}${path.delimiter}${env.PATH ?? ""}`;
   }
+  if (request.moments) {
+    const args = ["-m", "subtitler.moments_cli", "--spec", JSON.stringify(request.moments),
+      "--config", request.configPath, "--env-file", request.envFile, "--output", request.outputPath,
+      "--audio-track", String(request.audioTrack ?? 0)];
+    return { command: pythonPath, args, preview: [pythonPath, ...args].map(quoteArg).join(" "), cwd: paths.bundledBackendRoot, env };
+  }
   const args = request.editorialProject || request.editorialCheckpoint ? buildEditorialArgs(paths, request) : [
     script,
     request.inputPath,

@@ -136,7 +136,7 @@ class HostedEditorialStageExecutor:
         if stage == "global_reconciliation":
             return {"mode": "collected_activity_overview"}
         if stage == "action_planning":
-            return {"adaptive": {key: editorial.get(key) for key in ("cutting_mode", "game_audio_track", "adaptive_budget_usd", "collection_model", "cutting_model", "escalation_model", "trim_utterance_pauses", "gap_edge_mode", "voice_gap_min_ms", "voice_leading_handle_ms", "voice_trailing_handle_ms", "recommendations_enabled", "recommendation_model", "recommendation_budget_usd")},
+            return {"adaptive": {key: editorial.get(key) for key in ("cutting_mode", "game_audio_track", "collection_model", "cutting_model", "escalation_model", "trim_utterance_pauses", "gap_edge_mode", "voice_gap_min_ms", "voice_leading_handle_ms", "voice_trailing_handle_ms", "recommendations_enabled", "recommendation_model")},
                     "selection": self._model_config("analysis")["cleanup"],
                     "cleanup": self._model_config("subtitle_cleanup")["cleanup"],
                     "glossary": [asdict(entry) for entry in load_glossary(self.options.glossary_path)]}

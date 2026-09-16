@@ -1,11 +1,11 @@
 import unittest
 
-from subtitler.backends.existing_pipeline import enforce_cost_guard, estimate_backend_run_cost
+from subtitler.backends.existing_pipeline import validate_cost_estimate, estimate_backend_run_cost
 from subtitler.config import load_workflow_config
 from subtitler.errors import SubtitlerError
 
 
-class HostedCostGuardTests(unittest.TestCase):
+class HostedCostReportingTests(unittest.TestCase):
     def test_hosted_estimate_uses_selected_speech_seconds(self):
         config = load_workflow_config("hosted")
 
@@ -20,50 +20,22 @@ class HostedCostGuardTests(unittest.TestCase):
 
         self.assertEqual(cost, 0.0)
 
-    def test_allow_api_spend_setting_is_config_only(self):
-        config = load_workflow_config("hosted")
-        config["cost"]["allow_api_spend"] = True
+    def test_legacy_spending_limits_do_not_interrupt_execution(self):
+        for legacy in ({"max_estimated_api_cost_usd": 0.01, "allow_api_spend": False},
+                       {"max_estimated_api_cost_usd": -1, "allow_api_spend": "false"}, {}):
+            config = load_workflow_config("hosted")
+            config["cost"].update(legacy)
+            validate_cost_estimate(config, estimated_api_cost=100.0)
 
-        self.assertTrue(config["cost"]["allow_api_spend"])
-        self.assertGreater(estimate_backend_run_cost(config, speech_seconds=60.0), 0.0)
-
-    def test_hosted_cost_above_limit_raises(self):
-        config = load_workflow_config("hosted")
-        config["cost"]["max_estimated_api_cost_usd"] = 0.01
-
-        with self.assertRaises(SubtitlerError):
-            enforce_cost_guard(config, estimated_api_cost=1.0)
-
-    def test_allow_api_spend_permits_above_limit_estimate(self):
-        config = load_workflow_config("hosted")
-        config["cost"]["max_estimated_api_cost_usd"] = 0.01
-        config["cost"]["allow_api_spend"] = True
-
-        enforce_cost_guard(config, estimated_api_cost=1.0)
-
-    def test_string_false_cannot_authorize_api_spend(self):
-        config = load_workflow_config("hosted")
-        config["cost"]["max_estimated_api_cost_usd"] = 0.01
-        config["cost"]["allow_api_spend"] = "false"
-
-        with self.assertRaisesRegex(SubtitlerError, "allow_api_spend must be a boolean"):
-            enforce_cost_guard(config, estimated_api_cost=1.0)
-
-    def test_non_finite_limit_fails_closed(self):
-        for value in (float("nan"), float("inf"), float("-inf")):
-            with self.subTest(value=value):
-                config = load_workflow_config("hosted")
-                config["cost"]["max_estimated_api_cost_usd"] = value
-                config["cost"]["allow_api_spend"] = True
-                with self.assertRaisesRegex(SubtitlerError, "finite non-negative number"):
-                    enforce_cost_guard(config, estimated_api_cost=1.0)
+    def test_default_config_has_no_spending_limit(self):
+        self.assertEqual(load_workflow_config("hosted")["cost"], {"estimate_cost_only": False})
 
     def test_non_finite_estimate_fails_closed(self):
         config = load_workflow_config("hosted")
         config["cost"]["allow_api_spend"] = True
 
         with self.assertRaisesRegex(SubtitlerError, "estimated API cost must be"):
-            enforce_cost_guard(config, estimated_api_cost=float("nan"))
+            validate_cost_estimate(config, estimated_api_cost=float("nan"))
 
 
 if __name__ == "__main__":

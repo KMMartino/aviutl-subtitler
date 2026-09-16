@@ -100,7 +100,6 @@ def build_parser() -> argparse.ArgumentParser:
     narrate.add_argument("--output-checkpoint", required=True)
     narrate.add_argument("--env-file", required=True)
     narrate.add_argument("--workspace", required=True)
-    narrate.add_argument("--budget", type=float, default=4.0)
     return parser
 
 
@@ -124,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.copytree(source.with_suffix('.operations'), destination.with_suffix('.operations'), dirs_exist_ok=True)
             load_env_file(Path(args.env_file))
             try:
-                narration = generate_narration(project, Path(args.workspace), {'narration_budget_usd': args.budget})
+                narration = generate_narration(project, Path(args.workspace), {})
             except Exception as exc:
                 _record_stage_cost(project, 'project', 'narration_suggestions', getattr(exc, 'editorial_failure_output', {}))
                 write_editorial_checkpoint(destination, project)

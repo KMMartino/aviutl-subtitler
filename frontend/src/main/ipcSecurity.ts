@@ -40,7 +40,7 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
   switch (channel) {
     case "project:export-exo": exact(args, 2); assertAbsolutePath(args[0]); assertShortString(args[1]); return;
     case "project:transcript": case "project:review": exact(args, 3); assertAbsolutePath(args[0]); assertShortString(args[1]); assertAbsolutePath(args[2]); return;
-    case "project:open": case "project:default-directory": return absolutePathArg(args);
+    case "project:delete": case "project:open": case "project:default-directory": return absolutePathArg(args);
     case "project:create": exactRange(args, 1, 2); assertShortString(args[0]); if (args[1] !== undefined) assertAbsolutePath(args[1]); return;
     case "project:update": {
       exact(args, 1); assertPlainObject(args[0]); const update = args[0];
@@ -111,7 +111,12 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
       exact(args, 3); assertShortString(args[0]); validateAnalysisScope(args[1]);
       if (typeof args[2] !== "string" || !args[2].trim() || args[2].length > 4000 || args[2].includes("\0")) fail();
       return;
-    case "source:acquire": case "library:web-probe":
+    case "source:acquire":
+      exactRange(args, 1, 3); assertWebUrl(args[0]);
+      if (args[1] !== undefined) validateMomentRange(args[1]);
+      if (args[2] !== undefined) assertAbsolutePath(args[2]);
+      return;
+    case "library:web-probe":
       exact(args, 1); assertWebUrl(args[0]); return;
     case "library:web-acquire":
       exact(args, 1); validateWebAcquireRequest(args[0]); return;
@@ -181,9 +186,24 @@ export function contentSecurityPolicy(packaged: boolean): string {
 function validateRunRequest(value: unknown): void {
   assertPlainObject(value);
   const request = value as Record<string, unknown>;
-  const allowed = new Set(["creatorResumeResultId", "creatorProjectDirectory", "creatorRecordingId", "freshRun", "workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps", "editorialProject", "editorialCheckpoint", "editorialCheckpointSources", "editorialRestartFrom", "editorialExtend"]);
+  const allowed = new Set(["moments", "creatorResumeResultId", "creatorProjectDirectory", "creatorRecordingId", "freshRun", "workflow", "inputPath", "outputPath", "configPath", "envFile", "audioTrack", "sidecarDir", "profile", "sidecarsEnabled", "cutSilenceEncoderPreset", "silencePreviewHeight", "silencePreviewFps", "editorialProject", "editorialCheckpoint", "editorialCheckpointSources", "editorialRestartFrom", "editorialExtend"]);
   if (Object.keys(request).some((key) => !allowed.has(key))) fail();
   assertEnum(request.workflow, workflows);
+  if (request.moments !== undefined) {
+    if (request.workflow !== "hosted-long-stream" || request.editorialProject || request.editorialCheckpoint || request.creatorProjectDirectory) fail();
+    assertPlainObject(request.moments);
+    const spec = request.moments;
+    if (Object.keys(spec).some((key) => !["sourcePath", "facecamPath", "speechSource", "query", "startSec", "endSec", "originOffsetSec", "sourceUrl", "boundedEnd", "locale"].includes(key))) fail();
+    assertAbsolutePath(spec.sourcePath);
+    if (spec.facecamPath !== undefined) assertAbsolutePath(spec.facecamPath);
+    assertEnum(spec.speechSource, new Set(["gameplay", "facecam"]));
+    assertEnum(spec.locale, new Set(["en", "ja"]));
+    if (typeof spec.query !== "string" || !spec.query.trim() || spec.query.length > 20000 || spec.query.includes("\0")) fail();
+    validateMomentRange({ startSec: spec.startSec, endSec: spec.endSec });
+    if (typeof spec.originOffsetSec !== "number" || !Number.isFinite(spec.originOffsetSec) || spec.originOffsetSec < 0) fail();
+    if (spec.sourceUrl !== undefined) assertWebUrl(spec.sourceUrl);
+    if (spec.boundedEnd !== undefined && typeof spec.boundedEnd !== "boolean") fail();
+  }
   if (request.creatorResumeResultId !== undefined) { assertShortString(request.creatorResumeResultId); assertAbsolutePath(request.creatorProjectDirectory); }
   if (request.creatorProjectDirectory !== undefined) assertAbsolutePath(request.creatorProjectDirectory);
   if (request.creatorRecordingId !== undefined) assertShortString(request.creatorRecordingId);
@@ -210,6 +230,12 @@ function validateRunRequest(value: unknown): void {
   if (request.editorialExtend !== undefined) {
     if (request.editorialExtend !== true || request.editorialCheckpoint === undefined || request.editorialProject === undefined) fail();
   }
+}
+function validateMomentRange(value: unknown): void {
+  assertPlainObject(value);
+  if (Object.keys(value).some((key) => !["startSec", "endSec"].includes(key))) fail();
+  if (typeof value.startSec !== "number" || !Number.isFinite(value.startSec) || value.startSec < 0) fail();
+  if (value.endSec !== undefined && (typeof value.endSec !== "number" || !Number.isFinite(value.endSec) || value.endSec <= value.startSec)) fail();
 }
 function validateEditorialProjectRequest(workflow: unknown, value: unknown): void {
   if (workflow !== "hosted-long-stream") fail();

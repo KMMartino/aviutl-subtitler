@@ -6,12 +6,12 @@ import TooltipLabel from "../TooltipLabel";
 import SetupSection from "./SetupSection";
 import { useI18n } from "../../i18n";
 
-type Props = { settings: CoreWorkflowSettings; envFile: string; envStatus: EnvStatus; verification: HostedModelVerification | null; verifying: boolean; expanded: boolean; onToggle(): void; onChange(settings: CoreWorkflowSettings): void; onEnvFile(path: string): void; onVerify(): void };
+type Props = { analysisModel?: string; settings: CoreWorkflowSettings; envFile: string; envStatus: EnvStatus; verification: HostedModelVerification | null; verifying: boolean; expanded: boolean; onToggle(): void; onChange(settings: CoreWorkflowSettings): void; onEnvFile(path: string): void; onVerify(): void };
 
-export default function HostedSettingsSection({ settings, envFile, envStatus, verification, verifying, expanded, onToggle, onChange, onEnvFile, onVerify }: Props) {
+export default function HostedSettingsSection({ analysisModel, settings, envFile, envStatus, verification, verifying, expanded, onToggle, onChange, onEnvFile, onVerify }: Props) {
   const { t } = useI18n();
   const hosted = settings.hosted ?? { transcriptionProvider: "gemini", transcriptionModel: APPROVED_MODELS.gemini38Flash, fallbackTranscriptionProvider: "openai", fallbackTranscriptionModel: APPROVED_MODELS.openaiTranscriptionGpt, cleanupProvider: "openai", cleanupModel: APPROVED_MODELS.openaiCleanup56Luna, envFile: "" };
-  function setCost(key: keyof NonNullable<CoreWorkflowSettings["cost"]>, value: number | boolean) { onChange({ ...settings, cost: { maxEstimatedApiCostUsd: 5, allowApiSpend: false, estimateCostOnly: false, ...settings.cost, [key]: value } }); }
+  function setCost(estimateCostOnly: boolean) { onChange({ ...settings, cost: { estimateCostOnly } }); }
   async function pickEnv() { const path = await window.subtitler.chooseFile(); if (path) onEnvFile(path); }
   return <>
     <SetupSection title={t("settings.hosted.apiKeys")} detail={envStatus.exists ? t("settings.hosted.keySelected") : t("settings.hosted.chooseEnv")} ready={envStatus.exists} expanded={expanded} onToggle={onToggle}>
@@ -23,9 +23,8 @@ export default function HostedSettingsSection({ settings, envFile, envStatus, ve
     <div className="stack">
       <HostedModelSelect label={t("settings.hosted.transcription")} tip={t("settings.hosted.transcriptionHelp")} options={hostedOptions(verification, "transcription")} value={`${hosted.transcriptionProvider}:${hosted.transcriptionModel}`} onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, transcriptionProvider: provider, transcriptionModel: model } })} />
       <HostedModelSelect label={t("settings.hosted.fallback")} tip={t("settings.hosted.fallbackHelp")} options={hostedOptions(verification, "transcription")} value={`${hosted.fallbackTranscriptionProvider}:${hosted.fallbackTranscriptionModel}`} onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, fallbackTranscriptionProvider: provider, fallbackTranscriptionModel: model } })} />
-      <HostedModelSelect label={t("settings.hosted.cleanup")} tip={t("settings.hosted.cleanupHelp")} options={hostedOptions(verification, "cleanup")} value={`${hosted.cleanupProvider}:${hosted.cleanupModel}`} onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, cleanupProvider: provider, cleanupModel: model } })} />
-      <div className="two-col"><label><TooltipLabel text={t("settings.hosted.maxCostHelp")}>{t("settings.hosted.maxCost")}</TooltipLabel><input type="number" min={0} step={0.1} value={settings.cost?.maxEstimatedApiCostUsd ?? 5} onChange={(event) => setCost("maxEstimatedApiCostUsd", Number(event.target.value))} /></label><label className="check"><input type="checkbox" checked={settings.cost?.allowApiSpend ?? false} onChange={(event) => setCost("allowApiSpend", event.target.checked)} /><TooltipLabel text={t("settings.hosted.allowSpendHelp")}>{t("settings.hosted.allowSpend")}</TooltipLabel></label></div>
-      <label className="check"><input type="checkbox" checked={settings.cost?.estimateCostOnly ?? false} onChange={(event) => setCost("estimateCostOnly", event.target.checked)} /><TooltipLabel text={t("settings.hosted.estimateOnlyHelp")}>{t("settings.hosted.estimateOnly")}</TooltipLabel></label>
+      {analysisModel ? <label>{t("moments.analysisModel")}<div className="disabled-field">{analysisModel}</div></label> : <HostedModelSelect label={t("settings.hosted.cleanup")} tip={t("settings.hosted.cleanupHelp")} options={hostedOptions(verification, "cleanup")} value={`${hosted.cleanupProvider}:${hosted.cleanupModel}`} onChange={(provider, model) => onChange({ ...settings, hosted: { ...hosted, cleanupProvider: provider, cleanupModel: model } })} />}
+      <label className="check"><input type="checkbox" checked={settings.cost?.estimateCostOnly ?? false} onChange={(event) => setCost(event.target.checked)} /><TooltipLabel text={t("settings.hosted.estimateOnlyHelp")}>{t("settings.hosted.estimateOnly")}</TooltipLabel></label>
     </div>
   </>;
 }

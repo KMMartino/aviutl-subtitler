@@ -1,6 +1,6 @@
 import { CreatorProjectStore } from "./creatorProjectStore";
 import { acquireSource } from "./sourceAcquisition";
-import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -195,6 +195,20 @@ function registerIpc(): void {
   });
   handle("project:create", (_event, name: string, parent?: string) => projects.create(name, parent));
   handle("project:open", (_event, directory: string) => projects.open(directory));
+  handle("project:delete", async (_event, directory: string) => {
+    if (sourceAcquisition) throw new Error("Wait for the download before deleting a project.");
+    const project = projects.open(directory);
+    const japanese = currentLocale() === "ja";
+    const answer = await dialog.showMessageBox(requireWindow(), {
+      type: "warning", defaultId: 0, cancelId: 0,
+      buttons: japanese ? ["キャンセル", "プロジェクトを削除"] : ["Cancel", "Delete project"],
+      message: japanese ? `「${project.name}」を削除しますか？` : `Delete “${project.name}”?`,
+      detail: `${project.directory}\n\n${japanese ? "このフォルダーと内部のダウンロード・結果をごみ箱に移動します。フォルダー外の元の録画は削除しません。" : "Move this folder, including its downloads and results, to the Recycle Bin. Original recordings outside this folder will not be deleted."}`,
+    });
+    if (answer.response !== 1) return false;
+    await projects.delete(directory, folder => shell.trashItem(folder));
+    return true;
+  });
   handle("project:update", (_event, update) => projects.update(update));
   handle("project:default-directory", (_event, directory: string) => projects.setDefaultDirectory(directory));
   const currentLocale = () => loadAppState().settings.appLocale;
@@ -205,6 +219,7 @@ function registerIpc(): void {
     const settings = loadAppState().settings;
     return {
       executablePath: status.executablePath,
+      onOutdated: () => requireWindow().webContents.send("source:outdated-ytdlp"),
       denoPath: settings.ytDlpDenoPath?.trim(),
       cookiesBrowser: settings.ytDlpCookiesBrowser || undefined,
       cookiesProfile: settings.ytDlpCookiesProfile?.trim(),
@@ -331,13 +346,13 @@ function registerIpc(): void {
   handle("library:add-segment", (_event, assetId: string, scope: MediaAnalysisScope, description: string) => (
     requireMediaLibrary().addUserSegment(assetId, scope, description)
   ));
-  handle("source:acquire", async (_event, sourceUrl: string) => {
+  handle("source:acquire", async (_event, sourceUrl: string, range?: { startSec: number; endSec?: number }, directory?: string) => {
     if (sourceAcquisition) throw new Error("A source recording is already downloading.");
     const controller = new AbortController();
     sourceAcquisition = controller;
     try {
-      return await acquireSource(await currentYtDlp(), path.join(path.dirname(paths().managedMediaRoot), "SubUtl Sources"), sourceUrl, controller.signal,
-        (percent) => { if (!_event.sender.isDestroyed()) _event.sender.send("source:progress", percent); });
+      return await acquireSource(await currentYtDlp(), directory || path.join(path.dirname(paths().managedMediaRoot), "SubUtl Sources"), sourceUrl, controller.signal,
+        (percent) => { if (!_event.sender.isDestroyed()) _event.sender.send("source:progress", percent); }, range);
     } finally {
       sourceAcquisition = null;
     }

@@ -19,6 +19,27 @@ describe("creator projects", () => {
     const source = buildEditorialSources([{ path: path.join(root, "game.mp4"), analysis: { durationSeconds: 60, width: 1920, height: 1080, averageFrameRate: 60, nominalFrameRate: 60, frameRateMode: "reported-cfr", formatName: "mp4", videoCodec: "h264", thumbnailDataUrl: "", audioTracks: [] } }])[0];
     return store.update({ ...project, recordings: [{ id: "recording-1", source }] });
   }
+  it("deletes only the project folder and removes its recent entry", async () => {
+    const project = populated();
+    const external = project.recordings[0].source.visualPath;
+    fs.writeFileSync(external, "external recording");
+    fs.mkdirSync(path.join(project.directory, "Sources"));
+    fs.writeFileSync(path.join(project.directory, "Sources", "download.mp4"), "download");
+    const trashed = path.join(root, "recycle-bin-project");
+    await store.delete(project.directory, async directory => { fs.renameSync(directory, trashed); });
+    expect(fs.existsSync(project.directory)).toBe(false);
+    expect(fs.readFileSync(external, "utf8")).toBe("external recording");
+    expect(fs.existsSync(path.join(trashed, "Sources", "download.mp4"))).toBe(true);
+    expect(store.catalog().recent).toEqual([]);
+  });
+  it("keeps the catalog if deletion fails and rejects active or unregistered projects", async () => {
+    const project = populated();
+    await expect(store.delete(project.directory, async () => { throw new Error("in use"); })).rejects.toThrow("in use");
+    expect(store.catalog().recent).toHaveLength(1);
+    store.begin(project.directory, "hosted", "recording-1");
+    await expect(store.delete(project.directory, async () => { throw new Error("must not trash"); })).rejects.toThrow("active task");
+    await expect(store.delete(root, async () => { throw new Error("must not trash"); })).rejects.toThrow("registered project");
+  });
   async function complete(directory: string, id: string) {
     const result = store.open(directory).results.find((item) => item.id === id)!;
     const exo = result.outputPath.replace(/\.json$/, ".exo");

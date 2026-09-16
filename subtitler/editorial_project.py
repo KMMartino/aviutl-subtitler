@@ -43,7 +43,7 @@ SOURCE_DERIVED_EDITORIAL_FIELDS = (
 # behavior changes. See AGENTS.md for the mandatory maintenance rule.
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
     "source_probe": 6,
-    "transcription": 14,
+    "transcription": 15,
     "visual_learning": 17,
     "semantic_spans": 10,
     "local_reconciliation": 1,
@@ -234,7 +234,6 @@ def create_editorial_project(
         "run_provenance": {
             "runs": [],
             "actual_cost_usd": 0.0,
-            "max_cost_per_source_hour_usd": 10.0,
         },
     }
     validate_editorial_project(artifact)

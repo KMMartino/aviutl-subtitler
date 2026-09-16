@@ -11,9 +11,11 @@ type Props = {
   onConfigure?(): void;
   onRun(): void;
   onCancel(): void;
+  download?: boolean;
+  downloadProgress?: number | null;
 };
 
-export default function RunPanel({ state, elapsed, canRun, blockedReason, onConfigure, onRun, onCancel }: Props) {
+export default function RunPanel({ state, elapsed, canRun, blockedReason, onConfigure, onRun, onCancel, download, downloadProgress }: Props) {
   const { t } = useI18n();
   return (
     <section className="panel run-panel">
@@ -27,9 +29,10 @@ export default function RunPanel({ state, elapsed, canRun, blockedReason, onConf
         {onConfigure && <button onClick={onConfigure}>{t("run.openSettings")}</button>}
       </div>}
       <div className="row">
-        <button className="primary" disabled={!canRun || state === "running"} onClick={onRun}><Play size={16} /> {t("run.start")}</button>
+        <button className="primary" disabled={!canRun || state === "running"} onClick={onRun}><Play size={16} /> {t(download ? "run.downloadAndRun" : "run.start")}</button>
         <button disabled={state !== "running"} onClick={onCancel}><Square size={16} /> {t("run.cancel")}</button>
       </div>
+      {downloadProgress !== undefined && <div role="status">{t("input.downloadingSource")}{downloadProgress !== null && <progress value={downloadProgress} max={100} />}</div>}
     </section>
   );
 }

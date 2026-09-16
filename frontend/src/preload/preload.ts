@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("subtitler", {
   projectCatalog: () => ipcRenderer.invoke("project:catalog"),
   createProject: (name: string, parentDirectory?: string) => ipcRenderer.invoke("project:create", name, parentDirectory),
   openProject: (directory: string) => ipcRenderer.invoke("project:open", directory),
+  deleteProject: (directory: string) => ipcRenderer.invoke("project:delete", directory),
   updateProject: (update: ProjectUpdate) => ipcRenderer.invoke("project:update", update),
   setProjectDirectory: (directory: string) => ipcRenderer.invoke("project:default-directory", directory),
   chooseInputFile: (defaultPath?: string) => ipcRenderer.invoke("dialog:input-file", defaultPath),
@@ -34,7 +35,12 @@ contextBridge.exposeInMainWorld("subtitler", {
   getMediaAssetThumbnails: (assetIds: string[]) => ipcRenderer.invoke("library:thumbnails", assetIds),
   updateMediaAssetDescription: (assetId: string, description: string) => ipcRenderer.invoke("library:update-description", assetId, description),
   addMediaAssetSegment: (assetId: string, scope: MediaAnalysisScope, description: string) => ipcRenderer.invoke("library:add-segment", assetId, scope, description),
-  acquireSource: (sourceUrl: string) => ipcRenderer.invoke("source:acquire", sourceUrl),
+  acquireSource: (sourceUrl: string, range?: { startSec: number; endSec?: number }, directory?: string) => ipcRenderer.invoke("source:acquire", sourceUrl, range, directory),
+  onYtDlpOutdated: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("source:outdated-ytdlp", listener);
+    return () => ipcRenderer.removeListener("source:outdated-ytdlp", listener);
+  },
   cancelSourceAcquisition: () => ipcRenderer.invoke("source:cancel"),
   onSourceProgress: (callback: (percent: number) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, percent: number) => callback(percent);

@@ -4,7 +4,7 @@ import { I18nProvider } from "../i18n";
 import ModeSelector from "./ModeSelector";
 
 describe("long-stream availability", () => {
-  it("keeps mode headers consistent and disables unavailable Local processing", () => {
+  it("shows feature navigation without an LLM processing toggle", () => {
     const markup = renderToStaticMarkup(
       <I18nProvider>
         <ModeSelector workflow="hosted-long-stream" onChange={vi.fn()} />
@@ -12,6 +12,8 @@ describe("long-stream availability", () => {
     );
 
     expect(markup).not.toContain("mode-availability-note");
-    expect(markup).toMatch(/<button disabled=""[^>]*>.* Local<\/button>/s);
+    expect(markup).toContain("Extract moments");
+    expect(markup).not.toContain(" Local</button>");
+    expect(markup).not.toContain(" Hosted</button>");
   });
 });

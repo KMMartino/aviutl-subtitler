@@ -455,7 +455,7 @@ class ExistingPipelineBackend:
             flush=True,
         )
         hosted_run = backend_cfg["transcriber"] in {"gemini", "openai"} or self.config["cleanup"]["backend"] in {"gemini", "openai"}
-        _, _, estimate_cost_only = _validated_cost_guard_settings(self.config, estimated_api_cost)
+        estimate_cost_only = validate_cost_estimate(self.config, estimated_api_cost)
         if hosted_run and estimate_cost_only:
             return BackendTranscriptResult(
                 backend_name=self.name,
@@ -481,7 +481,6 @@ class ExistingPipelineBackend:
                     transcription_chunks,
                 ),
             )
-        enforce_cost_guard(self.config, estimated_api_cost)
 
         for chunk in transcription_chunks:
             self.profiler.start_chunk(chunk.index, chunk.start, chunk.end)
@@ -747,52 +746,17 @@ def is_hosted_run(config: dict[str, Any]) -> bool:
     return config["backend"]["transcriber"] in {"gemini", "openai"} or config["cleanup"]["backend"] in {"gemini", "openai"}
 
 
-def enforce_cost_guard(config: dict[str, Any], estimated_api_cost: float) -> None:
-    try:
-        hosted_run = is_hosted_run(config)
-    except (KeyError, TypeError) as exc:
-        raise SubtitlerError("Refusing hosted API use: workflow backend configuration is invalid") from exc
-    if not hosted_run:
-        return
-    max_cost, allow_api_spend, _ = _validated_cost_guard_settings(config, estimated_api_cost)
-    if estimated_api_cost > max_cost and not allow_api_spend:
-        raise SubtitlerError(
-            "estimated hosted API cost "
-            f"${estimated_api_cost:.4f} exceeds configured limit ${max_cost:.2f}. "
-            "Set cost.allow_api_spend to true in the workflow config to proceed."
-        )
-
-
-def _validated_cost_guard_settings(
-    config: dict[str, Any], estimated_api_cost: float
-) -> tuple[float, bool, bool]:
-    cost_cfg = config.get("cost")
+def validate_cost_estimate(config: dict[str, Any], estimated_api_cost: float) -> bool:
+    """Validate cost reporting and return the estimate-only setting; monetary caps are retired."""
+    cost_cfg = config.get("cost", {})
     if not isinstance(cost_cfg, dict):
-        raise SubtitlerError("Refusing hosted API use: cost must be a config object")
-    max_cost = cost_cfg.get("max_estimated_api_cost_usd")
-    allow_api_spend = cost_cfg.get("allow_api_spend")
-    estimate_cost_only = cost_cfg.get("estimate_cost_only")
-    if (
-        isinstance(max_cost, bool)
-        or not isinstance(max_cost, (int, float))
-        or not math.isfinite(max_cost)
-        or max_cost < 0
-    ):
-        raise SubtitlerError(
-            "Refusing hosted API use: cost.max_estimated_api_cost_usd must be a finite non-negative number"
-        )
-    if not isinstance(allow_api_spend, bool):
-        raise SubtitlerError("Refusing hosted API use: cost.allow_api_spend must be a boolean")
-    if not isinstance(estimate_cost_only, bool):
-        raise SubtitlerError("Refusing hosted API use: cost.estimate_cost_only must be a boolean")
-    if (
-        isinstance(estimated_api_cost, bool)
-        or not isinstance(estimated_api_cost, (int, float))
-        or not math.isfinite(estimated_api_cost)
-        or estimated_api_cost < 0
-    ):
-        raise SubtitlerError("Refusing hosted API use: estimated API cost must be a finite non-negative number")
-    return float(max_cost), allow_api_spend, estimate_cost_only
+        raise SubtitlerError("cost must be a config object")
+    estimate_only = cost_cfg.get("estimate_cost_only", False)
+    if not isinstance(estimate_only, bool):
+        raise SubtitlerError("cost.estimate_cost_only must be a boolean")
+    if isinstance(estimated_api_cost, bool) or not isinstance(estimated_api_cost, (int, float)) or not math.isfinite(estimated_api_cost) or estimated_api_cost < 0:
+        raise SubtitlerError("estimated API cost must be a finite non-negative number")
+    return estimate_only
 
 
 def _backend_metadata(

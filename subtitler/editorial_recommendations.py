@@ -110,12 +110,6 @@ def bounded_speech(rows: list[dict[str, Any]], character_budget: int) -> list[di
     return sorted(selected, key=lambda row: row['start_ms'])
 
 
-def recommendation_budget(project: dict[str, Any], settings: dict[str, Any]) -> float:
-    """A duration-scaled default; an explicit total ceiling always takes precedence."""
-    hours = sum(source['duration_ms'] for source in project['sources']) / 3_600_000
-    return float(settings.get('recommendation_budget_usd', max(2.0, hours * 2.0)))
-
-
 def _schema(ids: list[str], evidence_ids: list[str], related_ids: list[str]) -> dict[str, Any]:
     def obj(properties: dict[str, Any]) -> dict[str, Any]:
         return {'type': 'object', 'properties': properties, 'required': list(properties), 'additionalProperties': False}
@@ -137,7 +131,7 @@ def generate_recommendations(project: dict[str, Any], workspace: Path, settings:
     identity = {'catalog': catalog, 'brief': project_brief(project), 'locale': project.get('output_locale', 'en')}
     revision = content_digest(identity)
     store = OperationStore(workspace / 'recommendation-operations' / revision, revision, usage)
-    provider = provider or HostedInspectionProvider(usage, recommendation_budget(project, settings), workspace / 'recommendation-requests')
+    provider = provider or HostedInspectionProvider(usage, workspace / 'recommendation-requests')
     model = str(settings.get('recommendation_model', 'gpt-5.6-terra'))
     assessments = []
     for source in catalog:

@@ -294,8 +294,6 @@ export type CoreWorkflowSettings = {
     profile: boolean;
   };
   cost?: {
-    maxEstimatedApiCostUsd: number;
-    allowApiSpend: boolean;
     estimateCostOnly: boolean;
   };
   additionalSettings?: {
@@ -328,6 +326,7 @@ export type WorkflowConfig = {
 };
 
 export type RunRequest = {
+  moments?: MomentExtractionRequest;
   transcriptArtifacts?: string[];
   creatorResumeResultId?: string;
   creatorProjectDirectory?: string;
@@ -351,6 +350,20 @@ export type RunRequest = {
   editorialCheckpointSources?: EditorialSourceSelection[];
   editorialRestartFrom?: EditorialRestartMode;
   editorialExtend?: boolean;
+};
+
+export type SourceRange = { startSec: number; endSec?: number };
+export type MomentExtractionRequest = {
+  sourcePath: string;
+  facecamPath?: string;
+  speechSource: "gameplay" | "facecam";
+  query: string;
+  startSec: number;
+  endSec?: number;
+  originOffsetSec: number;
+  sourceUrl?: string;
+  boundedEnd?: boolean;
+  locale: AppLocale;
 };
 
 export type EditorialRestartBoundary =

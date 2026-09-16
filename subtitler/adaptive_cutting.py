@@ -363,7 +363,7 @@ def run_adaptive_cutting(*, project: dict[str, Any], documents: dict[str, Transc
     directory.mkdir(parents=True, exist_ok=True)
     paid_directory = artifact_workspace / project["project_id"] if artifact_workspace is not None else directory
     store = OperationStore(paid_directory / "operations", project["project_id"], usage)
-    provider = provider or HostedInspectionProvider(usage, float(settings.get("adaptive_budget_usd", 6.0)), paid_directory / "requests")
+    provider = provider or HostedInspectionProvider(usage, paid_directory / "requests")
     extract = frame_extractor or extract_inspection_frames
     measure_motion = motion_analyzer or sampled_regional_motion
     collection_model = str(settings.get("collection_model", "gpt-5.6-luna"))

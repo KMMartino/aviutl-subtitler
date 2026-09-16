@@ -1,7 +1,7 @@
 import { Settings } from "lucide-react";
 import type { CoreWorkflowSettings, CurrentLlamaServerState, CutSilenceEncoderPreset, EncoderProbeResult, EnvStatus, HostedModelVerification, HuggingFaceDownloaderStatus, LlamaBackendId, LlamaBackendOption, LlamaReleaseCheck, LocalModelProfile, LocalModelStatus, ManagedLlamaStatus, PathStatus, RuntimeSetupStatus, WorkflowName } from "../lib/types";
 import type { SettingsExpansion } from "../lib/settingsExpansion";
-import { isHostedWorkflow, isLocalWorkflow } from "../../shared/workflowCatalog";
+import { isLocalWorkflow } from "../../shared/workflowCatalog";
 import OutputSettingsSection from "./settings/OutputSettingsSection";
 import HostedSettingsSection from "./settings/HostedSettingsSection";
 import LocalSettingsSection from "./settings/LocalSettingsSection";
@@ -12,6 +12,7 @@ import type { AppLocale } from "../../shared/i18n";
 import { useI18n } from "../i18n";
 
 type Props = {
+  momentAnalysisModel?: string;
   workflow: WorkflowName;
   appLocale: AppLocale;
   settings: CoreWorkflowSettings;
@@ -93,7 +94,7 @@ type Props = {
   onProbeEncoders(): void;
 };
 
-export default function SettingsPanel({ workflow, appLocale, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, ytDlpDenoPath, ytDlpCookiesBrowser, ytDlpCookiesProfile, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onAppLocale, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onInstallOrUpdateYtDlp, onDeleteYtDlp, onYtDlpDenoPath, onYtDlpCookiesBrowser, onYtDlpCookiesProfile, onDownloadAlignment, onDeleteAlignment, cutSilenceEncoderPreset, silencePreviewHeight, silencePreviewFps, encoderProbes, probingEncoders, onCutSilenceEncoder, onSilencePreviewHeight, onSilencePreviewFps, onProbeEncoders }: Props) {
+export default function SettingsPanel({ momentAnalysisModel, workflow, appLocale, settings, envFile, envStatus, hostedVerification, verifyingHosted, pathStatus, modelsDirectory, localModelStatus, localProfiles, localProfileStatuses, selectedLocalProfile, downloadingModels, deletingManaged, modelDownloadMode, hfDownloaderStatus, installingHfDownloader, llamaBackends, selectedLlamaBackend, llamaRelease, managedLlamaStatus, currentLlamaState, downloadingLlama, pythonPath, pythonReady, runtimeStatus, runtimeAction, runtimeFeedback, ytDlpDenoPath, ytDlpCookiesBrowser, ytDlpCookiesProfile, sidecarsEnabled, sidecarDir, outputPath, runActive = false, expansion, onToggleExpansion, onAppLocale, onChange, onPythonPath, onEnvFile, onSidecar, onSidecarsEnabled, onVerifyHosted, onModelsDirectory, onDownloadLocalModels, onDeleteLocalModels, onModelDownloadMode, onInstallHfDownloader, onLocalProfile, onLlamaBackend, onCheckLlamaRelease, onDownloadLlama, onDeleteLlama, onUseManagedLlama, onRevertManagedLlama, onRefreshRuntime, onCreateManagedPython, onInstallPythonRequirements, onDeleteManagedPython, onDownloadFfmpeg, onDeleteFfmpeg, onInstallOrUpdateYtDlp, onDeleteYtDlp, onYtDlpDenoPath, onYtDlpCookiesBrowser, onYtDlpCookiesProfile, onDownloadAlignment, onDeleteAlignment, cutSilenceEncoderPreset, silencePreviewHeight, silencePreviewFps, encoderProbes, probingEncoders, onCutSilenceEncoder, onSilencePreviewHeight, onSilencePreviewFps, onProbeEncoders }: Props) {
   const { t } = useI18n();
   return (
     <section className="panel">
@@ -166,8 +167,8 @@ export default function SettingsPanel({ workflow, appLocale, settings, envFile, 
           onDownloadAlignment={onDownloadAlignment}
           onDeleteAlignment={onDeleteAlignment}
         />
-        {isHostedWorkflow(workflow) && (
-          <HostedSettingsSection settings={settings} envFile={envFile} envStatus={envStatus} verification={hostedVerification} verifying={verifyingHosted} expanded={expansion.env} onToggle={() => onToggleExpansion("env")} onChange={onChange} onEnvFile={onEnvFile} onVerify={onVerifyHosted} />
+        {(workflow === "hosted" || momentAnalysisModel) && (
+          <HostedSettingsSection analysisModel={momentAnalysisModel} settings={settings} envFile={envFile} envStatus={envStatus} verification={hostedVerification} verifying={verifyingHosted} expanded={expansion.env} onToggle={() => onToggleExpansion("env")} onChange={onChange} onEnvFile={onEnvFile} onVerify={onVerifyHosted} />
         )}
         <OutputSettingsSection settings={settings} enabled={sidecarsEnabled} directory={sidecarDir} outputPath={outputPath} onChange={onChange} onDirectory={onSidecar} onEnabled={onSidecarsEnabled} />
         {(workflow === "local" || workflow === "hosted") && <CutSilenceSettingsSection encoder={cutSilenceEncoderPreset} previewHeight={silencePreviewHeight} previewFps={silencePreviewFps} probes={encoderProbes} probing={probingEncoders} renderEnabled={Boolean(settings.additionalSettings?.renderCutVideo)} expanded={expansion.cutSilence} onToggle={() => onToggleExpansion("cutSilence")} onEncoder={onCutSilenceEncoder} onPreviewHeight={onSilencePreviewHeight} onPreviewFps={onSilencePreviewFps} onProbe={onProbeEncoders} />}
