@@ -1,4 +1,5 @@
 from subtitler.speech_editing import align_selected_phrases, clean_selected_subtitles, tighten_transcript_to_speech
+import io
 import tempfile
 import json
 import unittest
@@ -221,7 +222,7 @@ class HostedEditorialTests(unittest.TestCase):
         ), patch(
             "subtitler.editorial_hosted.analyze_media",
             side_effect=[MediaAnalysisResponseError("malformed"), recovered, recovered],
-        ) as analyze:
+        ) as analyze, io.TextIOWrapper(io.BytesIO(), encoding="cp1252") as console, patch("sys.stdout", console):
             result = _analyze_editorial_visual_windows(
                 media_path=Path("game.mp4"),
                 duration_sec=10 * 60,

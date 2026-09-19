@@ -127,7 +127,7 @@ def analyze_visual_windows(
             if split_depth >= MAX_VISUAL_SPLIT_DEPTH or end - start < 4 * 60.0:
                 raise
             midpoint = start + (end - start) / 2.0
-            print(
+            _print_console_safe(
                 locale_label(
                     output_locale,
                     f"Visual learning: retrying {_visual_clock(start)}-{_visual_clock(end)} "
@@ -316,3 +316,11 @@ def _merge_visual_results(
 def _visual_clock(seconds: float) -> str:
     total = max(0, round(seconds))
     return f"{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
+
+
+def _print_console_safe(message: str) -> None:
+    """Keep retry recovery working on legacy Windows consoles."""
+    try:
+        print(message, flush=True)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
