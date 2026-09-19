@@ -7,11 +7,8 @@ import {
   FileBox,
   Film,
   Folder,
-  FolderPlus,
   Globe,
   Image,
-  Layers,
-  Save,
   Search,
   Sparkles,
   Trash2,
@@ -28,6 +25,8 @@ import type {
   MediaLibraryDirectory,
   WebAssetProbe,
 } from "../lib/types";
+import { canAnalyzeAsset, collectSelectableAssets, combineAnalysisEstimates } from "../lib/mediaBulk";
+import MediaTagsEditor from "./MediaTagsEditor";
 import { useI18n } from "../i18n";
 
 const PAGE_SIZE = 50;
@@ -51,6 +50,7 @@ type AnalysisDialog = {
 export default function MediaLibraryScreen() {
   const { locale, t } = useI18n();
   const libraryView = useRef<HTMLElement>(null);
+  const assetRequest = useRef(0);
   const [leftPanelWidth, setLeftPanelWidth] = useState(25);
   const [rightPanelWidth, setRightPanelWidth] = useState(28);
   const [roots, setRoots] = useState<MediaLibraryRoot[]>([]);
@@ -60,19 +60,21 @@ export default function MediaLibraryScreen() {
   const [showHiddenDirectories, setShowHiddenDirectories] = useState(false);
   const [directoryConfirm, setDirectoryConfirm] = useState<{ directory: MediaLibraryDirectory; action: "untrack" | "delete" } | null>(null);
   const [directoryFilter, setDirectoryFilter] = useState<{ rootId: string; relativeDirectory: string; label: string } | null>(null);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [preparingBulk, setPreparingBulk] = useState(false);
+  const [bulkAction, setBulkAction] = useState("");
+  const selectionEpoch = useRef(0);
   const [assets, setAssets] = useState<MediaAssetSummary[]>([]);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState("");
   const [appliedQuery, setAppliedQuery] = useState("");
-  const [mediaKind, setMediaKind] = useState<"" | MediaAssetKind>("");
-  const [availability, setAvailability] = useState<"" | MediaAssetAvailability>("");
+  const [analysisStatus, setAnalysisStatus] = useState<"" | "analyzed" | "unanalyzed">("");
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<MediaAssetDetail | null>(null);
-  const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(true);
+  const [catalogRevision, setCatalogRevision] = useState(0);
   const [busyRoot, setBusyRoot] = useState("");
-  const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [removeTarget, setRemoveTarget] = useState<MediaLibraryRoot | null>(null);
@@ -97,7 +99,20 @@ export default function MediaLibraryScreen() {
 
   useEffect(() => {
     void refreshAssets();
-  }, [appliedQuery, mediaKind, availability, offset, directoryFilter]);
+  }, [appliedQuery, analysisStatus, offset, directoryFilter, catalogRevision]);
+
+  useEffect(() => {
+    selectionEpoch.current += 1;
+    setCheckedIds(new Set());
+  }, [appliedQuery, analysisStatus, directoryFilter]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setAppliedQuery(query.trim());
+      setOffset(0);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     const close = () => setDirectoryMenu(null);
@@ -206,24 +221,25 @@ export default function MediaLibraryScreen() {
   }
 
   async function refreshAssets() {
+    const requestId = ++assetRequest.current;
     setLoading(true);
     try {
       const result = await window.subtitler.listMediaAssets({
         query: appliedQuery || undefined,
-        mediaKind: mediaKind || undefined,
-        availability: availability || undefined,
+        analysisStatus: analysisStatus || undefined,
         rootId: directoryFilter?.rootId,
         relativeDirectory: directoryFilter?.relativeDirectory,
         limit: PAGE_SIZE,
         offset,
       });
+      if (requestId !== assetRequest.current) return;
       setAssets(result.assets);
       setTotal(result.total);
       if (offset > 0 && result.total <= offset) setOffset(Math.max(0, Math.floor((result.total - 1) / PAGE_SIZE) * PAGE_SIZE));
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (requestId === assetRequest.current) setError(errorMessage(reason));
     } finally {
-      setLoading(false);
+      if (requestId === assetRequest.current) setLoading(false);
     }
   }
 
@@ -298,18 +314,6 @@ export default function MediaLibraryScreen() {
     }
   }
 
-  async function addRoot() {
-    const directory = await window.subtitler.chooseDirectory();
-    if (!directory) return;
-    try {
-      const root = await window.subtitler.addMediaLibraryRoot(directory);
-      await refreshRoots();
-      await scanRoot(root.id);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    }
-  }
-
   async function scanRoot(id: string) {
     setBusyRoot(id);
     setMessage(t("media.scanning"));
@@ -341,7 +345,6 @@ export default function MediaLibraryScreen() {
       await window.subtitler.setMediaLibraryRootEnabled(root.id, enabled);
       if (root.enabled && selected?.rootId === root.id) {
         setSelected(null);
-        setDescription("");
       }
       setOffset(0);
       await refreshAssets();
@@ -357,7 +360,6 @@ export default function MediaLibraryScreen() {
       const result = await window.subtitler.removeMediaLibraryRoot(removeTarget.id);
       if (selected?.rootId === removeTarget.id) {
         setSelected(null);
-        setDescription("");
       }
       setRemoveTarget(null);
       setOffset(0);
@@ -372,26 +374,9 @@ export default function MediaLibraryScreen() {
     try {
       const detail = await window.subtitler.getMediaAsset(asset.id);
       setSelected(detail);
-      setDescription(detail.userDescription);
       setError("");
     } catch (reason) {
       setError(errorMessage(reason));
-    }
-  }
-
-  async function saveDescription() {
-    if (!selected) return;
-    setSaving(true);
-    try {
-      const detail = await window.subtitler.updateMediaAssetDescription(selected.id, description);
-      setSelected(detail);
-      setDescription(detail.userDescription);
-      setMessage(t("media.descriptionSaved"));
-      await refreshAssets();
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -425,31 +410,45 @@ export default function MediaLibraryScreen() {
     }
   }
 
+  async function selectAllAssets() {
+    const epoch = selectionEpoch.current;
+    setPreparingBulk(true);
+    try {
+      const ids = await collectSelectableAssets((request) => window.subtitler.listMediaAssets(request), {
+        query: appliedQuery || undefined, analysisStatus: analysisStatus || undefined,
+        rootId: directoryFilter?.rootId, relativeDirectory: directoryFilter?.relativeDirectory,
+      });
+      if (epoch === selectionEpoch.current) setCheckedIds(new Set(ids));
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setPreparingBulk(false); }
+  }
+
   async function openBulkAnalysis() {
+    if (!checkedIds.size || analysisRunning || preparingBulk || bulkAction !== "analyze") return;
+    const epoch = selectionEpoch.current;
+    const ids = [...checkedIds];
+    setPreparingBulk(true);
     setError("");
     try {
-      const plan = await window.subtitler.planBulkMediaAnalysis(mediaKind);
-      if (!plan.assetIds.length) {
-        setMessage(t("media.noAnalysisAssets"));
-        return;
+      const groups: MediaAssetAnalysisEstimate[][] = [];
+      for (let index = 0; index < ids.length; index += 8) {
+        groups.push(...await Promise.all(ids.slice(index, index + 8).map((id) => window.subtitler.estimateMediaAssetAnalysis(id))));
       }
-      setAnalysisDetail(recommendedBulkDetail(plan.estimates));
-      setAnalysisDialog({
-        mode: "bulk",
-        mediaKind: mediaKind || "mixed",
-        title: t("media.bulkAnalyzeTitle", { count: plan.assetIds.length.toLocaleString(locale), suffix: plan.assetIds.length === 1 ? "" : "s" }),
-        assetIds: plan.assetIds,
-        estimates: [],
-        bulkEstimates: plan.estimates,
-        privacyNotice: plan.privacyNotice,
-      });
-    } catch (reason) {
-      setError(errorMessage(reason));
-    }
+      if (epoch !== selectionEpoch.current) return;
+      const estimates = combineAnalysisEstimates(groups);
+      setAnalysisDetail(recommendedBulkDetail(estimates));
+      setAnalysisDialog({ mode: "bulk", mediaKind: "mixed",
+        title: t("media.bulkAnalyzeTitle", { count: ids.length.toLocaleString(locale), suffix: ids.length === 1 ? "" : "s" }),
+        assetIds: ids, estimates: [], bulkEstimates: estimates, privacyNotice: "" });
+    } catch (reason) { setError(errorMessage(reason)); }
+    finally { setPreparingBulk(false); }
   }
 
   async function runAnalysis() {
-    if (!analysisDialog) return;
+    if (!analysisDialog || analysisRunning) return;
+    setAnalysisDialog(null);
+    setMessage("");
+    setError("");
     setAnalysisRunning(true);
     stopBulkAnalysis.current = false;
     setAnalysisProgress({ processed: 0, succeeded: 0, total: analysisDialog.assetIds.length, failures: 0, costUsd: 0 });
@@ -463,16 +462,15 @@ export default function MediaLibraryScreen() {
         const result = await window.subtitler.analyzeMediaAsset(assetId, analysisDetail);
         succeeded += 1;
         costUsd += result.costUsd;
-        if (analysisDialog.mode === "single") {
-          setSelected(result.asset);
-          setDescription(result.asset.userDescription);
-        }
+        setSelected((current) => current?.id === assetId ? result.asset : current);
+        setCheckedIds((current) => { const next = new Set(current); next.delete(assetId); return next; });
       } catch (reason) {
         failures += 1;
         if (analysisDialog.mode === "single") setError(errorMessage(reason));
       }
       processed += 1;
       setAnalysisProgress({ processed, succeeded, total: analysisDialog.assetIds.length, failures, costUsd });
+      setCatalogRevision((current) => current + 1);
     }
     const stopped = stopBulkAnalysis.current;
     setAnalysisRunning(false);
@@ -484,11 +482,14 @@ export default function MediaLibraryScreen() {
         cost: costUsd.toFixed(4),
       })}`,
     );
-    await refreshAssets();
+    setCatalogRevision((current) => current + 1);
   }
 
   async function inspectWebSource(event: FormEvent) {
     event.preventDefault();
+    if (webBusy || !webUrl.trim()) return;
+    setWebProbe(null);
+    setWebOpen(true);
     setWebBusy(true);
     setError("");
     try {
@@ -571,12 +572,13 @@ export default function MediaLibraryScreen() {
       <div className="library-roots panel">
         <div className="panel-title">
           <span>{t("media.locations")}</span>
-          <span className="panel-actions">
-            <button onClick={() => setWebOpen(true)}><Globe size={16} /> {t("media.web")}</button>
-            <button onClick={() => void addRoot()}><FolderPlus size={16} /> {t("media.folder")}</button>
-          </span>
         </div>
-        <p className="library-help">{t("media.locationsHelp")}</p>
+        <form className="library-download" onSubmit={inspectWebSource}>
+          <input type="url" required aria-label={t("media.downloadUrl")} placeholder={t("media.downloadUrl")}
+            disabled={webBusy} value={webUrl} onChange={(event) => setWebUrl(event.target.value)} />
+          <button className="icon-button" type="submit" aria-label={t("media.downloadUrl")} title={t("media.downloadUrl")}
+            disabled={webBusy || !webUrl.trim()}><Download size={16} /></button>
+        </form>
         <div className="library-directory-tree">
           {roots.map((root, rootIndex) => {
             const loadedDirectories = directoriesByRoot[root.id] ?? [];
@@ -614,7 +616,7 @@ export default function MediaLibraryScreen() {
               return (
                 <div className={`library-directory-group ${isRoot ? `root ${rootIndex > 0 ? "subsequent" : ""}` : ""}`} key={key}>
                   <div
-                    className={`library-directory ${directory.visible ? "" : "muted"} ${directory.subtreeTrackedFileCount ? "" : "untracked"} ${directory.hidden ? "hidden-preview" : ""}`}
+                    className={`library-directory ${directory.hidden ? "hidden-preview" : ""}`}
                     style={{ paddingLeft: `${8 + directory.depth * 15}px` }}
                     onContextMenu={(event) => openMenu(event, "directory")}
                   >
@@ -647,7 +649,7 @@ export default function MediaLibraryScreen() {
                   </div>
                   {expanded && (directory.directFileCount > 0 || directory.trackedFileCount > 0) && (
                     <div
-                      className={`library-files-group ${directory.included ? "included" : ""} ${directory.directFilesVisible ? "" : "muted"}`}
+                      className="library-files-group"
                       style={{ paddingLeft: `${27 + directory.depth * 15}px` }}
                       onContextMenu={(event) => openMenu(event, "files")}
                     >
@@ -682,8 +684,19 @@ export default function MediaLibraryScreen() {
       <div className="library-catalog panel">
         <div className="panel-title">
           <span>{t("media.catalog")} <small>{t("media.assets", { count: total.toLocaleString(locale) })}</small></span>
-          <button onClick={() => void openBulkAnalysis()}><Layers size={16} /> {t("media.analyzeUnanalyzed")}</button>
+          <div className="library-bulk-actions">
+            <button disabled={preparingBulk || loading || !total} onClick={() => void selectAllAssets()}>{t("media.selectAll")}</button>
+            <select aria-label={t("media.bulkActions")} value={bulkAction} disabled={analysisRunning || preparingBulk} onChange={(event) => setBulkAction(event.target.value)}>
+              <option value="" disabled>{t("media.bulkActions")}</option>
+              <option value="analyze">{t("media.analyze")}</option>
+            </select>
+            <button disabled={!checkedIds.size || !bulkAction || analysisRunning || preparingBulk} onClick={() => void openBulkAnalysis()}>{t("common.apply")}</button>
+          </div>
         </div>
+        {checkedIds.size > 0 && <div className="library-selection-count">
+          <span>{t("media.selectedCount", { count: checkedIds.size.toLocaleString(locale) })}</span>
+          <button disabled={preparingBulk} onClick={() => setCheckedIds(new Set())}>{t("media.clearSelection")}</button>
+        </div>}
         {directoryFilter && (
           <div className="library-directory-filter">
             <span>{t("media.showingOnly", { label: directoryFilter.label })}</span>
@@ -691,29 +704,33 @@ export default function MediaLibraryScreen() {
           </div>
         )}
         <form className="library-filters" onSubmit={applySearch}>
-          <div className="row library-search">
-            <input aria-label={t("media.searchAria")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("media.searchPlaceholder")} />
-            <button type="submit"><Search size={15} /> {t("common.search")}</button>
+          <div className="library-search">
+            <Search size={16} aria-hidden="true" />
+            <input type="search" aria-label={t("media.searchAria")} value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
-          <select aria-label={t("media.kindAria")} value={mediaKind} onChange={(event) => changeFilter(() => setMediaKind(event.target.value as "" | MediaAssetKind))}>
-            <option value="video">{t("media.videos")}</option>
-            <option value="image">{t("media.images")}</option>
-            <option value="audio" disabled>{t("media.audioKind")}</option>
+          <select aria-label={t("media.analysisFilter")} value={analysisStatus} onChange={(event) => changeFilter(() => setAnalysisStatus(event.target.value as typeof analysisStatus))}>
             <option value="">{t("media.all")}</option>
-          </select>
-          <select aria-label={t("media.availabilityAria")} value={availability} onChange={(event) => changeFilter(() => setAvailability(event.target.value as "" | MediaAssetAvailability))}>
-            <option value="">{t("media.anyAvailability")}</option>
-            <option value="active">{t("media.available")}</option>
-            <option value="missing">{t("media.missing")}</option>
-            <option value="incompatible">{t("media.incompatible")}</option>
+            <option value="analyzed">{t("media.analyzed")}</option>
+            <option value="unanalyzed">{t("media.unanalyzed")}</option>
           </select>
         </form>
         {error && !webOpen && !analysisDialog && <div className="library-alert error" role="alert"><AlertTriangle size={15} /> {error}</div>}
         {message && <div className="library-alert" role="status">{message}</div>}
+        {analysisRunning && <div className="library-job-progress" role="status" aria-live="polite">
+          <strong>{t("media.analysisProgress")}</strong>
+          <span>{t("media.processed", { processed: analysisProgress.processed.toLocaleString(locale), total: analysisProgress.total.toLocaleString(locale) })}</span>
+          <progress aria-label={t("media.analysisProgress")} max={analysisProgress.total || 1} value={analysisProgress.processed} />
+          <small>{t("media.progress", { succeeded: analysisProgress.succeeded.toLocaleString(locale), failures: analysisProgress.failures ? t("media.failedSuffix", { count: analysisProgress.failures.toLocaleString(locale) }) : "", cost: analysisProgress.costUsd.toFixed(4) })}</small>
+          <button onClick={() => { stopBulkAnalysis.current = true; }}>{t("media.stopAfterCurrent")}</button>
+        </div>}
         <div className="library-assets" aria-busy={loading}>
           {!loading && assets.length === 0 && <div className="library-empty">{t("media.noMatches")}</div>}
           {assets.map((asset) => (
-            <button className={`library-asset ${selected?.id === asset.id ? "selected" : ""}`} key={asset.id} onClick={() => void openAsset(asset)}>
+            <div className="library-asset-row" key={asset.id}>
+            <input type="checkbox" aria-label={t("media.selectAssetAria", { name: fileName(asset.canonicalPath) })}
+              checked={checkedIds.has(asset.id)} disabled={preparingBulk || !canAnalyzeAsset(asset)}
+              onChange={(event) => setCheckedIds((current) => { const next = new Set(current); if (event.target.checked) next.add(asset.id); else next.delete(asset.id); return next; })} />
+            <button className={`library-asset ${selected?.id === asset.id ? "selected" : ""}`} onClick={() => void openAsset(asset)}>
               <span className="library-asset-thumbnail">
                 {thumbnails[asset.id]
                   ? <img src={thumbnails[asset.id]} alt="" />
@@ -725,6 +742,7 @@ export default function MediaLibraryScreen() {
               <span className="library-asset-duration">{asset.mediaKind === "video" && asset.durationMs ? formatDuration(asset.durationMs) : "—"}</span>
               <span className={`status library-availability ${asset.availability}`}>{availabilityLabel(asset.availability, t)}</span>
             </button>
+            </div>
           ))}
         </div>
         <div className="library-pagination">
@@ -758,22 +776,25 @@ export default function MediaLibraryScreen() {
               {selected.mediaKind === "video" && <><dt>{t("media.audio")}</dt><dd>{selected.hasAudio ? selected.audioCodec || t("media.present") : t("common.none")}</dd></>}
               {selected.mediaKind === "image" && <><dt>{t("media.transparency")}</dt><dd>{transparencyLabel(selected.transparency, t)}</dd></>}
             </dl>
-            <label>
-              {t("media.yourDescription")}
-              <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder={t("media.descriptionPlaceholder", { kind: mediaKindLabel(selected.mediaKind, t) })} />
-            </label>
             {(selected.aiDescription || selected.inferredDescription) && (
               <div className="library-generated-description">
                 <strong>{selected.aiDescription ? t("media.aiDescription") : t("media.inferredDescription")}</strong>
                 <span>{selected.aiDescription || selected.inferredDescription}</span>
               </div>
             )}
+            {selected.segments.length > 0 && <details key={selected.id} className="library-timeline">
+              <summary>{t("media.timeline")}</summary>
+              <ol>{selected.segments.map((scene) => <li key={scene.id}>
+                <small>{formatDuration(scene.startMs)}–{formatDuration(scene.endMs)}</small>
+                <span>{scene.observedLabel || scene.description}</span>
+                {scene.observedLabel && scene.description !== scene.observedLabel && <p>{scene.description}</p>}
+              </li>)}</ol>
+            </details>}
+            <MediaTagsEditor key={selected.id} asset={selected}
+              onSearch={(text) => { setQuery(text); setAppliedQuery(text); setOffset(0); }} />
             <div className="button-row">
               <button disabled={analysisRunning || selected.availability !== "active"} onClick={() => void openSingleAnalysis()}>
                 <Sparkles size={16} /> {selected.analysisState === "ready" ? t("media.analyzeAgain", { kind: mediaKindLabel(selected.mediaKind, t) }) : t("media.analyzeKind", { kind: mediaKindLabel(selected.mediaKind, t) })}
-              </button>
-              <button className="primary" disabled={saving || description === selected.userDescription} onClick={() => void saveDescription()}>
-                <Save size={16} /> {saving ? t("common.saving") : t("media.saveDescription")}
               </button>
             </div>
           </>
@@ -925,13 +946,6 @@ export default function MediaLibraryScreen() {
               })}
             </div>
             {analysisDialog.mode === "bulk" && <p className="library-help">{t("media.bulkHelp")}</p>}
-            {analysisRunning && (
-              <div className="analysis-progress">
-                <div><span style={{ width: `${analysisProgress.total ? analysisProgress.processed / analysisProgress.total * 100 : 0}%` }} /></div>
-                <strong>{t("media.processed", { processed: analysisProgress.processed.toLocaleString(locale), total: analysisProgress.total.toLocaleString(locale) })}</strong>
-                <small>{t("media.progress", { succeeded: analysisProgress.succeeded.toLocaleString(locale), failures: analysisProgress.failures ? t("media.failedSuffix", { count: analysisProgress.failures.toLocaleString(locale) }) : "", cost: analysisProgress.costUsd.toFixed(4) })}</small>
-              </div>
-            )}
             <div className="button-row">
               {analysisRunning
                 ? <button onClick={() => { stopBulkAnalysis.current = true; }}>{t("media.stopAfterCurrent")}</button>

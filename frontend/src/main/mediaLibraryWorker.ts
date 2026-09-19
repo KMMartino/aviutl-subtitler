@@ -83,6 +83,8 @@ function dispatch(method: string, args: unknown[]): unknown {
       return database.listAnalysisCandidates(args[0] as MediaAssetKind | undefined);
     case "getAsset":
       return database.getAsset(String(args[0]));
+    case "updateTags":
+      return database.updateTags(String(args[0]), String(args[1]), args[2] as string[]);
     case "updateUserDescription":
       return database.updateUserDescription(String(args[0]), String(args[1]));
     case "addUserSegment":

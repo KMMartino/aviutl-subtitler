@@ -2,6 +2,7 @@ import { ArrowLeft, ArrowRight, Check, Eye, FolderOpen, Sparkles, X } from "luci
 import { useEffect, useMemo, useState } from "react";
 import type { BrollCandidate, BrollReviewDecision, MediaAnalysisDetail, MediaAnalysisScope, MediaAssetAnalysisEstimate, MediaAssetDetail } from "../lib/types";
 import { formatTimecode, parseTimecode } from "../lib/timecodes";
+import { applyBrollDecision } from "../lib/brollReview";
 import { useI18n } from "../i18n";
 
 type Props = {
@@ -50,7 +51,7 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
     setPreviewError("");
     setAsset(null);
     setRangeOpen(false);
-    setRangeStart("0:00");
+    setRangeStart(formatTimecode(candidate.sourceStartSec * 1000));
     setRangeEnd(candidate.sourceEndSec ? formatTimecode(candidate.sourceEndSec * 1000) : "");
     setRangeDescription("");
     setAnalysisTarget(null);
@@ -63,7 +64,7 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
         if (!current) return;
         setPreview(nextPreview);
         setAsset(nextAsset);
-        if (nextAsset.durationMs) setRangeEnd(formatTimecode(nextAsset.durationMs));
+        if (candidate.descriptionRequired && nextAsset.durationMs) setRangeEnd(formatTimecode(nextAsset.durationMs));
       },
       (reason: unknown) => {
         if (current) setPreviewError(reason instanceof Error ? reason.message : String(reason));
@@ -76,7 +77,7 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
 
   function decide(decision: BrollReviewDecision) {
     setError("");
-    setDecisions((current) => ({ ...current, [candidate.id]: decision }));
+    setDecisions((current) => applyBrollDecision(current, candidates, candidate, decision));
     if (index < candidates.length - 1) setIndex(index + 1);
   }
 
@@ -191,7 +192,7 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
   return (
     <main className="broll-review">
       <header className="silence-review-header">
-        <div><h1>{t("broll.title")}</h1><p>{t("broll.progress", { current: index + 1, total: candidates.length, decided: rows.length })}</p></div>
+        <div><h1>{t(candidate.descriptionRequired ? "broll.title" : "broll.placementTitle")}</h1><p>{t("broll.progress", { current: index + 1, total: candidates.length, decided: rows.length })}</p></div>
         <button disabled={cancelling} onClick={() => void cancel()}><X size={17} /> {cancelling ? t("review.cancelling") : t("review.cancelRun")}</button>
       </header>
       <section className="broll-review-card">
@@ -204,9 +205,10 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
         <div className="broll-review-title">
           <span className="library-asset-icon"><Eye size={20} /></span>
           <div><h2>{candidate.title}</h2><p>{t("broll.sourceSummary", { kind: candidateKind, start: candidate.startLine, end: candidate.endLine })}</p></div>
-          <span className="status status-running">{t("broll.titleOnly")}</span>
+          <span className="status status-running">{t(candidate.descriptionRequired ? "broll.titleOnly" : "broll.sceneCandidate")}</span>
         </div>
-        <p>{t("broll.matchHelp")}</p>
+        <p>{t(candidate.descriptionRequired ? "broll.matchHelp" : "broll.placementHelp")}</p>
+        {candidate.sceneLabel && <strong>{candidate.sceneLabel}</strong>}
         <dl className="broll-review-facts">
           <dt>{t("broll.transcript")}</dt><dd>{candidate.transcriptText || t("broll.noTranscript")}</dd>
           <dt>{t("broll.sourceAvailable")}</dt><dd>{candidate.mediaKind === "image" ? t("broll.stillImage") : `${formatTime(candidate.sourceStartSec)} – ${formatTime(candidate.sourceEndSec ?? candidate.sourceStartSec)}`}</dd>
@@ -261,7 +263,7 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
         {asset?.segments.length ? (
           <div className="broll-saved-segments">
             <strong>{t("broll.savedRanges")}</strong>
-            {asset.segments.map((segment) => <span key={segment.id}>{formatTimecode(segment.startMs)}–{formatTimecode(segment.endMs)} · {segment.description}</span>)}
+            {asset.segments.map((segment) => <span key={segment.id}>{formatTimecode(segment.startMs)}–{formatTimecode(segment.endMs)} · {segment.observedLabel || segment.description}</span>)}
           </div>
         ) : null}
 
@@ -277,8 +279,8 @@ export default function BrollReviewScreen({ runId, reviewId, candidates, onSubmi
       </section>
       {error && <div className="field-error" role="alert">{error}</div>}
       <section className="silence-review-decisions">
-        <button className={decisions[candidate.id]?.decision === "describe" ? "active" : ""} onClick={describe}><Check size={18} /> {t("broll.useWhole")}</button>
-        <button disabled={!hasGroundedLibraryContent} className={decisions[candidate.id]?.decision === "use_library" ? "active" : ""} onClick={() => decide({ candidateId: candidate.id, decision: "use_library" })}><Check size={18} /> {t("broll.useSaved")}</button>
+        {candidate.descriptionRequired && <button className={decisions[candidate.id]?.decision === "describe" ? "active" : ""} onClick={describe}><Check size={18} /> {t("broll.useWhole")}</button>}
+        <button disabled={candidate.descriptionRequired && !hasGroundedLibraryContent} className={decisions[candidate.id]?.decision === "use_library" ? "active" : ""} onClick={() => decide({ candidateId: candidate.id, decision: "use_library" })}><Check size={18} /> {t(candidate.descriptionRequired ? "broll.useSaved" : "broll.useScene")}</button>
         <button className={decisions[candidate.id]?.decision === "reject" ? "active" : ""} onClick={reject}><X size={18} /> {t("broll.notMatch")}</button>
       </section>
       <footer className="silence-review-footer">

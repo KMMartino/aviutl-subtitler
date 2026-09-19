@@ -34,7 +34,7 @@ export function estimateMediaAssetAnalysis(
     : (asset.durationMs ?? 0) / 1000;
   const plan = asset.mediaKind === "image"
     ? { sampleCount: 1, maximumSampleCount: 1, coarseSampleCount: 1, maximumTransitionCount: 0, adaptive: false, breakpointPrecisionSec: null, requestCount: 1 }
-    : mediaAnalysisSamplingPlan(durationSec, detail);
+    : windowedMediaAnalysisSamplingPlan(durationSec, detail);
   const sampleCount = plan.sampleCount;
   // Low-detail images are heavily compressed by the Responses API. These
   // calibrated figures track observed billing and make frame count the main
@@ -60,6 +60,20 @@ export function estimateMediaAssetAnalysis(
       ? `About ${sampleCount} frames are expected: ${plan.coarseSampleCount} survey probes, then bounded refinement only at meaningful transitions. The original media file is not uploaded.`
       : `${sampleCount} sampled frame${sampleCount === 1 ? "" : "s"} will be sent to OpenAI. The original media file is not uploaded.`,
   };
+}
+
+export function windowedMediaAnalysisSamplingPlan(durationSec: number, detail: MediaAnalysisDetail) {
+  const first = mediaAnalysisSamplingPlan(Math.min(durationSec, 720), detail);
+  for (let start = 720; start < durationSec; start += 720) {
+    const next = mediaAnalysisSamplingPlan(Math.min(720, durationSec - start), detail);
+    first.sampleCount += next.sampleCount;
+    first.maximumSampleCount += next.maximumSampleCount;
+    first.coarseSampleCount += next.coarseSampleCount;
+    first.maximumTransitionCount += next.maximumTransitionCount;
+    first.requestCount += next.requestCount;
+    first.breakpointPrecisionSec = Math.max(first.breakpointPrecisionSec ?? 0, next.breakpointPrecisionSec ?? 0) || null;
+  }
+  return first;
 }
 
 export function mediaAnalysisSamplingPlan(
@@ -180,6 +194,7 @@ export async function runMediaAssetAnalysis(
       finish(() => reject(new Error("Media analysis timed out.")));
     }, 10 * 60_000);
     child.stdout.on("data", (chunk: Buffer) => {
+      timer.refresh();
       bytes += chunk.length;
       if (bytes > MAX_OUTPUT_BYTES) child.kill();
       else stdout += chunk.toString("utf8");

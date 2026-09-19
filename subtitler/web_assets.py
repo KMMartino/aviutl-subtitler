@@ -6,6 +6,7 @@ until the user verifies rights/provenance and explicitly starts acquisition.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -22,6 +23,7 @@ class WebAssetCandidate:
     title: str
     need_description: str
     rights_status: str = "unverified"
+    need_id: str = ""
 
 
 def discover_web_assets(
@@ -33,6 +35,9 @@ def discover_web_assets(
 ) -> list[WebAssetCandidate]:
     if not needs:
         return []
+    if len(needs) > 1:
+        return [candidate for need in needs
+                for candidate in discover_web_assets([need], model=model, usage=usage, api_key=api_key)]
     key = api_key or require_api_key("OPENAI_API_KEY")
     need_lines = "\n".join(
         f"- Transcript lines {item.start_line}-{item.end_line}: {item.description}. Why needed: {item.reason}"
@@ -104,4 +109,5 @@ def _add_candidate(
         return
     title = str(raw_title or url).strip()[:1000]
     need_description = "; ".join(str(item.description) for item in needs[:3])[:2000]
-    candidates.setdefault(url, WebAssetCandidate(url, title, need_description))
+    candidates.setdefault(url, WebAssetCandidate(url, title, need_description,
+        need_id=f"lines-{needs[0].start_line}-{needs[0].end_line}-" + hashlib.sha256(need_description.encode()).hexdigest()[:12]))

@@ -214,6 +214,7 @@ function validateBrollCandidates(value: unknown): BrollCandidate[] {
       if (typeof candidate[key] !== "number" || !Number.isFinite(candidate[key])) throw new Error();
     }
     if (candidate.sourceEndSec !== null && (typeof candidate.sourceEndSec !== "number" || !Number.isFinite(candidate.sourceEndSec))) throw new Error();
+    if (candidate.sceneLabel !== undefined && (typeof candidate.sceneLabel !== "string" || candidate.sceneLabel.length > 1000)) throw new Error();
     if (typeof candidate.transcriptText !== "string" || candidate.transcriptText.length > 4000 || typeof candidate.descriptionRequired !== "boolean") throw new Error();
     if (Number(candidate.startLine) < 1 || Number(candidate.endLine) < Number(candidate.startLine) || Number(candidate.confidence) < 0 || Number(candidate.confidence) > 1) throw new Error();
     ids.add(candidate.id);

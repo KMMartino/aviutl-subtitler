@@ -47,6 +47,7 @@ export default function AdditionalSettingsPanel({
   return <section className="panel additional-settings-panel">
     <div className="panel-title">{t("additional.title")}</div>
     {shortWorkflow ? <div className="stack">
+      <div className="additional-options-row">
       <label className="check">
         <input disabled={disabled} type="checkbox" checked={cutEnabled} onChange={(event) => updateAdditional({ ...additionalSettings, cutSilenceMode: event.target.checked ? "automatic" : "off" })} />
         <TooltipLabel text={t("additional.cutSilenceHelp")}>{t("additional.cutSilence")}</TooltipLabel>
@@ -55,12 +56,7 @@ export default function AdditionalSettingsPanel({
         <input disabled={disabled || !cutEnabled} type="checkbox" checked={reviewCuts} onChange={(event) => updateAdditional({ ...additionalSettings, cutSilenceMode: event.target.checked ? "review" : "automatic" })} />
         <TooltipLabel text={t("additional.reviewCutsHelp")}>{t("additional.reviewCuts")}</TooltipLabel>
       </label>
-      <label className="check">
-        <input disabled={disabled || !cutEnabled} type="checkbox" checked={renderCutVideo} onChange={(event) => updateAdditional({ ...additionalSettings, renderCutVideo: event.target.checked })} />
-        <TooltipLabel text={renderCutVideo
-          ? t("additional.reencodeOnHelp")
-          : t("additional.reencodeOffHelp")}>{t("additional.reencode")}</TooltipLabel>
-      </label>
+      </div>
       {cutEnabled && <>
         {!renderCutVideo && frameRateMode === "possible-vfr" && <div className="local-blocking-alert local-advisory-alert" role="status">
           <AlertTriangle size={18} /><span><strong>{t("additional.possibleVfr")}</strong><small>{t("additional.possibleVfrDetail")}</small></span>
@@ -70,6 +66,7 @@ export default function AdditionalSettingsPanel({
         </div>}
       </>}
       {cutEnabled && hasVideo && encoderBlocked && <div className="local-blocking-alert" role="alert"><AlertTriangle size={18} /><span><strong>{encoderChecking ? t("additional.checkingEncoder") : encoder === "unconfigured" ? t("additional.chooseEncoder") : t("additional.encoderUnavailable")}</strong><button onClick={onConfigure}>{t("additional.openCutSettings")}</button></span></div>}
+      <div className="additional-options-row">
       {supportsWorkflowFeature(workflow, "chapters") && <label className="check">
         <input disabled={disabled} type="checkbox" checked={additionalSettings.youtubeChapters} onChange={(event) => updateAdditional({ ...additionalSettings, youtubeChapters: event.target.checked })} />
         <TooltipLabel text={t("additional.chaptersHelp")}>{t("additional.chapters")}</TooltipLabel>
@@ -80,6 +77,7 @@ export default function AdditionalSettingsPanel({
           <TooltipLabel text={t("additional.brollHelp")}>{t("additional.broll")}</TooltipLabel>
         </label>
       </>}
+      </div>
     </div> : <div className="stack">
       <fieldset className="audio-track-choice" disabled={disabled || paired || !audioTracks.length}>
         <legend><TooltipLabel text={t("additional.trackTooltip")}>{t("additional.speechTrack")}</TooltipLabel></legend>

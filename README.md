@@ -275,3 +275,40 @@ The installer and portable app do not bundle model files, llama.cpp server binar
 Do not use subagents unless user specified or when you are confident that breaking out the task to a smaller model will result in higher quality code or in lower usage.
 
 Always strive for simpler code in less lines. Avoid redundant checks, excessive testing, and checking the results of an action you just performed if the action has propper error logging and no errors were reported.
+
+
+### Media tags and agent search
+
+The Media Library indexes explicit analysis tags and source/technical metadata. It does not turn
+filenames, paths, or description words into tags; those remain searchable as ordinary text.
+Automatic content tags favor game/platform identity, footage type, and specific visible actions,
+with a small per-scope limit and redundant phrases removed. Existing automatic tags are refreshed
+locally when upgrading; manual tags and stored descriptions are preserved.
+
+The collapsed search-tags section shows whole-file tags for retrieval. Manual tag editing is currently hidden.
+Supported categories are `game`, `platform`, `subject`, `action`, `tone`, `role`, `category`,
+`creator`, `source`, `format`, and `keyword`. Manual tags override automatic tags in the same category
+and scope. Manually tagged scenes are preserved during reanalysis. Removing manual tags restores
+automatic suggestions. New analyses use short factual summaries and timestamped footage descriptions;
+existing AI descriptions change only when reanalyzed. B-roll analysis defaults to `gpt-5.6-luna` with low reasoning, and groups shots into broad usage sections
+(e.g. cinematic trailer, gameplay: traversal, gameplay: boss battle, release/platform card); props and
+individual actions do not create sections. Its prompts, section budget, and reusable cache are separate
+from detailed long-form editorial analysis. The deprecated manual-description editor is removed.
+
+The library search box accepts exact tag filters alongside ordinary text, for example:
+`game:"Elden Ring" action:parrying`. Clicking a tag applies its filter.
+
+Agents can search the same library without changing it or making API requests:
+
+```powershell
+python -m subtitler.media_search --database .frontend-state/media-library/library.sqlite3 --tag "game:Elden Ring" --tag "action:parrying" --min-duration 3 --min-confidence 0.8 --limit 20
+```
+
+For the installed app, pass its `media-library/library.sqlite3` under the app's user-data directory.
+The JSON response contains stable asset/scene IDs, source paths, exact time ranges, preview coordinates,
+matched terms/tags, confidence, uncertainty, and tag provenance. Use `--query`, `--kind video`,
+`--max-duration`, and `--offset` to narrow or page results. `--scope files` returns whole files;
+the default returns scenes, with file-level results for images and videos without analyzed scenes.
+Filters are ANDed. Scene searches inherit file identity tags (game, platform, creator, source, format), but do
+not assume whole-file subject/action/tone tags occur in every scene. Library file filters can match
+tags from different scenes in that file; agent scene filters must match the same scene.

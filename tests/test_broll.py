@@ -465,11 +465,11 @@ class BrollTests(unittest.TestCase):
                 provider=FakeProvider(needs_response, response),
                 sidecar_path=sidecar,
             )
-            self.assertEqual(len(outcome.placements), 1)
-            self.assertEqual(outcome.placements[0].output_end_frame, 121)
+            self.assertEqual(len(outcome.placements), 0)
+            self.assertEqual(outcome.omitted[-1]["reason"], "insufficient_source_duration")
             saved = json.loads(sidecar.read_text(encoding="utf-8"))
             self.assertEqual(saved["provider"], "openai")
-            self.assertEqual(saved["placements"][0]["asset_id"], "asset")
+            self.assertEqual(saved["proposed"][0]["asset_id"], "asset")
 
     def test_web_discovery_failure_does_not_discard_local_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

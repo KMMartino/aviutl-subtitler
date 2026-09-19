@@ -340,6 +340,7 @@ function registerIpc(): void {
       ]),
     );
   });
+  handle("library:update-tags", (_event, assetId: string, segmentId: string, tags: string[]) => requireMediaLibrary().updateTags(assetId, segmentId, tags));
   handle("library:update-description", (_event, assetId: string, description: string) => (
     requireMediaLibrary().updateUserDescription(assetId, description)
   ));
@@ -366,12 +367,12 @@ function registerIpc(): void {
   });
   handle("library:analysis-estimates", async (_event, assetId: string, scope?: MediaAnalysisScope) => {
     const hostedConfig = readWorkflowConfig("hosted");
-    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-terra");
+    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-luna");
     return requireMediaLibrary().estimateAnalysis(assetId, model, scope);
   });
   handle("library:bulk-analysis-plan", async (_event, mediaKind: MediaAssetKind | "") => {
     const hostedConfig = readWorkflowConfig("hosted");
-    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-terra");
+    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-luna");
     return requireMediaLibrary().bulkAnalysisPlan(mediaKind || undefined, model);
   });
   handle("library:analyze", async (_event, assetId: string, detail: MediaAnalysisDetail, scope?: MediaAnalysisScope) => {
@@ -380,7 +381,7 @@ function registerIpc(): void {
     if (!python.ready) throw new Error(python.error || "Python runtime is not ready.");
     if (!python.requirementsInstalled) throw new Error("Install the current Python requirements before analyzing media.");
     const hostedConfig = readWorkflowConfig("hosted");
-    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-terra");
+    const model = String((hostedConfig.broll as Record<string, unknown> | undefined)?.analysis_model || "gpt-5.6-luna");
     return requireMediaLibrary().analyzeAsset(assetId, python.resolvedPath, model, detail, appState.settings.envFile, scope);
   });
   handle("library:cancel-analysis", (_event, assetId: string) => requireMediaLibrary().cancelAnalysis(assetId));

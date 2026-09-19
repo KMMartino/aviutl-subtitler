@@ -37,6 +37,7 @@ declare global {
       listMediaAssets(request: MediaAssetListRequest): Promise<MediaAssetListResult>;
       getMediaAsset(assetId: string): Promise<MediaAssetDetail>;
       getMediaAssetThumbnails(assetIds: string[]): Promise<Record<string, string>>;
+      updateMediaAssetTags(assetId: string, segmentId: string, tags: string[]): Promise<MediaAssetDetail>;
       updateMediaAssetDescription(assetId: string, description: string): Promise<MediaAssetDetail>;
       addMediaAssetSegment(assetId: string, scope: MediaAnalysisScope, description: string): Promise<MediaAssetDetail>;
       acquireSource(sourceUrl: string, range?: { startSec: number; endSec?: number }, directory?: string): Promise<AcquiredSource>;

@@ -5,10 +5,10 @@ import { estimateMediaAssetAnalysis, mediaAnalysisSamplingPlan, mediaAnalysisTra
 describe("media asset analysis estimate", () => {
   it("bounds video sampling and reports the hosted privacy boundary", () => {
     const estimate = estimateMediaAssetAnalysis(asset({ durationMs: 3_600_000 }), "gpt-5.6-terra", "probe");
-    expect(estimate.coarseSampleCount).toBe(69);
-    expect(estimate.sampleCount).toBe(93);
+    expect(estimate.coarseSampleCount).toBe(135);
+    expect(estimate.sampleCount).toBe(165);
     expect(estimate.adaptive).toBe(true);
-    expect(estimate.breakpointPrecisionSec).toBe(3);
+    expect(estimate.breakpointPrecisionSec).toBe(1.8);
     expect(estimate.estimatedCostUsd).toBeGreaterThan(0);
     expect(estimate.privacyNotice).toContain("original media file is not uploaded");
   });
@@ -63,11 +63,11 @@ describe("media asset analysis estimate", () => {
   it("uses a bounded adaptive Probe survey for a 100-minute stream", () => {
     const video = asset({ durationMs: 6_000_000 });
     const estimate = estimateMediaAssetAnalysis(video, "gpt-5.6-terra", "probe");
-    expect(estimate.coarseSampleCount).toBe(89);
-    expect(estimate.sampleCount).toBe(131);
-    expect(estimate.maximumSampleCount).toBe(329);
-    expect(estimate.maximumTransitionCount).toBe(40);
-    expect(estimate.breakpointPrecisionSec).toBe(3);
+    expect(estimate.coarseSampleCount).toBe(229);
+    expect(estimate.sampleCount).toBe(285);
+    expect(estimate.maximumSampleCount).toBe(1125);
+    expect(estimate.maximumTransitionCount).toBe(144);
+    expect(estimate.breakpointPrecisionSec).toBe(1.8);
     expect(estimate.adaptive).toBe(true);
     expect(estimate.recommended).toBe(true);
   });

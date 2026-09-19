@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from contextlib import closing
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, Sequence
 
@@ -15,6 +15,7 @@ from .api_usage import ApiUsageLedger
 from .artifact_io import write_json_artifact
 from .external_refiners import GeminiTextRefiner, HostedTextRefiner, OpenAITextRefiner
 from .models import BrollPlacement, Subtitle
+from .media_tags import read_tags, tag_labels
 from .operation_store import ArtifactError
 from .review_exchange import ReviewError
 from .web_assets import WebAssetCandidate
@@ -25,8 +26,6 @@ MIN_PLACEMENT_SAFETY_SCORE = 0.80
 MIN_SOURCE_GROUNDING_SCORE = 0.65
 MIN_TECHNICAL_QUALITY_SCORE = 0.35
 MIN_OVERALL_CONFIDENCE = 0.68
-MAX_CATALOG_POOL = 1000
-MAX_RETRIEVED_ASSETS = 120
 PER_NEED_KIND_LIMIT = 6
 MAX_TRANSCRIPT_CHARS = 60_000
 BrollMode = Literal["off", "automatic"]
@@ -142,6 +141,11 @@ BROLL_PLAN_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
+# Alternatives share the same grounded placement contract.
+BROLL_PLAN_RESPONSE_SCHEMA["properties"]["alternatives"] = BROLL_PLAN_RESPONSE_SCHEMA["properties"]["placements"]
+BROLL_PLAN_RESPONSE_SCHEMA["required"].append("alternatives")
+
+
 class BrollPlanningProvider(Protocol):
     provider: str
     model: str
@@ -170,6 +174,10 @@ class CatalogSegment:
     suitability: str = ""
     description_source: Literal["user", "ai"] = "ai"
     locked: bool = False
+    observed_label: str = ""
+    evidence_spacing_sec: float = 0.0
+    handoff_reason: str = ""
+    analysis_run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +239,7 @@ class FilenameReviewCandidate:
     source_end_sec: float | None
     confidence: float
     reason: str
+    description_required: bool = True
 
 
 @dataclass(frozen=True)
@@ -259,6 +268,7 @@ class BrollPlanOutcome:
     filename_rejected_count: int = 0
     planner_rejection_count: int = 0
     safety_omission_count: int = 0
+    selected_scenes: list[dict[str, Any]] = field(default_factory=list)
 
 
 class HostedBrollProvider:
@@ -367,7 +377,6 @@ def load_catalog(database_path: Path, transcript_text: str = "") -> list[Catalog
             ORDER BY CASE WHEN a.user_description<>'' THEN 0
                           WHEN a.ai_description<>'' THEN 1 ELSE 2 END,
                      a.updated_at DESC
-            LIMIT {MAX_CATALOG_POOL}
             """
         ).fetchall()
         assets: list[CatalogAsset] = []
@@ -379,9 +388,15 @@ def load_catalog(database_path: Path, transcript_text: str = "") -> list[Catalog
                 _select_column(segment_columns, "suitability", "''", table_alias=""),
                 _select_column(segment_columns, "origin", "'ai'", table_alias=""),
                 _select_column(segment_columns, "locked", "0", table_alias=""),
+                _select_column(segment_columns, "observed_label", "''", table_alias=""),
+                _select_column(segment_columns, "evidence_spacing_sec", "0", table_alias=""),
+                _select_column(segment_columns, "handoff_reason", "''", table_alias=""),
+                _select_column(segment_columns, "analysis_run_id", "''", table_alias=""),
             ]
         )
+        has_tags = db.execute("SELECT 1 FROM sqlite_master WHERE name='effective_media_tags'").fetchone()
         for row in rows:
+            structured_tags = read_tags(db, str(row["id"])) if has_tags else []
             asset_path = Path(str(row["canonical_path"]))
             if not asset_path.is_file():
                 continue
@@ -391,7 +406,6 @@ def load_catalog(database_path: Path, transcript_text: str = "") -> list[Catalog
                 FROM asset_segments
                 WHERE asset_id=? AND end_ms>start_ms
                 ORDER BY start_ms, end_ms
-                LIMIT 300
                 """,
                 (row["id"],),
             ).fetchall()
@@ -402,12 +416,16 @@ def load_catalog(database_path: Path, transcript_text: str = "") -> list[Catalog
                     end_sec=float(item["end_ms"]) / 1000.0,
                     description=str(item["description"] or ""),
                     confidence=_confidence(item["confidence"]),
-                    tags=_json_tags(item["tags_json"]),
+                    tags=tag_labels(structured_tags, str(item["id"])) if has_tags else _json_tags(item["tags_json"]),
                     motion_level=_optional_float(item["motion_level"]),
                     visual_category=str(item["visual_category"] or ""),
                     suitability=str(item["suitability"] or ""),
                     description_source=str(item["origin"] or "ai"),  # type: ignore[arg-type]
                     locked=bool(item["locked"]),
+                    observed_label=str(item["observed_label"] or ""),
+                    evidence_spacing_sec=float(item["evidence_spacing_sec"] or 0),
+                    handoff_reason=str(item["handoff_reason"] or ""),
+                    analysis_run_id=str(item["analysis_run_id"] or ""),
                 )
                 for item in segment_rows
             )
@@ -429,7 +447,7 @@ def load_catalog(database_path: Path, transcript_text: str = "") -> list[Catalog
                     segments=segments,
                     source_fps=source_fps,
                     description_source=str(row["description_source"]),  # type: ignore[arg-type]
-                    tags=_json_tags(row["tags_json"]),
+                    tags=tag_labels(structured_tags) if has_tags else _json_tags(row["tags_json"]),
                     width=_optional_int(row["width"]),
                     height=_optional_int(row["height"]),
                     transparency=str(row["transparency"] or "unsupported"),
@@ -453,24 +471,18 @@ def plan_broll(
     review: Callable[[Sequence[FilenameReviewCandidate], Sequence[Subtitle]], tuple[dict[str, str], set[str]]] | None = None,
     catalog: Sequence[CatalogAsset] | None = None,
     review_catalog: Callable[[], Sequence[CatalogAsset]] | None = None,
+    verify: Callable[[ProposedPlacement, Sequence[Subtitle]], ProposedPlacement | None] | None = None,
+    choose: Callable[[Sequence[FilenameReviewCandidate], Sequence[Subtitle]], set[str]] | None = None,
+    source_scenes: Sequence[dict[str, Any]] = (),
 ) -> BrollPlanOutcome:
     assets = list(catalog) if catalog is not None else load_catalog(database_path) if database_path is not None else []
     if not assets:
         print("Warning: B-roll is enabled, but the Media Library has no available indexed assets.", flush=True)
 
     try:
-        needs_raw = provider.complete(
-            _needs_prompt(subtitles),
-            operation="broll_needs",
-            response_schema=BROLL_NEEDS_RESPONSE_SCHEMA,
-        )
-        needs, protected_ranges = parse_broll_needs(needs_raw, subtitles)
+        needs, protected_ranges = collect_broll_needs(provider, subtitles, source_scenes)
         retrieved = retrieve_catalog_assets(assets, needs)
-        raw = provider.complete(
-            _planning_prompt(subtitles, retrieved, needs, protected_ranges),
-            operation="broll_placement",
-            response_schema=BROLL_PLAN_RESPONSE_SCHEMA,
-        )
+        raw = complete_broll_plan(provider, subtitles, retrieved, needs, protected_ranges)
         review_candidates = parse_filename_review_candidates(
             raw,
             retrieved,
@@ -522,16 +534,7 @@ def plan_broll(
                 for asset in retrieved
                 if asset.description_source != "inferred" or asset.id in enriched_by_id
             ]
-            final_raw = provider.complete(
-                _planning_prompt(
-                    subtitles,
-                    final_assets,
-                    needs,
-                    protected_ranges,
-                ),
-                operation="broll_placement",
-                response_schema=BROLL_PLAN_RESPONSE_SCHEMA,
-            )
+            final_raw = complete_broll_plan(provider, subtitles, final_assets, needs, protected_ranges)
             proposed, missing_assets, final_rejected = parse_broll_response(
                 final_raw,
                 final_assets,
@@ -542,6 +545,40 @@ def plan_broll(
             planner_rejection_count += len(final_rejected)
 
         accepted, safety_omitted = apply_confidence_policy(proposed)
+        if choose and accepted:
+            choices = list(accepted)
+            plan_data = _json_object(final_raw if review_candidates else raw)
+            for index, alternative in enumerate(plan_data.get("alternatives", [])):
+                variants, _, _ = parse_broll_response(json.dumps({"placements": [alternative]}),
+                    final_assets if review_candidates else retrieved, subtitles, protected_ranges=protected_ranges)
+                variants, _ = apply_confidence_policy(variants)
+                choices.extend(replace(item, id=f"broll-alternative-{index + 1:04d}") for item in variants
+                               if any(item.start_line == best.start_line and item.end_line == best.end_line for best in accepted))
+            selected_ids = choose([FilenameReviewCandidate(
+                item.id, item.asset, item.start_line, item.end_line, item.source_start_sec,
+                min(item.source_end_sec, item.source_start_sec + subtitles[item.end_line - 1].end_time
+                    - subtitles[item.start_line - 1].start_time) if item.source_end_sec is not None else None,
+                item.confidence, item.reason, False,
+            ) for item in choices], subtitles)
+            accepted = [item for item in choices if item.id in selected_ids]
+            rejected.extend({"id": item.id, "reason": "review_not_selected"} for item in choices if item.id not in selected_ids)
+        if verify:
+            verified = []
+            for item in accepted:
+                try:
+                    result = verify(item, subtitles)
+                except (ArtifactError, ReviewError):
+                    raise
+                except Exception as exc:
+                    safety_omitted.append({"id": item.id, "reason": "visual_verification_error", "error": str(exc)})
+                    continue
+                if result is None:
+                    safety_omitted.append({"id": item.id, "reason": "visual_verification_failed"})
+                else:
+                    verified.append(result)
+            accepted = verified
+        accepted, repetition_omitted = enforce_timeline_policy(accepted, subtitles)
+        safety_omitted.extend(repetition_omitted)
         omitted = [*rejected, *safety_omitted]
         placements = [
             _to_exo_placement(item, subtitles, fps, canvas_width, canvas_height)
@@ -571,6 +608,12 @@ def plan_broll(
             filename_rejected_count=rejected_description_count,
             planner_rejection_count=planner_rejection_count,
             safety_omission_count=len(safety_omitted),
+            selected_scenes=[{
+                "id": item.id, "asset_id": item.asset.id, "start_line": item.start_line, "end_line": item.end_line,
+                "source_start_sec": item.source_start_sec, "source_end_sec": item.source_end_sec,
+                "scenes": [asdict(scene) for scene in item.asset.segments
+                           if scene.end_sec > item.source_start_sec and scene.start_sec < (item.source_end_sec or 0)],
+            } for item in accepted],
         )
     except (ReviewError, ArtifactError):
         raise
@@ -588,6 +631,73 @@ def plan_broll(
         print(f"Warning: B-roll planning failed; continuing without B-roll. {exc}", flush=True)
     _write_plan(sidecar_path, mode, outcome)
     return outcome
+
+
+def transcript_windows(subtitles: Sequence[Subtitle]) -> list[tuple[int, Sequence[Subtitle]]]:
+    windows: list[tuple[int, Sequence[Subtitle]]] = []
+    start = 0
+    while start < len(subtitles):
+        end, chars = start, 0
+        while end < len(subtitles):
+            size = len(subtitles[end].text) + 80
+            if end > start and chars + size > MAX_TRANSCRIPT_CHARS:
+                break
+            chars += size
+            end += 1
+        windows.append((start, subtitles[start:end]))
+        if end == len(subtitles):
+            break
+        start = max(start + 1, end - 2)
+    return windows or [(0, subtitles)]
+
+
+def collect_broll_needs(
+    provider: BrollPlanningProvider, subtitles: Sequence[Subtitle],
+    source_scenes: Sequence[dict[str, Any]] = (),
+) -> tuple[list[BrollNeed], list[tuple[int, int]]]:
+    needs: dict[tuple[int, int, str], BrollNeed] = {}
+    protected: set[tuple[int, int]] = set()
+    for offset, window in transcript_windows(subtitles):
+        visible = [scene for scene in source_scenes if window and
+                   float(scene.get("end_ms", 0)) > window[0].start_time * 1000 and
+                   float(scene.get("start_ms", 0)) < window[-1].end_time * 1000]
+        prompt = _needs_prompt(window, offset)
+        if visible:
+            prompt += "\nPRIMARY VIDEO OBSERVATIONS: Protect demonstrations, reveals, reactions, and important UI/text. "
+            prompt += "Do not suggest replacement footage when the source already shows the needed action.\n"
+            prompt += json.dumps(visible, ensure_ascii=False)
+        raw = provider.complete(prompt, operation="broll_needs",
+                                response_schema=BROLL_NEEDS_RESPONSE_SCHEMA)
+        found, ranges = parse_broll_needs(raw, subtitles)
+        protected.update((start, end) for start, end in ranges if offset < start <= end <= offset + len(window))
+        for need in found:
+            if not offset < need.start_line <= need.end_line <= offset + len(window):
+                continue
+            needs[(need.start_line, need.end_line, need.description)] = need
+    return ([need for need in needs.values() if not _overlaps_ranges(
+        need.start_line, need.end_line, sorted(protected))], sorted(protected))
+
+
+def complete_broll_plan(
+    provider: BrollPlanningProvider, subtitles: Sequence[Subtitle], assets: Sequence[CatalogAsset],
+    needs: Sequence[BrollNeed], protected: Sequence[tuple[int, int]],
+) -> str:
+    merged: dict[str, list[Any]] = {key: [] for key in ("placements", "alternatives", "filename_review_candidates", "missing_assets")}
+    for offset, window in transcript_windows(subtitles):
+        window_needs = [need for need in needs if offset < need.start_line <= offset + len(window)]
+        if len(subtitles) != len(window) and not window_needs:
+            continue
+        batches = [window_needs[index:index + 8] for index in range(0, len(window_needs), 8)] or [[]]
+        for batch in batches:
+            window_assets = retrieve_catalog_assets(assets, batch) if batch else assets
+            raw = provider.complete(_planning_prompt(window, window_assets, batch, protected, line_offset=offset),
+                                    operation="broll_placement", response_schema=BROLL_PLAN_RESPONSE_SCHEMA)
+            data = _json_object(raw)
+            for key, rows in merged.items():
+                for row in data.get(key, []) if isinstance(data.get(key), list) else []:
+                    if row not in rows:
+                        rows.append(row)
+    return json.dumps(merged, ensure_ascii=False)
 
 
 def parse_broll_needs(
@@ -635,28 +745,10 @@ def parse_broll_needs(
 
 
 def retrieve_catalog_assets(assets: Sequence[CatalogAsset], needs: Sequence[BrollNeed]) -> list[CatalogAsset]:
-    """Retrieve a small, media-balanced catalog for each editorial need."""
-    selected: dict[str, CatalogAsset] = {}
-    for need in needs:
-        for media_kind in ("video", "image"):
-            if need.preferred_media != "either" and need.preferred_media != media_kind:
-                continue
-            ranked = sorted(
-                (
-                    (_asset_need_score(asset, need), asset)
-                    for asset in assets
-                    if asset.media_kind == media_kind
-                ),
-                key=lambda item: (item[0], item[1].description_source != "inferred", item[1].analysis_state == "ready"),
-                reverse=True,
-            )
-            for score, asset in ranked[:PER_NEED_KIND_LIMIT]:
-                if score <= 0:
-                    continue
-                selected.setdefault(asset.id, asset)
-                if len(selected) >= MAX_RETRIEVED_ASSETS:
-                    return list(selected.values())
-    return list(selected.values())
+    """Index all eligible scenes, then return a bounded union of per-need finalists."""
+    from .broll_retrieval import retrieve_scenes
+
+    return retrieve_scenes(assets, needs)
 
 
 def parse_filename_review_candidates(
@@ -812,6 +904,32 @@ def parse_broll_response(
     return proposed, missing, rejected
 
 
+def enforce_timeline_policy(
+    proposed: Sequence[ProposedPlacement], subtitles: Sequence[Subtitle],
+) -> tuple[list[ProposedPlacement], list[dict[str, Any]]]:
+    accepted: list[ProposedPlacement] = []
+    omitted: list[dict[str, Any]] = []
+    for item in sorted(proposed, key=lambda value: -value.confidence):
+        duration = subtitles[item.end_line - 1].end_time - subtitles[item.start_line - 1].start_time
+        reason = ""
+        if item.asset.media_kind == "video" and (
+            item.source_end_sec is None or item.source_end_sec - item.source_start_sec + .05 < duration
+        ):
+            reason = "insufficient_source_duration"
+        elif any(item.start_line <= other.end_line and item.end_line >= other.start_line for other in accepted):
+            reason = "overlapping_target"
+        elif any(item.asset.id == other.asset.id and (
+            item.asset.media_kind == "image" or
+            item.source_start_sec < (other.source_end_sec or 0) and (item.source_end_sec or 0) > other.source_start_sec
+        ) for other in accepted):
+            reason = "repeated_source_interval"
+        if reason:
+            omitted.append({"id": item.id, "reason": reason})
+        else:
+            accepted.append(item)
+    return sorted(accepted, key=lambda item: item.start_line), omitted
+
+
 def apply_confidence_policy(
     proposed: Sequence[ProposedPlacement],
 ) -> tuple[list[ProposedPlacement], list[dict[str, Any]]]:
@@ -846,7 +964,7 @@ def apply_confidence_policy(
     return accepted, omitted
 
 
-def _needs_prompt(subtitles: Sequence[Subtitle]) -> str:
+def _needs_prompt(subtitles: Sequence[Subtitle], line_offset: int = 0) -> str:
     return (
         "Task: identify optional B-roll needs and primary-video protected ranges.\n\n"
         "Selection rule: create a need only where B-roll would materially improve comprehension, emotion, or "
@@ -862,7 +980,7 @@ def _needs_prompt(subtitles: Sequence[Subtitle]) -> str:
         "Completion: inspect every transcript line, return all supported needs and protected ranges in source "
         "order, and emit only the JSON object required by the response schema."
         "\n\nTRANSCRIPT (line, start, end, text):\n"
-        + _transcript_lines(subtitles)
+        + _transcript_lines(subtitles, line_offset)
     )
 
 
@@ -873,6 +991,7 @@ def _planning_prompt(
     protected_ranges: Sequence[tuple[int, int]] = (),
     *,
     confirmed_ranges: dict[str, list[tuple[float, float | None]]] | None = None,
+    line_offset: int = 0,
 ) -> str:
     catalog_lines = []
     confirmed = confirmed_ranges or {}
@@ -883,6 +1002,10 @@ def _planning_prompt(
                 "start_sec": round(segment.start_sec, 3),
                 "end_sec": round(segment.end_sec, 3),
                 "description": segment.description[:500],
+                "observed_label": segment.observed_label,
+                "evidence_spacing_sec": segment.evidence_spacing_sec,
+                "unresolved_question": segment.handoff_reason,
+                "analysis_run_id": segment.analysis_run_id,
                 "tags": segment.tags,
                 "confidence": segment.confidence,
                 "motion_level": segment.motion_level,
@@ -924,7 +1047,9 @@ def _planning_prompt(
         "protected list missed it. It is better to omit a weak match. Do not target a coverage quota. Keep density "
         "natural: avoid back-to-back or repetitive placements, but do not impose a rigid count. Use images for "
         "logos, screenshots, diagrams, documents, maps, or artwork when motion adds no value. Do not reuse an asset "
-        "unless clearly justified. A filename-only asset may be placed only by selecting one of its described "
+        "unless clearly justified. Return up to two grounded alternatives per placement in alternatives, using "
+        "the identical target transcript range. Select a precise interval within a scene long enough for the passage. "
+        "A filename-only asset may be placed only by selecting one of its described "
         "segments. Never place an unsegmented portion of a filename-only asset. If its title is a "
         "plausible, specific match for an editorial need, put it in filename_review_candidates so the user can "
         "inspect and describe it first. Select no more than the single strongest filename-only candidate for each "
@@ -944,7 +1069,7 @@ def _planning_prompt(
         + "\n\nEDITORIAL NEEDS (one JSON object per line):\n"
         + "\n".join(need_lines)
         + "\n\nTRANSCRIPT (line, start, end, text):\n"
-        + _transcript_lines(subtitles)
+        + _transcript_lines(subtitles, line_offset)
         + "\n\nRETRIEVED CATALOG (one JSON object per line):\n"
         + "\n".join(catalog_lines)
     )
@@ -955,8 +1080,16 @@ def _validated_source_range(
 ) -> tuple[float, float | None, CatalogSegment | None]:
     segment_id = str(value.get("segment_id") or "")
     segment = next((item for item in asset.segments if item.id == segment_id), None)
+    if segment_id and segment is None:
+        raise ValueError("unknown scene")
     if segment is not None:
-        return segment.start_sec, segment.end_sec, segment
+        source_start = _finite_non_negative(value.get("source_start_sec", segment.start_sec), "invalid source start")
+        source_end = _finite_non_negative(value.get("source_end_sec", segment.end_sec), "invalid source end")
+        if source_start < segment.start_sec or source_end > segment.end_sec or source_end <= source_start:
+            raise ValueError("source range exceeds selected scene")
+        if asset.duration_sec is not None and source_end > asset.duration_sec + 0.05:
+            raise ValueError("source range exceeds asset duration")
+        return source_start, source_end, segment
     if asset.media_kind == "image":
         return 0.0, None, None
     source_start = _finite_non_negative(value.get("source_start_sec"), "invalid source start")
@@ -992,7 +1125,8 @@ def _to_exo_placement(
         source_start_frame=int(item.source_start_sec * (item.asset.source_fps or fps)) + 1,
         confidence=item.confidence,
         reason=item.reason,
-        description=item.asset.description,
+        description=next((scene.observed_label or scene.description for scene in item.asset.segments
+                          if scene.start_sec <= item.source_start_sec < scene.end_sec), item.asset.description),
         has_audio=item.asset.has_audio,
         scale_percent=_scale_percent(item.asset, canvas_width, canvas_height, item.display_mode),
         display_mode=item.display_mode,
@@ -1018,7 +1152,7 @@ def _write_plan(path: Path | None, mode: BrollMode, outcome: BrollPlanOutcome) -
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "mode": mode,
         "provider": outcome.provider,
         "model": outcome.model,
@@ -1056,6 +1190,7 @@ def _write_plan(path: Path | None, mode: BrollMode, outcome: BrollPlanOutcome) -
             }
             for item in outcome.proposed
         ],
+        "selected_scenes": outcome.selected_scenes,
         "missing_assets": [asdict(item) for item in outcome.missing_assets],
         "web_candidates": [asdict(item) for item in outcome.web_candidates],
         "omitted": outcome.omitted,
@@ -1173,13 +1308,11 @@ def _overlaps_ranges(start: int, end: int, ranges: Sequence[tuple[int, int]]) ->
     return any(start <= protected_end and end >= protected_start for protected_start, protected_end in ranges)
 
 
-def _transcript_lines(subtitles: Sequence[Subtitle]) -> str:
+def _transcript_lines(subtitles: Sequence[Subtitle], line_offset: int = 0) -> str:
     lines: list[str] = []
     used_chars = 0
-    for index, subtitle in enumerate(subtitles, start=1):
+    for index, subtitle in enumerate(subtitles, start=1 + line_offset):
         line = f"{index}\t{subtitle.start_time:.3f}\t{subtitle.end_time:.3f}\t{subtitle.text}"
-        if used_chars + len(line) > MAX_TRANSCRIPT_CHARS:
-            break
         lines.append(line)
         used_chars += len(line) + 1
     return "\n".join(lines)

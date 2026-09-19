@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("subtitler", {
   listMediaAssets: (request: MediaAssetListRequest) => ipcRenderer.invoke("library:list-assets", request),
   getMediaAsset: (assetId: string) => ipcRenderer.invoke("library:get-asset", assetId),
   getMediaAssetThumbnails: (assetIds: string[]) => ipcRenderer.invoke("library:thumbnails", assetIds),
+  updateMediaAssetTags: (assetId: string, segmentId: string, tags: string[]) => ipcRenderer.invoke("library:update-tags", assetId, segmentId, tags),
   updateMediaAssetDescription: (assetId: string, description: string) => ipcRenderer.invoke("library:update-description", assetId, description),
   addMediaAssetSegment: (assetId: string, scope: MediaAnalysisScope, description: string) => ipcRenderer.invoke("library:add-segment", assetId, scope, description),
   acquireSource: (sourceUrl: string, range?: { startSec: number; endSec?: number }, directory?: string) => ipcRenderer.invoke("source:acquire", sourceUrl, range, directory),

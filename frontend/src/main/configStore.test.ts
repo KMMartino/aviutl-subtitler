@@ -12,6 +12,27 @@ afterEach(() => {
 });
 
 describe("config store runtime paths", () => {
+  it("migrates the previous B-roll default once while preserving discovery and later model choices", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    const file = path.join(paths.userConfigRoot, "hosted.json");
+    fs.mkdirSync(paths.userConfigRoot, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ broll: { analysis_model: "gpt-5.6-terra", web_search_model: "gpt-5.6-terra", discover_web_assets: true } }));
+    ensureFrontendState(paths);
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).broll).toEqual({ analysis_model: "gpt-5.6-luna", web_search_model: "gpt-5.6-terra", discover_web_assets: true });
+    fs.writeFileSync(file, JSON.stringify({ broll: { analysis_model: "gpt-5.6-terra" } }));
+    ensureFrontendState(paths);
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).broll.analysis_model).toBe("gpt-5.6-terra");
+  });
+
+  it("preserves a custom B-roll analysis model on migration", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    fs.writeFileSync(path.join(paths.bundledConfigRoot, "hosted.json"), JSON.stringify({ broll: { analysis_model: "gpt-5.4-mini" } }));
+    ensureFrontendState(paths);
+    expect(JSON.parse(fs.readFileSync(path.join(paths.userConfigRoot, "hosted.json"), "utf8")).broll.analysis_model).toBe("gpt-5.4-mini");
+  });
+
   it("updates alignment selection without discarding unrelated workflow settings", () => {
     expect(withAlignmentModel({ backend: { name: "existing" }, alignment: { language: "ja" } }, "C:/managed/alignment", true)).toEqual({
       backend: { name: "existing" },

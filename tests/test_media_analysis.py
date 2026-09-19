@@ -20,6 +20,7 @@ from subtitler.media_analysis import (
     _extract_sample,
     _extract_samples,
     _sample_timestamps,
+    _segments_from_ranges,
     _sampling_plan,
     _transition_budget,
     analyze_media,
@@ -113,6 +114,19 @@ class AdaptiveProvider:
 
 
 class MediaAnalysisTests(unittest.TestCase):
+    def test_label_only_section_preserves_timeline_coverage(self):
+        samples = [VisualSample(i, float(i), Path(f"{i}.jpg")) for i in range(4)]
+        ranges = [
+            AnalyzedRange(0, 0, "Opening logos", [], .9, .1, "cards", "", observed_label="Opening cards"),
+            AnalyzedRange(1, 2, "", [], .9, .5, "cinematic trailer", "", observed_label="Cinematic trailer"),
+            AnalyzedRange(3, 3, "Release platforms", [], .9, .1, "cards", "", observed_label="Ending card"),
+        ]
+        segments = _segments_from_ranges(samples, ranges, 4.0)
+        self.assertEqual(len(segments), 3)
+        self.assertEqual(segments[1].description, "")
+        self.assertEqual(segments[1].observed_label, "Cinematic trailer")
+        self.assertEqual([(s.start_ms, s.end_ms) for s in segments], [(0, 500), (500, 2500), (2500, 4000)])
+
     def test_openai_media_analysis_uses_strict_schema_and_records_raw_response(self) -> None:
         response_text = json.dumps(
             {
@@ -169,6 +183,12 @@ class MediaAnalysisTests(unittest.TestCase):
         self.assertEqual(payload["max_output_tokens"], 16_384)
         self.assertEqual(record["status"], "completed")
         self.assertEqual(record["response_content"], response_text)
+        instruction = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("broad B-roll usage sections", instruction)
+        self.assertIn("Gameplay: boss battle", instruction)
+        self.assertIn("ceiling, never a target", instruction)
+        self.assertNotIn("Retain specific useful actions such as dodging", instruction)
+
         self.assertTrue(result[2][0].handoff_required)
         self.assertEqual(result[2][0].observed_label, "Exploring the first floor")
 

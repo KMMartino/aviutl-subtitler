@@ -15,6 +15,7 @@ type Options = {
 export function useHostedModels({ settings, coreSettings, setCoreSettings, setNotice }: Options) {
   const { t } = useI18n();
   const requestRevision = useRef(0);
+  const [loadedEnvFile, setLoadedEnvFile] = useState<string | null>(null);
   const [envStatus, setEnvStatus] = useState<EnvStatus>(emptyEnv);
   const [hostedVerification, setHostedVerification] = useState<HostedModelVerification | null>(null);
   const [verifyingHosted, setVerifyingHosted] = useState(false);
@@ -25,7 +26,10 @@ export function useHostedModels({ settings, coreSettings, setCoreSettings, setNo
     setHostedVerification(null);
     setVerifyingHosted(false);
     void window.subtitler.getEnvStatus(settings.envFile).then((status) => {
-      if (request === requestRevision.current) setEnvStatus(status);
+      if (request === requestRevision.current) {
+        setEnvStatus(status);
+        setLoadedEnvFile(settings.envFile);
+      }
     });
   }, [settings?.envFile]);
 
@@ -47,6 +51,7 @@ export function useHostedModels({ settings, coreSettings, setCoreSettings, setNo
 
   return {
     envStatus,
+    envStatusLoaded: loadedEnvFile !== null && loadedEnvFile === settings?.envFile,
     hostedVerification,
     verifyingHosted,
     hostedSelectionReady: isHostedSelectionVerified(coreSettings, hostedVerification) || isHostedSelectionConfigured(coreSettings, envStatus),

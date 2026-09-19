@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from .api_usage import ApiUsageLedger
 from .broll import BrollMode, BrollPlanOutcome, plan_broll
-from .broll_review import request_filename_descriptions
+from .broll_review import request_filename_descriptions, request_placement_choices
+from .broll_verification import verify_placement
+from .visual_evidence_store import load_visual_evidence
 from .broll_session import BrollSession
 from .operation_store import OperationStore
 from .review_exchange import ReviewStorage
 from .models import ExoSettings, Subtitle
+from .silence_cut import TimelineMap
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,8 @@ class BrollStageRequest:
     sidecar_path: Path | None = None
     revision_directory: Path | None = None
     input_revision: str = ""
+    source_path: Path | None = None
+    source_cuts: tuple[tuple[float, float], ...] = ()
 
 
 def run_broll_stage(request: BrollStageRequest, usage: ApiUsageLedger) -> BrollPlanOutcome:
@@ -33,6 +38,7 @@ def run_broll_stage(request: BrollStageRequest, usage: ApiUsageLedger) -> BrollP
     store = OperationStore(request.revision_directory / "broll-operations", request.input_revision, usage) if request.revision_directory else None
     provider = BrollSession(request.config, usage, store)
     try:
+        evidence = load_visual_evidence(request.source_path) if request.source_path else None
         broll_outcome = plan_broll(
             mode=request.mode,
             database_path=request.database_path,
@@ -43,6 +49,13 @@ def run_broll_stage(request: BrollStageRequest, usage: ApiUsageLedger) -> BrollP
             provider=provider,
             sidecar_path=request.sidecar_path,
             catalog=provider.catalog(request.database_path),
+            source_scenes=retime_source_scenes([asdict(scene) for scene in evidence.segments], request.source_cuts) if evidence else [],
+            verify=lambda item, subtitles: verify_placement(provider, item, subtitles),
+            choose=(lambda candidates, subtitles: request_placement_choices(
+                candidates, subtitles, request.frontend_protocol,
+                ReviewStorage(request.revision_directory / "broll-placement-review.json", request.input_revision)
+                if request.revision_directory else None,
+            )) if request.frontend_protocol == "stdio-v1" else None,
             review_catalog=lambda: provider.catalog(request.database_path, operation="broll_review_catalog"),
             review=lambda candidates, subtitles: request_filename_descriptions(
                 candidates, subtitles, request.frontend_protocol,
@@ -94,3 +107,14 @@ def broll_summary(outcome: BrollPlanOutcome, mode: str) -> dict[str, Any]:
         "omitted_count": len(outcome.omitted),
         "error": outcome.error,
     }
+
+
+def retime_source_scenes(scenes: list[dict[str, Any]], cuts: tuple[tuple[float, float], ...]) -> list[dict[str, Any]]:
+    timeline = TimelineMap(cuts)
+    retimed = []
+    for scene in scenes:
+        start = round(timeline.map_time(float(scene["start_ms"]) / 1000) * 1000)
+        end = round(timeline.map_time(float(scene["end_ms"]) / 1000) * 1000)
+        if end > start:
+            retimed.append({**scene, "start_ms": start, "end_ms": end})
+    return retimed

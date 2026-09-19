@@ -1,3 +1,4 @@
+import type { MediaTag } from "../../shared/mediaTags";
 export type WorkflowName = "local" | "hosted" | "hosted-long-stream";
 export type EditorialCheckpointSummary = {
   path: string;
@@ -91,6 +92,7 @@ export type BrollCandidate = {
   reason: string;
   transcriptText: string;
   descriptionRequired: boolean;
+  sceneLabel?: string;
 };
 
 export type EncoderProbeResult = {
@@ -530,6 +532,11 @@ export type MediaAssetSegment = {
   startMs: number;
   endMs: number;
   segmentKind: "shot" | "semantic_range";
+  structuredTags?: MediaTag[];
+  observedLabel?: string;
+  analysisRunId?: string;
+  evidenceSpacingSec?: number;
+  handoffReason?: string;
   description: string;
   tags: string[];
   confidence: number;
@@ -541,6 +548,7 @@ export type MediaAssetSegment = {
 };
 
 export type MediaAssetDetail = MediaAssetSummary & {
+  structuredTags?: MediaTag[];
   sourceUrl: string;
   sourcePageUrl: string;
   creator: string;
@@ -555,6 +563,7 @@ export type MediaAssetListRequest = {
   relativeDirectory?: string;
   mediaKind?: MediaAssetKind;
   availability?: MediaAssetAvailability;
+  analysisStatus?: "analyzed" | "unanalyzed";
   limit?: number;
   offset?: number;
 };
@@ -678,6 +687,9 @@ export type MediaAssetAnalysisPayload = {
     motion_level: number | null;
     visual_category: string;
     suitability: string;
+    observed_label?: string;
+    evidence_spacing_sec?: number;
+    handoff_reason?: string;
   }>;
   provider: string;
   model: string;

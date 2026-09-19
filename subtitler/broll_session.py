@@ -12,7 +12,7 @@ from .operation_store import ArtifactError, OperationStore
 from .web_assets import WebAssetCandidate, discover_web_assets
 
 T = TypeVar("T")
-BROLL_OPERATION_VERSION = 1
+BROLL_OPERATION_VERSION = 5
 
 
 class BrollSession:

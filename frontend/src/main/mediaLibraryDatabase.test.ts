@@ -46,6 +46,29 @@ describe("media library database", () => {
     }
   });
 
+  it("filters analysis status before pagination and includes unfinished states as not analyzed", () => {
+    const root = temporaryRoot();
+    const file = path.join(root, "library.sqlite3");
+    const database = new MediaLibraryDatabase(file);
+    try {
+      const location = database.addRoot(path.join(root, "media"), "referenced");
+      const scan = database.beginScan(location.id);
+      const raw = new DatabaseSync(file);
+      try {
+        for (const state of ["ready", "metadata_only", "queued", "analyzing", "failed", "stale"]) {
+          const id = database.upsertIndexedFile(location.id, scan, mediaFile(path.join(root, "media", `${state}.mp4`)));
+          raw.prepare("UPDATE assets SET analysis_state=? WHERE id=?").run(state, id);
+        }
+      } finally { raw.close(); }
+      expect(database.listAssets({ analysisStatus: "analyzed" }).assets.map((asset) => asset.analysisState)).toEqual(["ready"]);
+      const unfinished = database.listAssets({ analysisStatus: "unanalyzed", limit: 2, offset: 2 });
+      expect(unfinished.total).toBe(5);
+      expect(unfinished.assets).toHaveLength(2);
+      expect(unfinished.assets.every((asset) => asset.analysisState !== "ready")).toBe(true);
+      expect(database.listAssets().total).toBe(6);
+    } finally { database.close(); }
+  });
+
   it("keeps FTS queries parameterized and bounded", () => {
     const root = temporaryRoot();
     const database = new MediaLibraryDatabase(path.join(root, "library.sqlite3"));
@@ -81,6 +104,122 @@ describe("media library database", () => {
     }
   });
 
+  it("automatically tags explicit metadata and scenes without expanding description words while preserving manual corrections", () => {
+    const root = temporaryRoot();
+    const database = new MediaLibraryDatabase(path.join(root, "library.sqlite3"));
+    try {
+      const location = database.addRoot(path.join(root, "media"), "referenced");
+      const scan = database.beginScan(location.id);
+      const file = mediaFile(path.join(root, "media", "arena.mp4"));
+      const id = database.upsertIndexedFile(location.id, scan, file);
+      expect(database.getAsset(id).structuredTags).toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: "format", value: "mp4", origin: "metadata", evidence: "file_extension" }),
+      ]));
+      database.updateUserDescription(id, "Castle exploration");
+      database.updateProvenance(id, "https://example.org/video", "https://example.org/press", "Studio A", "", "now");
+      expect(database.listAssets({ query: 'creator:"Studio A" source:example.org castle' }).total).toBe(1);
+      database.updateUserDescription(id, "Forest exploration");
+      expect(database.listAssets({ query: "keyword:castle" }).total).toBe(0);
+      const analysis = {
+        description: "Combat", tags: ["game:Wrong Game", "subject:knight"],
+        segments: [{ start_ms: 0, end_ms: 30_000, description: "Knight evades", observed_label: "Dodging",
+          tags: ["action:dodging", "tone:tense"], confidence: .9, motion_level: .5, visual_category: "gameplay", suitability: "Explanation" }],
+        provider: "openai", model: "test", prompt_version: "test", sample_count: 30, input_tokens: 1, output_tokens: 1, cost_usd: .01,
+      };
+      database.startAnalysis(id, "one", "openai", "test", .01);
+      const analyzed = database.completeAnalysis(id, "one", analysis);
+      expect(analyzed.segments[0].structuredTags).toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: "action", value: "dodging", origin: "analysis", evidence: "analysis:one", confidence: .9 }),
+      ]));
+      database.updateTags(id, "", ["game:Right Game"]);
+      const sceneId = analyzed.segments[0].id;
+      database.updateTags(id, sceneId, ["action:parrying"]);
+      expect(database.listAssets({ query: 'game:"Right Game" action:parrying' }).total).toBe(1);
+      expect(database.listAssets({ query: 'game:"Wrong Game"' }).total).toBe(0);
+      expect(database.listAssets({ query: "action:dodging" }).total).toBe(0);
+      database.startAnalysis(id, "two", "openai", "test", .01);
+      database.completeAnalysis(id, "two", analysis);
+      database.upsertIndexedFile(location.id, scan, file);
+      expect(database.getAsset(id).segments[0].id).toBe(sceneId);
+      expect(database.listAssets({ query: 'game:"Right Game" action:parrying' }).total).toBe(1);
+      expect(() => database.updateTags(id, "someone-elses-scene", ["action:jumping"])).toThrow(/belong/);
+      expect(() => database.updateTags(id, "", ["game:New", "invalid:value"])).toThrow();
+      expect(database.listAssets({ query: 'game:"Right Game"' }).total).toBe(1);
+      database.upsertIndexedFile(location.id, scan, { ...file, quickFingerprint: "changed-media" });
+      expect(database.getAsset(id).analysisState).toBe("stale");
+      expect(database.listAssets({ query: "subject:knight" }).total).toBe(0);
+      expect(database.listAssets({ query: "tone:tense" }).total).toBe(0);
+      expect(database.listAssets({ query: 'game:"Right Game" action:parrying' }).total).toBe(1);
+    } finally { database.close(); }
+  });
+
+  it("backfills collected information when upgrading a library without the tag index", () => {
+    const root = temporaryRoot();
+    const file = path.join(root, "library.sqlite3");
+    const original = new MediaLibraryDatabase(file);
+    const location = original.addRoot(path.join(root, "media"), "referenced");
+    const scan = original.beginScan(location.id);
+    const id = original.upsertIndexedFile(location.id, scan, mediaFile(path.join(root, "media", "recording.mp4")));
+    original.updateUserDescription(id, "Old cathedral recording");
+    original.close();
+    const legacy = new DatabaseSync(file);
+    legacy.exec("DROP TRIGGER media_tags_delete_scene; DROP VIEW effective_media_tags; DROP TABLE media_tags; PRAGMA user_version=7;");
+    legacy.close();
+    const upgraded = new MediaLibraryDatabase(file);
+    try {
+      expect(upgraded.listAssets({ query: "cathedral format:mp4" }).assets[0].id).toBe(id);
+      expect(upgraded.getAsset(id).userDescription).toBe("Old cathedral recording");
+    } finally { upgraded.close(); }
+  });
+
+  it("cleans old automatic tags on upgrade while preserving manual tags and descriptions", () => {
+    const root = temporaryRoot();
+    const file = path.join(root, "library.sqlite3");
+    const original = new MediaLibraryDatabase(file);
+    const location = original.addRoot(path.join(root, "media"), "referenced");
+    const id = original.upsertIndexedFile(location.id, original.beginScan(location.id), mediaFile(path.join(root, "media", "trailer.mp4")));
+    original.updateTags(id, "", ["subject:interior"]);
+    original.updateUserDescription(id, "Preserved description");
+    original.close();
+    const legacy = new DatabaseSync(file);
+    legacy.prepare("UPDATE assets SET tags_json=? WHERE id=?").run(JSON.stringify(["colorful", "interior", "game", "announcement", "game announcement", "platform:PlayStation"]), id);
+    legacy.prepare("INSERT INTO media_tags VALUES ('old',?,'','keyword','colorful','colorful','analysis','legacy',0.7)").run(id);
+    legacy.exec("PRAGMA user_version=8");
+    legacy.close();
+    const upgraded = new MediaLibraryDatabase(file);
+    try {
+      expect(upgraded.listAssets({ query: "keyword:colorful" }).total).toBe(0);
+      expect(upgraded.listAssets({ query: 'keyword:"game announcement" platform:PlayStation' }).total).toBe(1);
+      expect(upgraded.getAsset(id).structuredTags).toContainEqual(expect.objectContaining({ category: "subject", value: "interior", origin: "manual" }));
+      expect(upgraded.getAsset(id).userDescription).toBe("Preserved description");
+      expect(upgraded.getAsset(id).structuredTags.some((tag) => tag.value === "Preserved")).toBe(false);
+    } finally { upgraded.close(); }
+  });
+
+  it("migrates scene labels without losing existing user ranges", () => {
+    const root = temporaryRoot();
+    const file = path.join(root, "library.sqlite3");
+    const original = new MediaLibraryDatabase(file);
+    const mediaRoot = original.addRoot(path.join(root, "media"), "referenced");
+    const scan = original.beginScan(mediaRoot.id);
+    const id = original.upsertIndexedFile(mediaRoot.id, scan, mediaFile(path.join(root, "media", "clip.mp4")));
+    original.addUserSegment(id, { startMs: 1000, endMs: 2000 }, "My dodge scene");
+    original.close();
+    const legacy = new DatabaseSync(file);
+    legacy.exec(`ALTER TABLE asset_segments DROP COLUMN observed_label;
+      ALTER TABLE asset_segments DROP COLUMN evidence_spacing_sec;
+      ALTER TABLE asset_segments DROP COLUMN handoff_reason;
+      PRAGMA user_version=6;`);
+    legacy.close();
+    const migrated = new MediaLibraryDatabase(file);
+    try {
+      expect(migrated.getAsset(id).segments[0]).toMatchObject({
+        description: "My dodge scene", origin: "user", locked: true, observedLabel: "", evidenceSpacingSec: 0,
+      });
+      expect(migrated.listAssets({ query: "dodge" }).assets[0].id).toBe(id);
+    } finally { migrated.close(); }
+  });
+
   it("versions AI analysis while preserving a user override", () => {
     const root = temporaryRoot();
     const database = new MediaLibraryDatabase(path.join(root, "library.sqlite3"));
@@ -98,6 +237,9 @@ describe("media library database", () => {
           start_ms: 0,
           end_ms: 30_000,
           description: "Character approaches a boss",
+          observed_label: "Dodging an attack",
+          evidence_spacing_sec: .5,
+          handoff_reason: "",
           tags: ["boss"],
           confidence: .9,
           motion_level: .7,
@@ -115,7 +257,12 @@ describe("media library database", () => {
       expect(analyzed.analysisState).toBe("ready");
       expect(analyzed.aiDescription).toBe("AI sees a boss fight");
       expect(analyzed.effectiveDescription).toBe("My authoritative description");
-      expect(analyzed.segments[0]).toMatchObject({ startMs: 0, endMs: 30_000, visualCategory: "gameplay" });
+      expect(analyzed.segments[0]).toMatchObject({ startMs: 0, endMs: 30_000, visualCategory: "gameplay",
+        observedLabel: "Dodging an attack", evidenceSpacingSec: .5 });
+      expect(database.listAssets({ query: "Dodging" }).assets[0].id).toBe(assetId);
+      database.addUserSegment(assetId, { startMs: 10_000, endMs: 20_000 }, "My scene");
+      expect(database.getAsset(assetId).segments.filter((segment) => segment.origin === "ai")
+        .every((segment) => segment.observedLabel === "Dodging an attack" && segment.evidenceSpacingSec === .5)).toBe(true);
     } finally {
       database.close();
     }

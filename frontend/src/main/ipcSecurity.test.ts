@@ -12,6 +12,13 @@ describe("IPC security boundary", () => {
     expect(() => assertTrustedSender({ senderFrame: { url: "https://attacker.invalid" } } as never, true)).toThrow(/untrusted/);
   });
 
+  it("validates the library analysis filter", () => {
+    for (const analysisStatus of ["analyzed", "unanalyzed"]) {
+      expect(() => validateIpcArguments("library:list-assets", [{ analysisStatus }])).not.toThrow();
+    }
+    expect(() => validateIpcArguments("library:list-assets", [{ analysisStatus: "anything" }])).toThrow();
+  });
+
   it("validates enums, paths, arity, and complete run requests", () => {
     expect(() => validateIpcArguments("llama:download", ["vulkan"])).not.toThrow();
     expect(() => validateIpcArguments("llama:download", ["metal"])).toThrow(/Invalid IPC/);
@@ -61,6 +68,9 @@ describe("IPC security boundary", () => {
     expect(() => validateIpcArguments("broll:preview", ["run-1", "broll-0001"])).not.toThrow();
     expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "accept_cut" }]])).not.toThrow();
     expect(() => validateIpcArguments("run:submit-silence-review", ["run-1", "review-1", [{ candidateId: "silence-0001", decision: "maybe" }]])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:update-tags", ["asset", "", ["game:Elden Ring", "action:dodge"]])).not.toThrow();
+    expect(() => validateIpcArguments("library:update-tags", ["asset", "scene", ["unknown:value"]])).toThrow(/Invalid IPC/);
+    expect(() => validateIpcArguments("library:update-tags", ["asset", "", Array(51).fill("keyword:a")])).toThrow(/Invalid IPC/);
     expect(() => validateIpcArguments("library:add-root", ["C:\\media\\broll"])).not.toThrow();
     expect(() => validateIpcArguments("library:add-root", ["..\\broll"])).toThrow(/Invalid IPC/);
     expect(() => validateIpcArguments("library:list-assets", [{ query: "boss fight", limit: 50 }])).not.toThrow();

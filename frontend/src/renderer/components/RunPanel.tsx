@@ -11,15 +11,20 @@ type Props = {
   onConfigure?(): void;
   onRun(): void;
   onCancel(): void;
+  processingMode?: "local" | "hosted";
+  onProcessingMode?(mode: "local" | "hosted"): void;
   download?: boolean;
   downloadProgress?: number | null;
 };
 
-export default function RunPanel({ state, elapsed, canRun, blockedReason, onConfigure, onRun, onCancel, download, downloadProgress }: Props) {
+export default function RunPanel({ state, elapsed, canRun, blockedReason, onConfigure, onRun, onCancel, processingMode, onProcessingMode, download, downloadProgress }: Props) {
   const { t } = useI18n();
   return (
     <section className="panel run-panel">
       <div className="panel-title">{t("run.title")}</div>
+      {processingMode && <div className="segmented" role="group" aria-label={t("moments.llm")}>
+        {(["local", "hosted"] as const).map(mode => <button key={mode} disabled={state === "running"} aria-pressed={processingMode === mode} className={processingMode === mode ? "active" : ""} onClick={() => onProcessingMode?.(mode)}>{t(`mode.${mode}`)}</button>)}
+      </div>}
       <div className="run-row">
         <StatusBadge state={state} />
         <span className="elapsed">{elapsed}</span>

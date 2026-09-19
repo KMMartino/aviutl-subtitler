@@ -17,7 +17,9 @@ from subtitler.review_exchange import ReviewError
 
 class BrollResumeTests(unittest.TestCase):
     def test_interrupted_review_reuses_planning_and_retains_cost_even_if_library_description_changes(self):
-        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()), \
+             patch("subtitler.broll_stage.request_placement_choices", side_effect=lambda rows, *_: {row.id for row in rows}), \
+             patch("subtitler.broll_stage.verify_placement", side_effect=lambda _, item, __: item):
             root = Path(directory)
             media = root / "battle.mp4"
             media.write_bytes(b"media fixture")

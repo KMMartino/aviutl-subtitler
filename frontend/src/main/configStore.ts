@@ -67,6 +67,7 @@ export function ensureFrontendState(paths = runtimePaths()): void {
   if (!fs.existsSync(settingsPath(paths))) {
     atomicWriteJson(settingsPath(paths), defaultSettings(paths));
   }
+  migrateBrollAnalysisDefault(paths);
   migrateHostedDefaults(paths);
   rewriteLegacyUserDataPaths(paths);
 }
@@ -321,6 +322,19 @@ function rewriteLegacyUserDataPaths(paths: RuntimePaths): void {
       atomicWriteJson(file, rewritten);
     }
   }
+}
+
+function migrateBrollAnalysisDefault(paths: RuntimePaths): void {
+  const marker = path.join(paths.stateRoot, "broll-luna-default-v1.json");
+  if (fs.existsSync(marker)) return;
+  const file = workflowConfigPath("hosted", paths);
+  const config = validateWorkflowConfig(readRecoverableJson(file), "hosted");
+  const broll = config.broll as Record<string, unknown> | undefined;
+  if (broll?.analysis_model === "gpt-5.6-terra") {
+    broll.analysis_model = "gpt-5.6-luna";
+    atomicWriteJson(file, config);
+  }
+  atomicWriteJson(marker, { complete: true });
 }
 
 function migrateHostedDefaults(paths: RuntimePaths): void {

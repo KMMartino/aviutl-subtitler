@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { MediaTagIndex } from "./mediaTags";
+import { parseTagQuery } from "../shared/mediaTags";
 import type {
   MediaAssetAvailability,
   MediaAssetDetail,
@@ -19,7 +21,7 @@ import type {
   MediaTransparency,
 } from "../renderer/lib/types";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 9;
 const MAX_PAGE_SIZE = 200;
 const VISIBLE_ASSET_CONDITION = `NOT EXISTS (
   SELECT 1 FROM library_directory_visibility v
@@ -60,6 +62,7 @@ type Row = Record<string, unknown>;
 
 export class MediaLibraryDatabase {
   private db: DatabaseSync;
+  private tagIndex: MediaTagIndex;
 
   constructor(readonly databasePath: string) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -76,6 +79,15 @@ export class MediaLibraryDatabase {
       this.db = this.open();
     }
     this.migrate(version);
+    this.tagIndex = new MediaTagIndex(this.db);
+    this.transaction(() => {
+      const created = this.tagIndex.initialize();
+      const columns = this.db.prepare("PRAGMA table_info(assets)").all() as Row[];
+      if ((created || version < 9) && columns.some((column) => column.name === "canonical_path")) {
+        for (const asset of this.db.prepare("SELECT id FROM assets").all() as Row[]) this.refreshSearch(String(asset.id));
+      }
+      this.db.exec("PRAGMA user_version=9");
+    });
   }
 
   close(): void {
@@ -266,7 +278,7 @@ export class MediaLibraryDatabase {
     const root = this.getRoot(rootId);
     const now = new Date().toISOString();
     const current = this.db.prepare(
-      "SELECT id FROM assets WHERE canonical_path=? COLLATE NOCASE",
+      "SELECT id, quick_fingerprint FROM assets WHERE canonical_path=? COLLATE NOCASE",
     ).get(file.canonicalPath) as Row | undefined;
     const id = stringValue(current?.id) || crypto.randomUUID();
     const title = path.basename(file.canonicalPath, path.extname(file.canonicalPath));
@@ -337,6 +349,11 @@ export class MediaLibraryDatabase {
       now,
       now,
     );
+    if (current && stringValue(current.quick_fingerprint) !== file.quickFingerprint) {
+      this.db.prepare("UPDATE assets SET ai_description='', tags_json='[]', analysis_state='stale', active_analysis_run_id=NULL WHERE id=?").run(id);
+      this.db.prepare("DELETE FROM asset_segments WHERE asset_id=? AND origin='ai' AND locked=0").run(id);
+      this.db.prepare("UPDATE asset_descriptions SET active=0 WHERE asset_id=? AND origin='ai'").run(id);
+    }
     this.refreshSearch(id);
     return id;
   }
@@ -379,7 +396,12 @@ export class MediaLibraryDatabase {
     const values: SqlValue[] = [];
     let join = "JOIN library_roots r ON r.id=a.root_id";
     let order = "a.updated_at DESC, a.canonical_path COLLATE NOCASE";
-    const fts = ftsQuery(request.query || "");
+    const parsedQuery = parseTagQuery(request.query || "");
+    for (const tag of parsedQuery.tags) {
+      conditions.push("EXISTS (SELECT 1 FROM effective_media_tags mt WHERE mt.asset_id=a.id AND mt.category=? AND mt.normalized_value=?)");
+      values.push(tag.category, tag.value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase());
+    }
+    const fts = ftsQuery(parsedQuery.text);
     if (fts) {
       join += " JOIN asset_search s ON s.asset_id=a.id";
       conditions.push("asset_search MATCH ?");
@@ -398,6 +420,9 @@ export class MediaLibraryDatabase {
       conditions.push("a.media_kind=?");
       values.push(request.mediaKind);
     }
+    if (request.analysisStatus) {
+      conditions.push(request.analysisStatus === "analyzed" ? "a.analysis_state='ready'" : "a.analysis_state<>'ready'");
+    }
     if (request.availability) {
       conditions.push("a.availability=?");
       values.push(request.availability);
@@ -411,7 +436,7 @@ export class MediaLibraryDatabase {
       ORDER BY ${order}
       LIMIT ? OFFSET ?
     `).all(...values, limit, offset) as Row[];
-    return { assets: rows.map(mapAsset), total: numberValue(totalRow.total) };
+    return { assets: rows.map((row) => ({ ...mapAsset(row), tags: [...new Set(this.tagIndex.read(String(row.id)).map((tag) => `${tag.category}:${tag.value}`))] })), total: numberValue(totalRow.total) };
   }
 
   listAnalysisCandidates(mediaKind?: MediaAssetKind): MediaAssetSummary[] {
@@ -443,9 +468,12 @@ export class MediaLibraryDatabase {
     if (!row) throw new Error("Media asset was not found.");
     const segments = this.db.prepare(`
       SELECT * FROM asset_segments WHERE asset_id=? ORDER BY start_ms, end_ms
-    `).all(assetId).map((item) => mapSegment(item as Row));
+    `).all(assetId).map((item) => ({ ...mapSegment(item as Row),
+      structuredTags: this.tagIndex.read(assetId, String(item.id)),
+    }));
     return {
       ...mapAsset(row),
+      structuredTags: this.tagIndex.read(assetId, ""),
       sourceUrl: stringValue(row.source_url),
       sourcePageUrl: stringValue(row.source_page_url),
       creator: stringValue(row.creator),
@@ -480,6 +508,16 @@ export class MediaLibraryDatabase {
     return this.getAsset(assetId);
   }
 
+  updateTags(assetId: string, segmentId: string, tags: string[]): MediaAssetDetail {
+    const asset = this.getAsset(assetId);
+    if (segmentId && !asset.segments.some((scene) => scene.id === segmentId)) throw new Error("Scene does not belong to this asset.");
+    this.transaction(() => {
+      this.tagIndex.setManual(assetId, segmentId, tags);
+      this.refreshSearch(assetId);
+    });
+    return this.getAsset(assetId);
+  }
+
   addUserSegment(assetId: string, scope: MediaAnalysisScope, description: string): MediaAssetDetail {
     const asset = this.getAsset(assetId);
     validateSegmentScope(scope, asset.durationMs);
@@ -496,8 +534,8 @@ export class MediaLibraryDatabase {
       this.db.prepare(`
         INSERT INTO asset_segments (
           id, asset_id, start_ms, end_ms, segment_kind, description, tags_json,
-          confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id
-        ) VALUES (?, ?, ?, ?, 'semantic_range', ?, '[]', 1.0, NULL, 'other', '', 'user', 1, '')
+          confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id, observed_label, evidence_spacing_sec, handoff_reason
+        ) VALUES (?, ?, ?, ?, 'semantic_range', ?, '[]', 1.0, NULL, 'other', '', 'user', 1, '', '', 0, '')
       `).run(crypto.randomUUID(), assetId, scope.startMs, scope.endMs, text);
       this.refreshSearch(assetId);
     });
@@ -518,6 +556,7 @@ export class MediaLibraryDatabase {
       SET source_url=?, source_page_url=?, creator=?, license_text=?, acquired_at=?, updated_at=?
       WHERE id=?
     `).run(sourceUrl, sourcePageUrl, creator, licenseText, acquiredAt, acquiredAt, assetId);
+    this.refreshSearch(assetId);
     return this.getAsset(assetId);
   }
 
@@ -571,16 +610,16 @@ export class MediaLibraryDatabase {
     const now = new Date().toISOString();
     this.transaction(() => {
       if (scope) this.trimAiSegments(assetId, scope.startMs, scope.endMs);
-      else this.db.prepare("DELETE FROM asset_segments WHERE asset_id=? AND origin='ai'").run(assetId);
+      else this.db.prepare("DELETE FROM asset_segments WHERE asset_id=? AND origin='ai' AND locked=0").run(assetId);
       const insertSegment = this.db.prepare(`
         INSERT INTO asset_segments (
           id, asset_id, start_ms, end_ms, segment_kind, description, tags_json,
-          confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id
-        ) VALUES (?, ?, ?, ?, 'semantic_range', ?, ?, ?, ?, ?, ?, 'ai', 0, ?)
+          confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id, observed_label, evidence_spacing_sec, handoff_reason
+        ) VALUES (?, ?, ?, ?, 'semantic_range', ?, ?, ?, ?, ?, ?, 'ai', 0, ?, ?, ?, ?)
       `);
       const userRanges = (this.db.prepare(`
         SELECT start_ms, end_ms FROM asset_segments
-        WHERE asset_id=? AND origin='user' ORDER BY start_ms, end_ms
+        WHERE asset_id=? AND (origin='user' OR locked=1) ORDER BY start_ms, end_ms
       `).all(assetId) as Row[]).map((row) => ({
         startMs: numberValue(row.start_ms),
         endMs: numberValue(row.end_ms),
@@ -601,6 +640,9 @@ export class MediaLibraryDatabase {
             segment.visual_category,
             segment.suitability,
             runId,
+            segment.observed_label ?? "",
+            segment.evidence_spacing_sec ?? 0,
+            segment.handoff_reason ?? "",
           );
         }
       }
@@ -634,9 +676,9 @@ export class MediaLibraryDatabase {
       }
       this.db.prepare(`
         UPDATE analysis_runs
-        SET status='complete', actual_cost_usd=?, completed_at=?
+        SET status='complete', actual_cost_usd=?, completed_at=?, prompt_version=?, models_json=?, provider=?
         WHERE id=? AND asset_id=?
-      `).run(result.cost_usd, now, runId, assetId);
+      `).run(result.cost_usd, now, result.prompt_version, JSON.stringify([result.model]), result.provider, runId, assetId);
       this.refreshSearch(assetId);
     });
     return this.getAsset(assetId);
@@ -671,9 +713,9 @@ export class MediaLibraryDatabase {
   private refreshSearch(assetId: string): void {
     const row = this.db.prepare("SELECT * FROM assets WHERE id=?").get(assetId) as Row | undefined;
     if (!row) return;
-    const segmentText = (this.db.prepare(`
-      SELECT description FROM asset_segments WHERE asset_id=? ORDER BY start_ms, end_ms
-    `).all(assetId) as Row[]).map((segment) => stringValue(segment.description)).join(" ");
+    const sceneRows = this.db.prepare("SELECT * FROM asset_segments WHERE asset_id=? ORDER BY start_ms, end_ms").all(assetId) as Row[];
+    this.tagIndex.refresh(row, sceneRows);
+    const segmentText = sceneRows.map((segment) => `${stringValue(segment.observed_label)} ${stringValue(segment.description)} ${parseTags(segment.tags_json).join(" ")}`).join(" ");
     const effective = `${effectiveDescription(row)} ${segmentText}`.trim();
     this.db.prepare("DELETE FROM asset_search WHERE asset_id=?").run(assetId);
     this.db.prepare(`
@@ -683,7 +725,7 @@ export class MediaLibraryDatabase {
       assetId,
       stringValue(row.title),
       effective,
-      parseTags(row.tags_json).join(" "),
+      this.tagIndex.read(assetId).map((tag) => `${tag.category}:${tag.value}`).join(" "),
       `${stringValue(row.relative_path)} ${stringValue(row.canonical_path)}`,
     );
   }
@@ -691,13 +733,13 @@ export class MediaLibraryDatabase {
   private trimAiSegments(assetId: string, startMs: number, endMs: number): void {
     const rows = this.db.prepare(`
       SELECT * FROM asset_segments
-      WHERE asset_id=? AND origin='ai' AND start_ms < ? AND end_ms > ?
+      WHERE asset_id=? AND origin='ai' AND locked=0 AND start_ms < ? AND end_ms > ?
     `).all(assetId, endMs, startMs) as Row[];
     const insert = this.db.prepare(`
       INSERT INTO asset_segments (
         id, asset_id, start_ms, end_ms, segment_kind, description, tags_json,
-        confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ai', 0, ?)
+        confidence, motion_level, visual_category, suitability, origin, locked, analysis_run_id, observed_label, evidence_spacing_sec, handoff_reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ai', 0, ?, ?, ?, ?)
     `);
     for (const row of rows) {
       this.db.prepare("DELETE FROM asset_segments WHERE id=?").run(stringValue(row.id));
@@ -711,6 +753,7 @@ export class MediaLibraryDatabase {
           stringValue(row.segment_kind), stringValue(row.description), stringValue(row.tags_json),
           numberValue(row.confidence), nullableNumber(row.motion_level), stringValue(row.visual_category),
           stringValue(row.suitability), stringValue(row.analysis_run_id),
+          stringValue(row.observed_label), numberValue(row.evidence_spacing_sec), stringValue(row.handoff_reason),
         );
       }
     }
@@ -820,6 +863,9 @@ export class MediaLibraryDatabase {
           origin TEXT NOT NULL DEFAULT 'ai' CHECK(origin IN ('ai', 'user')),
           locked INTEGER NOT NULL DEFAULT 0,
           analysis_run_id TEXT NOT NULL DEFAULT '',
+          observed_label TEXT NOT NULL DEFAULT '',
+          evidence_spacing_sec REAL NOT NULL DEFAULT 0,
+          handoff_reason TEXT NOT NULL DEFAULT '',
           CHECK(start_ms >= 0 AND end_ms > start_ms)
         );
         CREATE INDEX asset_segments_asset_time ON asset_segments(asset_id, start_ms, end_ms);
@@ -1027,6 +1073,17 @@ export class MediaLibraryDatabase {
         this.db.exec("PRAGMA user_version=6");
       });
     }
+    if (version < 7) {
+      this.transaction(() => {
+        const exists = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='asset_segments'").get();
+        if (exists) this.db.exec(`
+          ALTER TABLE asset_segments ADD COLUMN observed_label TEXT NOT NULL DEFAULT '';
+          ALTER TABLE asset_segments ADD COLUMN evidence_spacing_sec REAL NOT NULL DEFAULT 0;
+          ALTER TABLE asset_segments ADD COLUMN handoff_reason TEXT NOT NULL DEFAULT '';
+        `);
+        this.db.exec("PRAGMA user_version=7");
+      });
+    }
   }
 
   private backupBeforeMigration(version: number): void {
@@ -1112,6 +1169,10 @@ function mapSegment(row: Row): MediaAssetSegment {
     motionLevel: nullableNumber(row.motion_level),
     visualCategory: stringValue(row.visual_category),
     suitability: stringValue(row.suitability),
+    observedLabel: stringValue(row.observed_label),
+    analysisRunId: stringValue(row.analysis_run_id),
+    evidenceSpacingSec: numberValue(row.evidence_spacing_sec),
+    handoffReason: stringValue(row.handoff_reason),
     origin: (stringValue(row.origin) || "ai") as MediaAssetSegment["origin"],
     locked: Boolean(numberValue(row.locked)),
   };

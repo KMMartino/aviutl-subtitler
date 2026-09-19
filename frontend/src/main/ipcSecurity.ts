@@ -1,3 +1,4 @@
+import { parseMediaTag } from "../shared/mediaTags";
 import { workflows as workflowNames } from "../shared/workflowCatalog";
 import path from "node:path";
 import type { IpcMainInvokeEvent } from "electron";
@@ -103,6 +104,15 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
       for (const item of args[0]) assertShortString(item);
       return;
     case "library:list-assets": exact(args, 1); validateAssetListRequest(args[0]); return;
+    case "library:update-tags":
+      exact(args, 3); assertShortString(args[0]);
+      if (args[1] !== "") assertShortString(args[1]);
+      if (!Array.isArray(args[2]) || args[2].length > 50) fail();
+      for (const tag of args[2] as unknown[]) {
+        assertShortString(tag);
+        try { parseMediaTag(tag as string, true); } catch { fail(); }
+      }
+      return;
     case "library:update-description":
       exact(args, 2); assertShortString(args[0]);
       if (typeof args[1] !== "string" || args[1].length > 1_000_000 || args[1].includes("\0")) fail();
@@ -136,11 +146,12 @@ export function validateIpcArguments(channel: string, args: unknown[]): void {
 function validateAssetListRequest(value: unknown): void {
   assertPlainObject(value);
   const request = value as Record<string, unknown>;
-  const allowed = new Set(["query", "rootId", "relativeDirectory", "mediaKind", "availability", "limit", "offset"]);
+  const allowed = new Set(["query", "rootId", "relativeDirectory", "mediaKind", "availability", "analysisStatus", "limit", "offset"]);
   if (Object.keys(request).some((key) => !allowed.has(key))) fail();
   for (const key of ["query", "rootId", "relativeDirectory"] as const) {
     if (request[key] !== undefined && request[key] !== "") assertShortString(request[key]);
   }
+  if (request.analysisStatus !== undefined) assertEnum(request.analysisStatus, new Set(["analyzed", "unanalyzed"]));
   if (request.mediaKind !== undefined) assertEnum(request.mediaKind, new Set(["video", "image"]));
   if (request.availability !== undefined) {
     assertEnum(request.availability, new Set(["active", "missing", "incompatible"]));

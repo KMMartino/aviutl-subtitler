@@ -373,7 +373,7 @@ def _defaults() -> dict[str, Any]:
         },
         "broll": {
             "web_search_model": "gpt-5.6-terra",
-            "analysis_model": "gpt-5.6-terra",
+            "analysis_model": "gpt-5.6-luna",
             "discover_web_assets": False,
         },
     }

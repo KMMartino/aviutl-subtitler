@@ -31,7 +31,9 @@ def request_filename_descriptions(
             "sourceEndSec": item.source_end_sec,
             "confidence": item.confidence,
             "reason": item.reason,
-            "descriptionRequired": True,
+            "descriptionRequired": item.description_required,
+            "sceneLabel": next((scene.observed_label or scene.description for scene in item.asset.segments
+                                if scene.start_sec <= item.source_start_sec < scene.end_sec), "")[:1000],
         }
         for item in candidates
     ]
@@ -43,6 +45,8 @@ def parse_descriptions(response: dict[str, Any], candidates: Sequence[FilenameRe
     descriptions: dict[str, str] = {}
     library_candidates: set[str] = set()
     seen: set[str] = set()
+    by_id = {item.id: item for item in candidates}
+    occupied: list[tuple[int, int]] = []
     decisions = response.get("decisions")
     if not isinstance(decisions, list):
         raise ReviewError("B-roll review is missing decisions")
@@ -54,14 +58,36 @@ def parse_descriptions(response: dict[str, Any], candidates: Sequence[FilenameRe
             raise ReviewError("B-roll review contains an unknown or duplicate candidate")
         seen.add(candidate_id)
         if decision == "describe":
+            if not by_id[candidate_id].description_required:
+                raise ReviewError("Choose or reject a scene candidate")
             description = item.get("description")
             if not isinstance(description, str) or not description.strip() or len(description) > 4000:
                 raise ReviewError("B-roll descriptions must contain 1 to 4000 characters")
             descriptions[candidate_id] = description.strip()
         elif decision == "use_library":
+            candidate = by_id[candidate_id]
+            if not candidate.description_required:
+                if any(candidate.start_line <= end and candidate.end_line >= start for start, end in occupied):
+                    raise ReviewError("Choose only one B-roll alternative for each passage")
+                occupied.append((candidate.start_line, candidate.end_line))
             library_candidates.add(candidate_id)
         elif decision != "reject":
             raise ReviewError("Invalid B-roll review decision")
     if seen != valid_ids:
         raise ReviewError("Every B-roll candidate requires a decision")
     return descriptions, library_candidates
+
+
+def request_placement_choices(
+    candidates: Sequence[FilenameReviewCandidate], subtitles: Sequence[Subtitle],
+    frontend_protocol: str | None, storage: ReviewStorage | None = None,
+) -> set[str]:
+    _, selected = request_filename_descriptions(candidates, subtitles, frontend_protocol, storage)
+    occupied: list[tuple[int, int]] = []
+    for candidate in candidates:
+        if candidate.id not in selected:
+            continue
+        if any(candidate.start_line <= end and candidate.end_line >= start for start, end in occupied):
+            raise ReviewError("Choose only one B-roll alternative for each passage")
+        occupied.append((candidate.start_line, candidate.end_line))
+    return selected

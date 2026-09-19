@@ -301,6 +301,8 @@ def run_subtitle_workflow(args: CliArguments) -> int:
                     BrollStageRequest(
                         mode=broll_mode,
                         config=config,
+                        source_path=input_path,
+                        source_cuts=tuple(cut_outcome.accepted_cuts),
                         database_path=Path(args.media_library_db) if args.media_library_db else None,
                         subtitles=subtitles,
                         settings=settings,

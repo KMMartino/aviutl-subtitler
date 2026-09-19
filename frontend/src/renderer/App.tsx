@@ -136,7 +136,7 @@ export default function App() {
   const [silenceReview, setSilenceReview] = useState<{ runId: string; reviewId: string; candidates: SilenceCutCandidate[] } | null>(null);
   const [brollReview, setBrollReview] = useState<{ runId: string; reviewId: string; candidates: BrollCandidate[] } | null>(null);
   const workflow = extraction ? "hosted-long-stream" : settings?.selectedWorkflow ?? "local";
-  const { envStatus, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
+  const { envStatus, envStatusLoaded, hostedVerification, verifyingHosted, hostedSelectionReady, verifyHosted } = useHostedModels({ settings, coreSettings, setCoreSettings, setNotice });
   const {
     localModelStatus,
     setLocalModelStatus,
@@ -186,6 +186,7 @@ export default function App() {
   } = useRuntimeSetup({ appendLog, setNotice, setSettings, setConfigs, setCoreSettings, refreshHfDownloaderStatus });
   const { analysis, analyzing, analysisError, clearAnalysis } = useMediaAnalysis(inputPath, mediaAnalysisRevision, setCoreSettings);
   const [view, setView] = useState<"main" | "settings" | "library">("main");
+  const [libraryVisited, setLibraryVisited] = useState(false);
   const [inputWidth, setInputWidth] = useState(48);
   const [logsHeight, setLogsHeight] = useState(24);
 
@@ -221,17 +222,18 @@ export default function App() {
       : (downloadRequested || inputPath || editorialResumeCheckpoint || editorialExtensionCheckpoint) && (downloadRequested || outputPath) && ffmpegReady && alignmentReady && (downloadRequested ? (!renderCutVideo || Boolean(selectedEncoderProbe?.available)) : cutSilenceReady) && editorialReady
   )));
 
-  const runBlockedReason = extraction ? (canRun ? "" : t("moments.ready")) : canRun || !(inputPath || editorialResumeCheckpoint || reviewedEditorialProject) ? ""
-    : !settings || !configs || !configPaths || !runtimeStatus ? t("run.loading")
-    : projectSaving || acquiringSource ? t("run.preparing")
-    : !pythonReady || !pythonRequirementsReady ? t("run.pythonBlocked")
-    : !hostedReady ? t("run.hostedBlocked")
-    : !localReady ? t("run.localBlocked")
-    : !reviewedEditorialProject && !ffmpegReady ? t("run.ffmpegBlocked")
-    : !reviewedEditorialProject && !alignmentReady ? t("run.alignmentBlocked")
-    : !reviewedEditorialProject && !cutSilenceReady ? t("run.encoderBlocked")
-    : !reviewedEditorialProject && !editorialReady ? t("run.editorialBlocked")
-    : t("run.outputBlocked");
+  const hostedProviders = coreSettings?.hosted ? [coreSettings.hosted.transcriptionProvider, coreSettings.hosted.fallbackTranscriptionProvider, coreSettings.hosted.cleanupProvider] : [];
+  const missingHostedKey = envStatusLoaded && (extraction
+    ? !envStatus.keysPresent.OPENAI_API_KEY || (configs?.["hosted-long-stream"].backend?.transcriber === "gemini" && !envStatus.keysPresent.GEMINI_API_KEY)
+    : workflow === "hosted" && hostedProviders.some(provider => !envStatus.keysPresent[provider === "openai" ? "OPENAI_API_KEY" : "GEMINI_API_KEY"]));
+  const runBlockedReason = canRun ? ""
+    : runtimeStatus && (!runtimeStatus.python.ready || !runtimeStatus.python.requirementsInstalled) ? t("run.pythonBlocked")
+    : missingHostedKey ? t("run.hostedBlocked")
+    : workflow === "local" && (localModelStatus?.installed === false || pathStatus.llamaServer?.exists === false) ? t("run.localBlocked")
+    : !reviewedEditorialProject && runtimeStatus?.ffmpeg.ready === false ? t("run.ffmpegBlocked")
+    : !reviewedEditorialProject && (extraction || !editorialMapEnabled) && coreSettings?.alignment?.offlineModelCache && runtimeStatus && !alignmentReady ? t("run.alignmentBlocked")
+    : renderCutVideo && !probingEncoders && selectedEncoderProbe?.available === false ? t("run.encoderBlocked")
+    : "";
 
   useEffect(() => {
     void loadInitialState();
@@ -708,7 +710,7 @@ export default function App() {
   }
 
   if (silenceReview) return <SilenceReviewScreen runId={silenceReview.runId} reviewId={silenceReview.reviewId} candidates={silenceReview.candidates} onSubmit={submitSilenceReview} onCancel={() => cancelRun(true, silenceReview.runId)} />;
-  if (brollReview) return <BrollReviewScreen runId={brollReview.runId} reviewId={brollReview.reviewId} candidates={brollReview.candidates} onSubmit={submitBrollReview} onCancel={() => cancelRun(true, brollReview.runId)} />;
+  if (brollReview) return <BrollReviewScreen key={brollReview.reviewId} runId={brollReview.runId} reviewId={brollReview.reviewId} candidates={brollReview.candidates} onSubmit={submitBrollReview} onCancel={() => cancelRun(true, brollReview.runId)} />;
 
   const currentWorkflowFamily = workflowFamily(workflow);
   const currentSettingsExpansion = settingsExpansion[currentWorkflowFamily] ?? defaultSettingsExpansion({
@@ -728,7 +730,7 @@ export default function App() {
           <div className="subtle" title={projectRoot}>{creatorProject?.name ?? t("project.workspace")}</div>
         </div>
         <div className="topbar-controls">
-          <ModeSelector workflow={workflow} extraction={extraction} onExtract={() => { setExtraction(true); setView("main"); }} onChange={(next) => { setExtraction(false); setView("main"); setWorkflow(next === "hosted-long-stream" ? next : lastSubtitleWorkflow.current); }} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} />
+          <ModeSelector workflow={workflow} extraction={extraction} onExtract={() => { setExtraction(true); setView((current) => current === "library" ? current : "main"); }} onChange={(next) => { setExtraction(false); setView((current) => current === "library" ? current : "main"); setWorkflow(next === "hosted-long-stream" ? next : lastSubtitleWorkflow.current); }} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} />
           <ThemeSelector value={settings.theme} onChange={(theme) => {
             const next = { ...settings, theme };
             setSettings(next);
@@ -736,7 +738,7 @@ export default function App() {
           }} />
           {view === "main" ? (
             <>
-              <button className="topbar-button" onClick={() => setView("library")}><Library size={16} /> {t("shell.library")}</button>
+              <button className="topbar-button" onClick={() => { setLibraryVisited(true); setView("library"); }}><Library size={16} /> {t("shell.library")}</button>
               <button className="topbar-button" onClick={() => setView("settings")}><SettingsIcon size={16} /> {t("shell.settings")}</button>
             </>
           ) : (
@@ -747,9 +749,8 @@ export default function App() {
       </header>
       {view === "main" && !extraction && <CreatorWorkspace suggestedName={inputPath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "")} onResume={resumeProjectResult} onBusyChange={setAcquiringSource} project={creatorProject} selectedRecording={creatorRecordingId} disabled={runState === "running" || runState === "reviewing" || acquiringSource || projectSaving} onProject={receiveProject} onSelect={(id, source) => { setCreatorRecordingId(id); handleInput(editorialMapEnabled ? source.visualPath : speechPath(source)); }} />}
 
-      {view === "library" ? (
-        <MediaLibraryScreen />
-      ) : view === "settings" ? (
+      {libraryVisited && <div className="library-host" hidden={view !== "library"}><MediaLibraryScreen /></div>}
+      {view === "library" ? null : view === "settings" ? (
         <div className="settings-view">
           <SettingsPanel
             momentAnalysisModel={extraction ? String(configs?.["hosted-long-stream"].editorial?.analysis_model ?? "gpt-5.6-luna") : undefined}
@@ -895,15 +896,11 @@ export default function App() {
               onInput={(path) => { setSubtitleDownload(value => ({ ...value, url: "" })); handleInput(path); }}
               onAudioTrack={(value) => setCoreSettings({ ...coreSettings, audioTrack: value })}
             />}
-            <RunPanel download={downloadRequested || downloading} downloadProgress={downloading ? downloadProgress : undefined} blockedReason={runBlockedReason} onConfigure={() => setView("settings")} state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun}
-               />
+
           </div>
           <div className="resize-divider column-divider" role="separator" aria-label={t("shell.resizeColumns")} aria-orientation="vertical" aria-valuemin={38} aria-valuemax={72} aria-valuenow={Math.round(inputWidth)} aria-valuetext={t("shell.inputWidth", { percent: Math.round(inputWidth) })} tabIndex={0} title={t("shell.resizeColumnsHelp")} onPointerDown={startColumnResize} onKeyDown={(event) => resizeWithKeyboard(event, inputWidth, "vertical", 38, 72, setInputWidth)} />
           <div className="flow-side">
-            {!extraction && !editorialMapEnabled && <section className="panel"><label>{t("moments.llm")}</label><div className="segmented">
-              <button disabled={runState === "running"} className={workflow === "local" ? "active" : ""} onClick={() => setWorkflow("local")}>{t("mode.local")}</button>
-              <button disabled={runState === "running"} className={workflow === "hosted" ? "active" : ""} onClick={() => setWorkflow("hosted")}>{t("mode.hosted")}</button>
-            </div></section>}
+
 
           {extraction ? <section className="panel stack"><div className="panel-title">{t("project.results")}</div><p>{t("moments.outputHelp")}</p>
             {momentOutput && runState === "succeeded" && <><button onClick={() => void window.subtitler.openPath(momentOutput.replace(/\.json$/, ".html"))}>{t("moments.report")}</button><button onClick={() => void window.subtitler.openPath(momentOutput.replace(/\.json$/, ".exo"))}>{t("moments.exo")}</button><button onClick={() => void window.subtitler.showItemInFolder(momentOutput)}>{t("project.files")}</button></>}
@@ -924,6 +921,8 @@ export default function App() {
         </div>
         <div className="resize-divider log-divider" role="separator" aria-label={t("shell.resizeLogs")} aria-orientation="horizontal" aria-valuemin={14} aria-valuemax={48} aria-valuenow={Math.round(logsHeight)} aria-valuetext={t("shell.logHeight", { percent: Math.round(logsHeight) })} tabIndex={0} title={t("shell.resizeLogsHelp")} onPointerDown={startLogResize} onKeyDown={(event) => resizeWithKeyboard(event, logsHeight, "horizontal", 14, 48, setLogsHeight)} />
         <div className="logs-row">
+          <RunPanel processingMode={!extraction && !editorialMapEnabled ? workflow as "local" | "hosted" : undefined} onProcessingMode={setWorkflow} download={downloadRequested || downloading} downloadProgress={downloading ? downloadProgress : undefined} blockedReason={runBlockedReason} onConfigure={() => setView("settings")} state={runState} elapsed={elapsed} canRun={canRun} onRun={startRun} onCancel={cancelRun}
+               />
           <LogViewer logs={logs} onClear={clearLogs} />
         </div>
       </div>

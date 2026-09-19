@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol, Sequence
@@ -38,7 +38,8 @@ MIN_TRANSITION_BUDGET = 16
 MAX_TRANSITION_BUDGET = 96
 MAX_FRAME_EXTRACTION_WORKERS = 4
 SECONDS_PER_TRANSITION = 150.0
-PROMPT_VERSION = "media-analysis-v11-observed-state"
+PROMPT_VERSION = "media-analysis-v14-concise-retrieval"
+BROLL_PROMPT_VERSION = "broll-analysis-v16-label-only-sections"
 RESULT_PREFIX = "@@SUBUTL_MEDIA_ANALYSIS@@"
 MEDIA_ANALYSIS_MAX_OUTPUT_TOKENS = 16_384
 BOUNDARY_ANALYSIS_MAX_OUTPUT_TOKENS = 8_192
@@ -202,6 +203,8 @@ class AnalysisSegment:
     handoff_required: bool = False
     handoff_reason: str = ""
 
+    evidence_spacing_sec: float = 0.0
+
 
 @dataclass(frozen=True)
 class MediaAnalysisResult:
@@ -229,6 +232,7 @@ class MediaAnalysisProvider(Protocol):
 
 class OpenAIMediaAnalysisProvider:
     provider = "openai"
+    prompt_version = BROLL_PROMPT_VERSION
 
     def __init__(
         self,
@@ -319,21 +323,30 @@ class OpenAIMediaAnalysisProvider:
     def _analysis_instruction(self, media_kind: str, title: str, max_ranges: int) -> str:
         return (
                     "Task: analyze every labeled sample as an editor searching for useful B-roll. "
-                    "Use editorial retrieval value rather than literal frame captioning. "
-                    "captioner. The overall description must emphasize what the asset is useful for, its tone, "
-                    "and likely editorial roles (for example explanation, dramatic emphasis, comedy, atmosphere, "
-                    "transition, or illustrative gameplay). Mention identifying subjects only when useful for "
-                    "retrieval. For every range, observed_label must be a short, concrete phrase describing only "
-                    "the visible state that remains true across that complete range, such as 'fighting a plant "
-                    "enemy' or 'exploring floor 2'. Do not put strategy, spoken interpretation, importance, prior "
-                    "events, future consequences, or multiple sequential actions in observed_label. Put richer "
-                    "retrieval detail in description and suitability instead. For video, group adjacent samples "
-                    "into chronological ranges whenever their editorial role is the same. Clearly separate "
-                    "gameplay, trailers/cinematics, talking heads, "
-                    "menus/UI, standalone effects, artwork, and unusable material so an editor can avoid presenter "
-                    "shots when selecting gameplay. Avoid narrating incidental objects or frame-by-frame action. "
-                    f"Use no more than {max_ranges} broad ranges. A single range for genuinely continuous gameplay or a "
-                    "consistent talking-head section is correct; do not invent changes merely because time passed. "
+                    "Keep the overall description to 1–3 short factual sentences (roughly 35 words maximum): "
+                    "identified title/subject, asset type, and whether gameplay is actually present. "
+                    "Example, only if supported: 'Concord announcement trailer. Cinematic concept trailer; no gameplay shown.' "
+                    "Do not describe mood, polish, color, incidental decor, or imagined editing uses. "
+                    "For images, identify the subject and asset type with the same brevity. "
+                    "For video, produce broad B-roll usage sections, not a shot list or object inventory. "
+                    "Default to one section for continuous footage of the same usable type. Split only when an editor "
+                    "would select the next section for a materially different purpose: gameplay versus cinematic, "
+                    "gameplay: traversal versus gameplay: boss battle, presenter versus clean footage, or an ending card. "
+                    "Within gameplay, individual dodges, attacks, pickups, rooms, and camera changes are not new sections. "
+                    "Within a cinematic trailer, scenery, props, burgers, storage compartments, and camera cuts are "
+                    "all part of the same cinematic trailer section, not separate labels, descriptions, or tags. "
+                    "Group consecutive rating, publisher, and studio logos as opening cards. Separate an ending card "
+                    "when it establishes a title, release date, or supported platforms; put those facts in its description. "
+                    "observed_label must name the broad usable section, for example 'Cinematic trailer', "
+                    "'Gameplay', 'Gameplay: traversal', 'Gameplay: boss battle', 'In-game cinematic', or 'Release/platform card'. "
+                    "Use a subtype only when supported by sustained activity; otherwise use 'Gameplay'. "
+                    "description adds at most one short factual sentence (usually under 15 words) that changes selection. "
+                    "Leave it empty if the label suffices. Omit incidental objects, decorative detail, and repeated labels. "
+                    "Tags likewise describe game identity, platforms, broad footage type or sustained activity, not props "
+                    "or momentary actions. Suitability is a brief selection constraint (e.g. presenter overlay) or empty. "
+                    f"Use at most {max_ranges} ranges; this is a ceiling, never a target. A short cinematic announcement "
+                    "may need only opening cards, cinematic trailer, and ending card. Continuous gameplay can be one range. "
+                    "Changing shots or elapsed time alone must never force a split. "
                     "Cover the sampled timeline in chronological order. Leave ownership and usage rights "
                     "unassessed. Set handoff_required=false and handoff_reason to an empty string; downstream "
                     "editorial handoff is reserved for the long-form editorial provider. Completion means every "
@@ -459,18 +472,19 @@ class OpenAIMediaAnalysisProvider:
 
     def _boundary_instruction(self) -> str:
         return (
-                    "Task: refine every supplied coarse editorial boundary in a long video. Each boundary has two ordered probes "
-                    "at one-third and two-thirds between a known left scene and right scene. Classify each probe "
-                    "as left, right, or new when it belongs to a genuinely different intermediate scene. Reuse "
-                    "the same short scene_id for two probes showing the same new scene. Different new scenes "
-                    "must receive different scene_id values. Use broad editorial role and content type, not "
-                    "incidental objects, and preserve continuous footage as one scene. For new scenes include "
-                    "a concise editorial description, category, suitability, retrieval tags, and an "
-                    "observed_label. observed_label must name only the concrete visible state within that scene "
-                    "in one short phrase; exclude interpretation, importance, and other time ranges. Completion "
-                    "means one decision exists for every labeled probe and the response matches the provided schema. "
-                    + output_language_instruction(self.output_locale)
+            "Task: refine boundaries between broad B-roll usage sections, never individual shots. "
+            "Classify every ordered probe as left, right, or new by usable footage type or sustained gameplay activity. "
+            "Camera cuts, props, scenery, individual actions, and individual opening logos do not create a new section. "
+            "A new section requires a materially different selection purpose, such as gameplay: traversal becoming "
+            "gameplay: boss battle, a cinematic becoming gameplay, or an ending release/platform card. "
+            "Reuse the same short scene_id for probes in the same new section. "
+            "Use a broad observed_label such as 'Cinematic trailer' or 'Gameplay: traversal'. "
+            "description is at most one short factual selection detail, or empty if the label suffices. "
+            "Do not inventory objects or momentary actions in descriptions or tags. Suitability is a concrete "
+            "selection constraint or empty. Cover every probe and return the provided schema. "
+            + output_language_instruction(self.output_locale)
         )
+
 
 
 def analyze_media(
@@ -556,10 +570,13 @@ def analyze_media(
         return MediaAnalysisResult(
             description=description,
             tags=tags,
-            segments=segments,
+            segments=[replace(segment, evidence_spacing_sec=max(
+                (right.timestamp_sec - left.timestamp_sec for left, right in zip(samples, samples[1:])),
+                default=analysis_end - analysis_start,
+            )) for segment in segments],
             provider=provider.provider,
             model=provider.model,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=getattr(provider, "prompt_version", PROMPT_VERSION),
             sample_count=len(samples) + refined_sample_count,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1058,7 +1075,7 @@ def _segments_from_ranges(
             timeline_ranges.append(right_range)
     result: list[AnalysisSegment] = []
     for range_index, analyzed_range in enumerate(timeline_ranges):
-        if not analyzed_range.description:
+        if not analyzed_range.description and not analyzed_range.observed_label:
             continue
         start = timeline_start_sec if range_index == 0 else boundary_times[range_index - 1]
         end = duration if range_index == len(timeline_ranges) - 1 else boundary_times[range_index]
@@ -1228,19 +1245,34 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--detail", choices=DETAIL_OPTIONS, default="simple")
     parser.add_argument("--env-file", required=True)
+    parser.add_argument("--progress-path")
     args = parser.parse_args()
     try:
         load_env_file(Path(args.env_file))
-        result = analyze_media(
-            media_path=Path(args.asset),
-            media_kind=args.kind,
-            duration_sec=args.duration_sec,
-            detail=args.detail,
-            ffmpeg=args.ffmpeg,
-            provider=OpenAIMediaAnalysisProvider(args.model),
-            start_sec=args.start_sec,
-            end_sec=args.end_sec,
-        )
+        if args.kind == "video":
+            from .visual_analysis import analyze_visual_windows
+            from .visual_evidence_store import evidence_directory, load_visual_evidence
+            asset = Path(args.asset)
+            start, end = _analysis_bounds(args.duration_sec, args.start_sec, args.end_sec, "video")
+            plan = _sampling_plan(min(end - start, 720), args.detail)
+            spacing = min(end - start, 720) / max(1, plan.coarse_count - 1)
+            result = load_visual_evidence(asset, start_sec=start, end_sec=end, maximum_spacing_sec=spacing, model=args.model, profile="broll")
+            if result is None:
+                result = analyze_visual_windows(
+                    media_path=asset, duration_sec=args.duration_sec, detail=args.detail, ffmpeg=args.ffmpeg,
+                    sampling_scale=1, model=args.model, reasoning_effort="low", output_locale="en",
+                    editorial_context="", start_sec=start, end_sec=end, profile="broll",
+                    max_workers=1,
+                    progress_path=Path(args.progress_path) if args.progress_path else evidence_directory(asset) / "broll-progress.json",
+                    progress=lambda complete, total, ranges: print(
+                        f"Visual analysis: {complete}/{total} windows, {ranges} scenes", flush=True),
+                )
+        else:
+            result = analyze_media(
+                media_path=Path(args.asset), media_kind=args.kind, duration_sec=args.duration_sec,
+                detail=args.detail, ffmpeg=args.ffmpeg, provider=OpenAIMediaAnalysisProvider(args.model),
+                start_sec=args.start_sec, end_sec=args.end_sec,
+            )
         print(RESULT_PREFIX + json.dumps(asdict(result), ensure_ascii=False, separators=(",", ":")))
         return 0
     except Exception as exc:

@@ -15,4 +15,18 @@ describe("run readiness", () => {
     expect(ready).not.toContain("Install Python requirements");
     expect(ready).not.toMatch(/class="primary" disabled/);
   });
+  it("keeps a disabled run quiet when no missing dependency is reported", () => {
+    const html = renderToStaticMarkup(<I18nProvider><RunPanel state="idle" elapsed="00:00" canRun={false} onConfigure={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} /></I18nProvider>);
+    expect(html).not.toContain("run-blocker");
+    expect(html).not.toContain("Open settings");
+    expect(html).not.toContain('role="group"');
+  });
+
+  it("shows the subtitle processing mode and locks it during a run", () => {
+    const html = renderToStaticMarkup(<I18nProvider><RunPanel state="running" elapsed="00:01" canRun processingMode="hosted" onProcessingMode={vi.fn()} onRun={vi.fn()} onCancel={vi.fn()} /></I18nProvider>);
+    expect(html).toContain('role="group"');
+    expect(html).toMatch(/disabled="" aria-pressed="false"[^>]*>Local/);
+    expect(html).toMatch(/disabled="" aria-pressed="true"[^>]*>Hosted/);
+  });
+
 });

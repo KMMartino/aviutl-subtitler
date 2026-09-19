@@ -235,6 +235,10 @@ export class MediaLibraryService {
     return Object.fromEntries(entries);
   }
 
+  updateTags(assetId: string, segmentId: string, tags: string[]): Promise<MediaAssetDetail> {
+    return this.call("updateTags", assetId, segmentId, tags);
+  }
+
   updateUserDescription(assetId: string, description: string): Promise<MediaAssetDetail> {
     return this.call("updateUserDescription", assetId, description.trim());
   }

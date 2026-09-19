@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from .editorial_locale import output_language_instruction
-from .media_analysis import OpenAIMediaAnalysisProvider
+from .media_analysis import PROMPT_VERSION, OpenAIMediaAnalysisProvider
 
 
 class OpenAIEditorialVisualProvider(OpenAIMediaAnalysisProvider):
     """Use shared sampling/transport without media-library B-roll semantics."""
+
+    prompt_version = PROMPT_VERSION
 
     def _analysis_instruction(self, media_kind: str, title: str, max_ranges: int) -> str:
         return (
@@ -18,6 +20,8 @@ class OpenAIEditorialVisualProvider(OpenAIMediaAnalysisProvider):
             "visibly happens so a later editor can interpret it with the transcript. Prefer event-scale ranges "
             "over broad content categories, while avoiding invented boundaries caused only by sampling. Repeated "
             "attempts may be separate when progress, strategy, outcome, or creator reaction visibly changes. "
+            "Use a short factual overall summary and concise scene descriptions; omit decorative adjectives and speculative uses. "
+            "Keep observed labels to a brief activity/state phrase. Retain decision-relevant cues, names, and uncertainty. "
             "Describe only what the sampled frames establish. Empty party slots, a dark transition, statistics, "
             "or a return to a title/menu do not by themselves establish victory or defeat. Treat the outcome as "
             "uncertain unless an explicit result screen establishes it; later transcript and continuity evidence "

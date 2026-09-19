@@ -44,7 +44,7 @@ SOURCE_DERIVED_EDITORIAL_FIELDS = (
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
     "source_probe": 6,
     "transcription": 15,
-    "visual_learning": 17,
+    "visual_learning": 21,
     "semantic_spans": 10,
     "local_reconciliation": 1,
     "global_reconciliation": 15,

@@ -45,21 +45,21 @@ describe("Cut silence additional settings", () => {
       hasVideo frameRateMode="possible-vfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
     expect(markup).toContain("Review cuts");
-    expect(markup).toContain("Re-encode cut video");
+    expect(markup).not.toContain("Re-encode cut video");
     expect(markup).toContain("Possible variable frame rate detected");
     expect(markup).not.toContain("Choose a Cut silence encoder");
-    expect((markup.match(/<label class="check">/g) ?? []).length).toBe(3);
+    expect((markup.match(/<label class="check">/g) ?? []).length).toBe(2);
   });
 
-  it("shows review and re-encode as disabled checkboxes when Cut silence is off", () => {
+  it("disables review when Cut silence is off without offering re-encode", () => {
     const settings = { ...base, additionalSettings: { ...base.additionalSettings!, cutSilenceMode: "off" as const } };
     const markup = renderPanel(<AdditionalSettingsPanel
       workflow="local" settings={settings} encoder="unconfigured" encoderReady={false} encoderChecking={false}
       hasVideo frameRateMode="reported-cfr" onConfigure={vi.fn()} onChange={vi.fn()}
     />);
     expect(markup).not.toContain("<select");
-    expect((markup.match(/type="checkbox"/g) ?? []).length).toBe(3);
-    expect((markup.match(/disabled=""/g) ?? []).length).toBe(2);
+    expect((markup.match(/type="checkbox"/g) ?? []).length).toBe(2);
+    expect((markup.match(/disabled=""/g) ?? []).length).toBe(1);
   });
 
   it("requires encoder configuration only when rendering is selected", () => {
