@@ -353,14 +353,14 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
     const primaryProvider = config.backend.transcriber;
     const primaryModel = String(config.backend.transcription_model ?? "");
     const primarySupported = (
-      (primaryProvider === "openai" || primaryProvider === "gemini")
+      (primaryProvider === "openai" || primaryProvider === "gemini" || primaryProvider === "dashscope")
       && isHostedModelApproved(primaryProvider, primaryModel, "transcription")
     );
     const fallbackProvider = config.backend.fallback_transcriber;
     const fallbackModel = String(config.backend.fallback_transcription_model ?? "");
     const fallbackConfigured = Boolean(fallbackProvider || fallbackModel);
     const fallbackSupported = (
-      (fallbackProvider === "openai" || fallbackProvider === "gemini")
+      (fallbackProvider === "openai" || fallbackProvider === "gemini" || fallbackProvider === "dashscope")
       && isHostedModelApproved(fallbackProvider, fallbackModel, "transcription")
     );
     const legacyGeminiDefault = (
@@ -397,7 +397,7 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       config.backend.fallback_transcription_model = APPROVED_MODELS.openaiTranscriptionGpt;
       changed = true;
     } else if (fallbackConfigured && !fallbackSupported) {
-      const fallback = recommendedFallbackTranscription(primaryProvider === "gemini" ? "gemini" : "openai", primaryModel);
+      const fallback = recommendedFallbackTranscription(primaryProvider === "dashscope" ? "dashscope" : primaryProvider === "gemini" ? "gemini" : "openai", primaryModel);
       config.backend.fallback_transcriber = fallback.provider;
       config.backend.fallback_transcription_model = fallback.model;
       changed = true;
@@ -406,16 +406,21 @@ function migrateHostedDefaults(paths: RuntimePaths): void {
       config.cleanup.skip_final_review = false;
       changed = true;
     }
-    if (oldHostedDefaultCleanup && config.cleanup) {
-      config.cleanup.api_model = APPROVED_MODELS.openaiCleanup56Luna;
+    if ((oldHostedDefaultCleanup || previousOverallDefaultCleanup) && config.cleanup) {
+      config.cleanup.api_model = APPROVED_MODELS.openaiCleanup6Luna;
       changed = true;
     }
-    if (config.cleanup?.backend === "openai" || config.cleanup?.backend === "gemini") {
+    if (config.backend.auto_select_hosted_models === undefined) {
+      config.backend.auto_select_hosted_models = config.backend.transcription_model === APPROVED_MODELS.gemini38Flash
+        && config.cleanup?.api_model === APPROVED_MODELS.openaiCleanup6Luna;
+      changed = true;
+    }
+    if (config.cleanup?.backend === "openai" || config.cleanup?.backend === "gemini" || config.cleanup?.backend === "dashscope") {
       let tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model ?? ""));
       if (!tuning) {
         config.cleanup.api_model = config.cleanup.backend === "gemini"
           ? APPROVED_MODELS.gemini36Flash
-          : APPROVED_MODELS.openaiCleanup56Luna;
+          : config.cleanup.backend === "dashscope" ? APPROVED_MODELS.qwenCleanup : APPROVED_MODELS.openaiCleanup6Luna;
         tuning = hostedCleanupTuning(config.cleanup.backend, String(config.cleanup.api_model));
         changed = true;
       }

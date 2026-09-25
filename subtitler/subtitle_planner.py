@@ -7,7 +7,6 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
@@ -25,7 +24,8 @@ from .profiling import (
     write_subtitle_timing_profile,
 )
 from .splitter import SENTENCE_TERMINAL_SOURCE, split_aligned_chunk, split_token_chain
-from .text_refiner import TextRefiner, _cleanup_content_fingerprint, _is_filler_only
+from .text_refiner import TextRefiner
+from .cleanup_gate import SAFE, cleanup_decision
 from .transcript_normalizer import is_non_spoken_text
 
 BOUNDARY_REVIEW_TERMS = (
@@ -1068,12 +1068,7 @@ def _refine_subtitle_text(
                 start, end = futures[future]
                 _, refined = future.result()
                 window = subtitles[start:end]
-                if len(refined) == len(window) and _cleanup_window_preserves_content(
-                    [sub.text for sub in window],
-                    refined,
-                ):
-                    for index, text in enumerate(refined, start=start):
-                        refinements[index] = text.strip()
+                refinements.update(_accepted_cleanup_refinements(window, refined, start))
                 if progress_callback is not None:
                     progress_callback("Cleaning subtitles", completed, len(windows))
         _apply_cleanup_refinements(subtitles, refinements, changes)
@@ -1084,12 +1079,7 @@ def _refine_subtitle_text(
     for completed, (start, end) in enumerate(windows, start=1):
         window = subtitles[start:end]
         refined = refiner.refine([sub.text for sub in window])
-        if len(refined) == len(window) and _cleanup_window_preserves_content(
-            [sub.text for sub in window],
-            refined,
-        ):
-            for index, text in enumerate(refined, start=start):
-                refinements[index] = text.strip()
+        refinements.update(_accepted_cleanup_refinements(window, refined, start))
         if progress_callback is not None:
             progress_callback("Cleaning subtitles", completed, len(windows))
     _apply_cleanup_refinements(subtitles, refinements, changes)
@@ -1099,38 +1089,31 @@ def _refine_subtitle_text(
 
 
 def _cleanup_window_preserves_content(originals: list[str], refined: list[str]) -> bool:
-    before = _cleanup_content_fingerprint("".join(originals)).replace("ところので", "ところで")
-    after = _cleanup_content_fingerprint("".join(refined)).replace("ところので", "ところで")
-    if before == after or _is_bounded_duplicate_fragment_removal(before, after):
-        return True
-    if len(after) + 2 < len(before):
-        return False
-    if not before:
-        return not after
-    return SequenceMatcher(a=before, b=after, autojunk=False).ratio() >= 0.72
+    return len(originals) == len(refined) and all(
+        cleanup_decision(before, after) in SAFE for before, after in zip(originals, refined)
+    )
 
 
-def _is_bounded_duplicate_fragment_removal(original: str, cleaned: str) -> bool:
-    """Allow one deletion that removes a clear ASR overlap, never replacement text."""
-    if not cleaned or len(cleaned) >= len(original):
-        return False
-    prefix_length = 0
-    while prefix_length < len(cleaned) and original[prefix_length] == cleaned[prefix_length]:
-        prefix_length += 1
-    suffix_length = 0
-    max_suffix = len(cleaned) - prefix_length
-    while suffix_length < max_suffix and original[-(suffix_length + 1)] == cleaned[-(suffix_length + 1)]:
-        suffix_length += 1
-    removed_end = len(original) - suffix_length
-    removed = original[prefix_length:removed_end]
-    if cleaned != original[:prefix_length] + original[removed_end:]:
-        return False
-    preceding = original[:prefix_length]
-    for size in range(min(len(preceding), len(removed)), 5, -1):
-        fragment = removed[-size:]
-        if preceding.endswith(fragment) and len(removed) - size <= 8:
-            return True
-    return removed == "番組の" and preceding.endswith("番組の")
+def _accepted_cleanup_refinements(window: list[Subtitle], refined: list[str], start: int) -> dict[int, str]:
+    if len(window) != len(refined):
+        print("Cleanup gate: invalid line count; retaining original group.", flush=True)
+        return {}
+    accepted: dict[int, str] = {}
+    reasons: dict[str, int] = {}
+    changed = unchanged = 0
+    for index, (subtitle, text) in enumerate(zip(window, refined), start=start):
+        text = text.strip()
+        reason = cleanup_decision(subtitle.text, text)
+        if reason in SAFE:
+            accepted[index] = text
+            changed += int(text != subtitle.text)
+            unchanged += int(text == subtitle.text)
+        else:
+            reasons[reason] = reasons.get(reason, 0) + 1
+    rejected = sum(reasons.values())
+    print(f"Cleanup gate: proposed={changed + rejected}, accepted={changed}, "
+          f"unchanged={unchanged}, rejected={rejected}" + (f" ({reasons})" if reasons else ""), flush=True)
+    return accepted
 
 
 def _cleanup_stats(input_count: int, windows: list[tuple[int, int]], changes: list[tuple[int, str, str]]) -> CleanupStats:
@@ -1148,7 +1131,7 @@ def _apply_cleanup_refinements(
     delete_indices = {
         index
         for index, text in refinements.items()
-        if not text and 0 <= index < len(subtitles) and _is_filler_only(subtitles[index].text)
+        if not text and 0 <= index < len(subtitles) and cleanup_decision(subtitles[index].text, "") in SAFE
     }
     for index, text in refinements.items():
         if index in delete_indices or not text or not (0 <= index < len(subtitles)):

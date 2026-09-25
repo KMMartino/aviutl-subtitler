@@ -33,6 +33,7 @@ from .editorial_enrichment import (
 from .editorial_locale import locale_label
 from .editorial_guidance import project_brief
 from .operation_store import content_digest
+from .hosted_selection import select_hosted_models
 from .env import load_env_file
 from .errors import SubtitlerError
 from .game_knowledge import (
@@ -84,6 +85,7 @@ class HostedEditorialStageExecutor:
         self.options.workspace.mkdir(parents=True, exist_ok=True)
         load_env_file(options.env_file)
         self.config = load_workflow_config("hosted-long-stream", options.config_path)
+        select_hosted_models(self.config)
         self.transcript_artifacts: dict[tuple[Path, int], Path] = {}
         for artifact in options.transcript_artifacts:
             document = load_transcript_document(artifact)

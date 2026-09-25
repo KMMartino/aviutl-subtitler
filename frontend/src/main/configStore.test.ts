@@ -213,6 +213,21 @@ describe("config store runtime paths", () => {
     expect(state.configs["hosted-long-stream"].backend.fallback_transcriber).toBe("openai");
     expect(state.configs["hosted-long-stream"].backend.fallback_transcription_model).toBe("gpt-transcribe");
     expect(state.configs["hosted-long-stream"].backend.transcription_workers).toBe(4);
+    expect(state.configs["hosted-long-stream"].backend.auto_select_hosted_models).toBe(true);
+    expect(state.configs["hosted-long-stream"].cleanup.api_model).toBe("gpt-6-luna");
+  });
+
+  it("preserves a manual Alibaba profile across persistence migration", () => {
+    const paths = makePaths();
+    writeWorkflowTemplates(paths);
+    ensureFrontendState(paths);
+    saveWorkflowConfig("hosted", {
+      backend: { transcriber: "dashscope", transcription_model: "qwen-audio-3.1-asr-flash", auto_select_hosted_models: false },
+      cleanup: { backend: "dashscope", api_model: "qwen3.7-flash" },
+    }, paths);
+    const state = loadAppState(paths);
+    expect(state.configs.hosted.backend).toMatchObject({ transcriber: "dashscope", transcription_model: "qwen-audio-3.1-asr-flash", auto_select_hosted_models: false });
+    expect(state.configs.hosted.cleanup).toMatchObject({ backend: "dashscope", api_model: "qwen3.7-flash", reasoning_effort: null, thinking_level: null });
   });
 
   it("migrates unsupported OpenAI transcription options", () => {

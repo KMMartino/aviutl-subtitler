@@ -172,6 +172,9 @@ def build_refiner(
                 else None
             ),
         )
+    if backend == "dashscope":
+        from .qwen import QwenTextRefiner
+        return QwenTextRefiner(cleanup["api_model"], glossary, api_usage)
     if backend == "openai":
         return OpenAITextRefiner(
             model=cleanup["api_model"],
@@ -200,11 +203,11 @@ def build_refiner(
 
 
 def default_cleanup_window(config: dict) -> int:
-    return 256 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
+    return 256 if config["cleanup"]["backend"] in {"gemini", "openai", "dashscope"} else 1
 
 
 def default_cleanup_workers(config: dict) -> int:
-    return 8 if config["cleanup"]["backend"] in {"gemini", "openai"} else 1
+    return 8 if config["cleanup"]["backend"] in {"gemini", "openai", "dashscope"} else 1
 
 
 def default_chain_split_workers(config: dict) -> int:

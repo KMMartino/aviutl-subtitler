@@ -307,6 +307,9 @@ def build_broll_provider(config: dict[str, Any], usage: ApiUsageLedger) -> Broll
                 reasoning_effort=cleanup.get("reasoning_effort"),
             )
         )
+    if backend == "dashscope":
+        from .qwen import QwenTextRefiner
+        return HostedBrollProvider(QwenTextRefiner(str(cleanup["api_model"]), [], usage))
     if backend == "gemini":
         return HostedBrollProvider(
             GeminiTextRefiner(

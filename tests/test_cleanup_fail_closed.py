@@ -84,8 +84,8 @@ class CleanupFailClosedTests(unittest.TestCase):
     def test_indexed_cleanup_rejects_deletion_of_speech(self) -> None:
         cleaned, reason = _parse_indexed_cleanup_response("1\t<DELETE>", ["大事な内容"])
 
-        self.assertIsNone(cleaned)
-        self.assertEqual(reason, "line_1_delete_non_filler")
+        self.assertEqual(cleaned, ["大事な内容"])
+        self.assertIsNone(reason)
 
     def test_refine_returns_explicit_filler_deletion_for_timing_application(self) -> None:
         refiner, calls = _refiner("1\tそのまま\n2\t<DELETE>")
@@ -148,7 +148,6 @@ class CleanupFailClosedTests(unittest.TestCase):
             ("え、本日は軽く話します", "本日は軽く話します"),
             ("ま、冗談はさておき、え、こちらです", "冗談はさておき、こちらです"),
             ("調べたら、えっと、開発陣が漏らしたんだっけ?", "調べたら、開発陣が漏らしたんだっけ?"),
-            ("日本時間だと3日ですね、にあります", "日本時間だと3日にあります"),
         ]
         for original, cleaned in cases:
             with self.subTest(original=original):

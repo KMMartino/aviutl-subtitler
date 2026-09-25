@@ -71,6 +71,10 @@ def prepare_run_context(args: CliArguments, *, cwd: Path | None = None) -> RunCo
     if not env_path.is_absolute():
         env_path = (cwd or Path.cwd()) / env_path
     loaded_env_keys = load_env_file(env_path)
+    from .hosted_selection import select_hosted_models
+    select_hosted_models(config)
+    if config.get("backend", {}).get("auto_select_hosted_models"):
+        validate_workflow_config(config, workflow=args.workflow, check_paths=False)
     configure_alignment_offline_mode(config["alignment"])
 
     output_path = Path(args.output) if args.output else default_output_path(input_path, args.workflow)

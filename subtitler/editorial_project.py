@@ -43,7 +43,7 @@ SOURCE_DERIVED_EDITORIAL_FIELDS = (
 # behavior changes. See AGENTS.md for the mandatory maintenance rule.
 EDITORIAL_STAGE_VERSIONS: dict[str, int] = {
     "source_probe": 6,
-    "transcription": 15,
+    "transcription": 16,
     "visual_learning": 21,
     "semantic_spans": 10,
     "local_reconciliation": 1,

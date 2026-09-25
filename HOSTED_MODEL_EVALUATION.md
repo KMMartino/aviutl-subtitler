@@ -4,18 +4,21 @@ Use this process when a new hosted model is credible for Japanese transcription,
 
 ## Current baselines
 
-These are the best demonstrated defaults as of 2026-09-03. They are project-specific decisions based on the preserved subtitle workload, not general model rankings. Update this table only after a completed evaluation records the supporting evidence.
+These are the user-approved defaults as of 2026-09-25. They are project-specific decisions based on the preserved subtitle workload, not general model rankings. The latest comparison is preserved under `testing-grounds/2026-09-25-backend-evaluation/`; specialized vocabulary errors remain a known limitation, and the existing cleanup gate remains in force. Update this table only after a completed evaluation records the supporting evidence.
 
 | Profile | Transcription | Cleanup | Notes |
 |---|---|---|---|
-| Overall price/performance | Gemini `gemini-3.8-flash`, low thinking | OpenAI `gpt-5.6-luna`, low reasoning | Best demonstrated production-acceptable value profile. Gemini transcription uses fine VAD chunks capped at 30 seconds. |
-| OpenAI-only | OpenAI `gpt-transcribe` | OpenAI `gpt-5.6-luna`, low reasoning | Best demonstrated OpenAI-only profile and control for new evaluations. |
+| Overall price/performance | Gemini `gemini-3.8-flash`, low thinking, larger groups | OpenAI `gpt-6-luna`, low reasoning | Independently selected transcription and cleanup defaults. |
+| OpenAI-only | OpenAI `gpt-transcribe` | OpenAI `gpt-6-luna`, low reasoning | OpenAI-only profile and transcription control. |
+| Alibaba-only | Alibaba `qwen-audio-3.1-asr-flash`, larger groups | Alibaba `qwen3.7-flash`, thinking disabled | Lowest-cost tested Alibaba cleanup candidate; useful edits remain limited by the existing gate. |
 | Gemini-only price/performance | Gemini `gemini-3.8-flash`, low thinking | Gemini `gemini-3.6-flash`, minimal thinking | Best demonstrated all-Gemini value profile. |
 | Gemini cleanup quality tier | Gemini `gemini-3.7-flash`, low thinking | Gemini `gemini-3.7-flash`, low thinking | Use when duplicate-fragment repair is worth more latency or cost than the 3.6 cleanup profile. |
 
 The application catalog and configuration remain the source of truth for currently supported model IDs, tuning values, and prices. If this table disagrees with shipped behavior, investigate the evaluation evidence and correct the stale source rather than silently choosing one.
 
-Latest completed release evaluation: [Gemini 3.8 Flash, 2026-09-03](model-evaluations/2026-09-03-gemini-3.8-flash.md). It displaced the overall and Gemini transcription defaults at low thinking; its cleanup result did not displace a baseline.
+Automatic selection ranks configured providers independently: Gemini, OpenAI, Alibaba for transcription; OpenAI, Gemini, Alibaba for cleanup. The next configured transcription provider is the recovery fallback. Manual selection remains available. Larger audio groups retain fine VAD and alignment, capped at 450 seconds for Gemini, 295 for Qwen, and 600 for OpenAI; the tighter primary/fallback cap applies. Local models are unchanged.
+
+Earlier release evaluation: [Gemini 3.8 Flash, 2026-09-03](model-evaluations/2026-09-03-gemini-3.8-flash.md). The September 25 segment-length experiment supersedes its short-chunk default.
 
 ## Comparison design
 
@@ -50,7 +53,7 @@ For Gemini 3.8 Flash, the inherited starting point is low thinking from Gemini 3
 1. Confirm the exact API model ID, availability, supported audio and structured-output features, thinking controls, deprecation status, and current official prices. Verify the model with the existing read-only model-list path before benchmarking.
 2. State the fixed corpus, control, candidate arms, inherited reasoning level, any hypothesis-backed adjacent levels, metrics, estimated maximum spend, and API concurrency. Obtain explicit user authorization before any paid call.
 3. Preserve the corpus, configuration, prompts, raw provider responses, raw transcripts, pre-cleanup subtitle inputs, final outputs, usage ledger, timing, and a manifest containing model IDs and run parameters in a dated evaluation directory. Never overwrite an earlier run.
-4. Run the control and candidate arms against identical inputs. Keep established mechanics fixed unless the model cannot operate under them; record any necessary exception. Gemini transcription uses fine VAD chunks capped at 30 seconds unless a separate segment-length experiment earns a change.
+4. Run the control and candidate arms against identical inputs. Keep established mechanics fixed unless the model cannot operate under them; record any necessary exception. Use the current grouped hosted transcription settings above; preserve fine VAD and alignment behavior.
 5. Score transcription before cleanup against a human-reviewed canonical transcript and the source audio. First apply a production-acceptability gate for genuine omissions, hallucinations, incorrect words or numbers, and unusable handling of untranscribable speech. Faithfully captured stutters, repetitions, false starts, and harmless English/Japanese title-script choices are not defects merely because the canonical transcript normalizes them. When text and canonical disagree about a disfluency, the audio decides. Inspect representative and known-difficult samples; aggregate counts and text-only diffs are insufficient.
 6. Score cleanup from identical preserved inputs for semantic preservation, valid corrections, harmful substitutions or deletions, duplicate-fragment repair, subtitle boundary decisions, schema/format compliance, retries, latency, tokens, and cost. A cleanup result that changes meaning fails regardless of speed or price.
 7. Classify each arm against the control as pass or fail at the current production bar before comparing economics. Once multiple profiles pass, prefer the lowest total stage cost, using latency and operational reliability as tie-breakers. Do not pay more for tiny stylistic differences that are not production defects. Record a materially stronger but less economical result as a separate quality tier rather than replacing the value default.

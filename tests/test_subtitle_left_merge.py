@@ -170,14 +170,14 @@ class SubtitleLeftMergeTests(unittest.TestCase):
             )
         )
 
-    def test_cleanup_window_allows_bounded_duplicate_overlap_repairs(self) -> None:
-        self.assertTrue(
+    def test_cleanup_window_requires_evidence_for_duplicate_repairs(self) -> None:
+        self.assertFalse(
             _cleanup_window_preserves_content(
                 ["番組の番組の幕開けです"],
                 ["番組の幕開けです"],
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             _cleanup_window_preserves_content(
                 [
                     "ぜひお越しくださいっていうところのでの告知でした",

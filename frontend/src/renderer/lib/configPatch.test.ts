@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { applyCoreSettings, applySharedAlignment, extractCoreSettings } from "./configPatch";
 
 describe("config patching", () => {
+  it("round trips automatic Alibaba settings with thinking disabled", () => {
+    const config = { backend: { transcriber: "dashscope", transcription_model: "qwen-audio-3.1-asr-flash", auto_select_hosted_models: true,
+      fallback_transcriber: "dashscope", fallback_transcription_model: "qwen-audio-3.1-asr-flash" },
+      cleanup: { backend: "dashscope", api_model: "qwen3.7-flash", reasoning_effort: "low", thinking_level: "minimal" } };
+    const core = extractCoreSettings(config);
+    expect(core.hosted).toMatchObject({ automatic: true, transcriptionProvider: "dashscope", cleanupProvider: "dashscope" });
+    const patched = applyCoreSettings(config, core, "hosted");
+    expect(patched.backend).toMatchObject({ auto_select_hosted_models: true, transcriber: "dashscope" });
+    expect(patched.cleanup).toMatchObject({ backend: "dashscope", api_model: "qwen3.7-flash", reasoning_effort: null, thinking_level: null });
+  });
   it("separates acoustic gap settings from recommendations and migrates old adaptive selection", () => {
     const config = { audio: { track: 1 }, editorial: { cutting_mode: "adaptive", game_audio_track: 2 } };
     const settings = extractCoreSettings(config);

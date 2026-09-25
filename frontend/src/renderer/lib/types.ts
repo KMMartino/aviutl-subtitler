@@ -190,6 +190,7 @@ export type EnvStatus = {
   keysPresent: {
     OPENAI_API_KEY: boolean;
     GEMINI_API_KEY: boolean;
+    DASHSCOPE_API_KEY?: boolean;
   };
 };
 
@@ -242,6 +243,7 @@ export type AlignmentModelStatus = {
 };
 
 export type HostedModelVerification = {
+  dashscope?: { keyPresent: boolean; error: string; transcription: boolean; cleanup: boolean };
   checkedAt: string;
   openai: {
       keyPresent: boolean;
@@ -249,6 +251,7 @@ export type HostedModelVerification = {
       transcriptionGpt: boolean;
     cleanup: boolean;
     cleanup56Luna: boolean;
+    cleanup6Luna?: boolean;
   };
   gemini: {
     keyPresent: boolean;
@@ -284,11 +287,12 @@ export type CoreWorkflowSettings = {
     cleanupDraftModel: string;
   };
   hosted?: {
-    transcriptionProvider: "openai" | "gemini";
+    automatic?: boolean;
+    transcriptionProvider: "openai" | "gemini" | "dashscope";
     transcriptionModel: string;
-    fallbackTranscriptionProvider: "openai" | "gemini";
+    fallbackTranscriptionProvider: "openai" | "gemini" | "dashscope";
     fallbackTranscriptionModel: string;
-    cleanupProvider: "openai" | "gemini";
+    cleanupProvider: "openai" | "gemini" | "dashscope";
     cleanupModel: string;
     envFile: string;
   };

@@ -515,6 +515,21 @@ class ExternalApiClientTests(unittest.TestCase):
         payload = request.call_args.args[2]
         self.assertEqual(payload["reasoning_effort"], "none")
 
+    def test_gpt6_reasoning_requests_omit_sampling_and_use_completion_limit(self) -> None:
+        for model in ("gpt-6-luna", "gpt-6-sol"):
+            with self.subTest(model=model), mock.patch("subtitler.external_refiners.verify_openai_model_available"), mock.patch(
+                "subtitler.external_refiners._request_json_with_retries",
+                return_value={"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}], "usage": {}},
+            ) as request:
+                OpenAITextRefiner(model, [], ApiUsageLedger(), api_key="test", reasoning_effort="medium")._chat(
+                    "prompt", max_tokens=6000, operation="editorial_map",
+                )
+                payload = request.call_args.args[2]
+                self.assertNotIn("temperature", payload)
+                self.assertNotIn("max_tokens", payload)
+                self.assertEqual(payload["max_completion_tokens"], 6000)
+                self.assertEqual(payload["reasoning_effort"], "medium")
+
     def test_openai_editorial_request_uses_schema_and_editorial_system_prompt(self) -> None:
         response = {
             "choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],

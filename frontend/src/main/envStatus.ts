@@ -1,18 +1,19 @@
 import fs from "node:fs";
 import type { EnvStatus } from "../renderer/lib/types";
 
-const trackedKeys = ["OPENAI_API_KEY", "GEMINI_API_KEY"] as const;
+const trackedKeys = ["OPENAI_API_KEY", "GEMINI_API_KEY", "DASHSCOPE_API_KEY"] as const;
 
 export function getEnvStatus(envFile: string): EnvStatus {
   if (!envFile || !fs.existsSync(envFile)) {
-    return { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false } };
+    return { exists: false, keysPresent: { OPENAI_API_KEY: false, GEMINI_API_KEY: false, DASHSCOPE_API_KEY: false } };
   }
   const parsed = parseEnvKeys(fs.readFileSync(envFile, "utf8"));
   return {
     exists: true,
     keysPresent: {
       OPENAI_API_KEY: parsed.has("OPENAI_API_KEY"),
-      GEMINI_API_KEY: parsed.has("GEMINI_API_KEY")
+      GEMINI_API_KEY: parsed.has("GEMINI_API_KEY"),
+      DASHSCOPE_API_KEY: parsed.has("DASHSCOPE_API_KEY")
     }
   };
 }

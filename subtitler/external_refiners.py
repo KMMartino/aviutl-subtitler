@@ -568,9 +568,9 @@ class OpenAITextRefiner(HostedTextRefiner):
             }
         elif structured_operation:
             payload["response_format"] = {"type": "json_object"}
-        if not self.model.startswith("gpt-5"):
+        if not self.model.startswith(("gpt-5", "gpt-6")):
             payload["temperature"] = 0.0
-        if operation == "split" and self.model.startswith("gpt-5"):
+        if operation == "split" and self.model.startswith(("gpt-5", "gpt-6")):
             payload["reasoning_effort"] = "none"
         elif self.reasoning_effort is not None:
             payload["reasoning_effort"] = self.reasoning_effort
@@ -841,6 +841,6 @@ def _request_json_with_retries(
 
 
 def _openai_max_tokens_key(model: str) -> str:
-    if model.startswith("gpt-5"):
+    if model.startswith(("gpt-5", "gpt-6")):
         return "max_completion_tokens"
     return "max_tokens"

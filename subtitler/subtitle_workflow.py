@@ -17,6 +17,7 @@ from .operation_store import OperationStore
 from .media_identity import fingerprint_source
 from .review_exchange import ReviewStorage, emit_frontend_event
 from .subtitle_checkpoint import decode_subtitle_plan, load_subtitle_checkpoint, preparation_signature, save_subtitle_checkpoint
+from .cleanup_gate import CLEANUP_GATE_VERSION
 from .transcription_stage import TranscriptionStageOutcome
 from .transcript_normalizer import backend_result_to_aligned_chunks
 from .media_export import ExoExportRequest, export_exo, prepare_source_layout
@@ -107,6 +108,7 @@ def run_subtitle_workflow(args: CliArguments) -> int:
                 "transcript_artifact": hashlib.sha256(Path(args.transcript_artifact).read_bytes()).hexdigest() if args.transcript_artifact else None,
             }) if checkpoint_path is not None else ""
             subtitle_signature = preparation_signature({
+                "cleanup_gate_version": CLEANUP_GATE_VERSION,
                 "subtitles": config["subtitles"], "cleanup": config["cleanup"], "policy": asdict(policy),
                 "chapters": config["additional_settings"]["youtube_chapters"],
             })

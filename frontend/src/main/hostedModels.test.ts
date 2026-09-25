@@ -15,6 +15,17 @@ afterEach(() => {
 const originalFetch = globalThis.fetch;
 
 describe("hosted model verification helpers", () => {
+  it("verifies Alibaba credentials with an empty optional base URL", async () => {
+    const file = path.join(os.tmpdir(), `subtitler-qwen-env-${Date.now()}.txt`);
+    files.push(file);
+    fs.writeFileSync(file, "DASHSCOPE_API_KEY=test-key\nDASHSCOPE_BASE_URL=\n");
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      expect(String(url)).toBe("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models");
+      return new Response(JSON.stringify({ data: [{ id: "qwen-audio-3.1-asr-flash" }, { id: "qwen3.7-flash" }] }), { status: 200 });
+    }) as typeof fetch;
+    const result = await verifyHostedModels(file);
+    expect(result.dashscope).toMatchObject({ keyPresent: true, transcription: true, cleanup: true, error: "" });
+  });
 
   it("reads only supported keys from an env file", () => {
     const file = path.join(os.tmpdir(), `subtitler-env-${Date.now()}.txt`);

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { isHostedSelectionConfigured, isHostedSelectionVerified, selectVerifiedHostedSettings } from "../lib/hostedSelection";
+import { selectConfiguredHostedSettings, isHostedSelectionConfigured, isHostedSelectionVerified, selectVerifiedHostedSettings } from "../lib/hostedSelection";
 import type { AppSettings, CoreWorkflowSettings, EnvStatus, HostedModelVerification } from "../lib/types";
 import { useI18n } from "../i18n";
 
@@ -32,6 +32,11 @@ export function useHostedModels({ settings, coreSettings, setCoreSettings, setNo
       }
     });
   }, [settings?.envFile]);
+
+  useEffect(() => {
+    if (loadedEnvFile !== settings?.envFile) return;
+    setCoreSettings((current) => current ? selectConfiguredHostedSettings(current, envStatus) : current);
+  }, [coreSettings?.hosted?.automatic, envStatus, hostedVerification, loadedEnvFile, settings?.envFile, setCoreSettings]);
 
   async function verifyHosted() {
     if (!settings || !coreSettings?.hosted) return;

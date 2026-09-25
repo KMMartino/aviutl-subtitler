@@ -82,14 +82,16 @@ def validate_workflow_config(
     _boolean(editorial.get('recommendations_enabled', True), 'editorial.recommendations_enabled')
     for key, milliseconds in (('voice_gap_min_ms', 2000), ('voice_leading_handle_ms', 50), ('voice_trailing_handle_ms', 100)):
         _optional_int_min(editorial.get(key, milliseconds), 1 if key == 'voice_gap_min_ms' else 0, 'editorial.' + key)
-    _choice(editorial.get('recommendation_model', 'gpt-5.6-terra'), {'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'}, 'editorial.recommendation_model')
+    _choice(editorial.get('recommendation_model', 'gpt-6-sol'), {'gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-luna', 'gpt-6-sol'}, 'editorial.recommendation_model')
     _optional_int_min(editorial.get("game_audio_track"), 0, "editorial.game_audio_track")
     _boolean(editorial.get("trim_utterance_pauses", False), "editorial.trim_utterance_pauses")
-    for key, default in (("collection_model", "gpt-5.6-luna"), ("cutting_model", "gpt-5.6-terra"), ("escalation_model", "gpt-5.6-sol")):
-        _choice(editorial.get(key, default), {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}, "editorial." + key)
+    for key, default in (("collection_model", "gpt-6-luna"), ("cutting_model", "gpt-6-sol"), ("escalation_model", "gpt-6-sol")):
+        _choice(editorial.get(key, default), {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-luna", "gpt-6-sol"}, "editorial." + key)
 
     _choice(backend.get("name"), {"existing-pipeline"}, "backend.name")
-    _choice(backend.get("transcriber"), {"local-gemma", "gemini", "openai"}, "backend.transcriber")
+    if not isinstance(backend.get("auto_select_hosted_models", False), bool):
+        raise SubtitlerError("backend.auto_select_hosted_models must be boolean")
+    _choice(backend.get("transcriber"), {"local-gemma", "gemini", "openai", "dashscope"}, "backend.transcriber")
     _non_empty_string(backend.get("language"), "backend.language")
     _optional_string(backend.get("model"), "backend.model")
     if "transcription_model" in backend:
@@ -119,7 +121,7 @@ def validate_workflow_config(
     _optional_int_min(alignment.get("workers"), 1, "alignment.workers")
     _optional_int_min(alignment.get("torch_threads"), 1, "alignment.torch_threads")
     _int_min(alignment.get("emission_batch_size"), 1, "alignment.emission_batch_size")
-    _choice(cleanup.get("backend"), {"none", "local-llama", "gemini", "openai"}, "cleanup.backend")
+    _choice(cleanup.get("backend"), {"none", "local-llama", "gemini", "openai", "dashscope"}, "cleanup.backend")
     _optional_string(cleanup.get("model"), "cleanup.model")
     _optional_string(cleanup.get("api_model"), "cleanup.api_model")
     if cleanup.get("reasoning_effort") is not None:
@@ -194,7 +196,7 @@ def validate_workflow_config(
     if additional_settings["broll_mode"] != "off" and "broll" not in definition.capabilities:
         raise SubtitlerError("additional_settings.broll_mode is only supported by the hosted short workflow")
     valid_pairing = (
-        backend["transcriber"] in {"gemini", "openai"} and cleanup["backend"] in {"none", "gemini", "openai"}
+        backend["transcriber"] in {"gemini", "openai", "dashscope"} and cleanup["backend"] in {"none", "gemini", "openai", "dashscope"}
         if is_hosted
         else backend["transcriber"] == "local-gemma" and cleanup["backend"] in {"none", "local-llama"}
     )
@@ -226,7 +228,7 @@ def validate_workflow_config(
                 _existing_path(cleanup.get("llama_server"), "cleanup.llama_server")
             if cleanup.get("spec_draft_model"):
                 _existing_path(cleanup.get("spec_draft_model"), "cleanup.spec_draft_model")
-    elif cleanup["backend"] in {"gemini", "openai"}:
+    elif cleanup["backend"] in {"gemini", "openai", "dashscope"}:
         _non_empty_string(cleanup.get("api_model"), "cleanup.api_model")
         if (
             cleanup["backend"] == "gemini"
@@ -237,6 +239,7 @@ def validate_workflow_config(
 
     if is_hosted:
         approved_transcription = {
+            "dashscope": {"qwen-audio-3.1-asr-flash"},
             "openai": OPENAI_TRANSCRIPTION_MODELS,
             "gemini": {
                 "gemini-3.8-flash",
@@ -247,9 +250,12 @@ def validate_workflow_config(
             },
         }
         approved_cleanup = {
+            "dashscope": {"qwen3.7-flash"},
             "openai": {
                 "gpt-5.4-mini",
                 "gpt-5.5",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -270,7 +276,7 @@ def validate_workflow_config(
         fallback_transcriber = str(backend.get("fallback_transcriber") or "").strip()
         fallback_model = str(backend.get("fallback_transcription_model") or "").strip()
         if fallback_transcriber or fallback_model:
-            _choice(fallback_transcriber, {"gemini", "openai"}, "backend.fallback_transcriber")
+            _choice(fallback_transcriber, {"gemini", "openai", "dashscope"}, "backend.fallback_transcriber")
             _non_empty_string(fallback_model, "backend.fallback_transcription_model")
             if fallback_model not in approved_transcription[fallback_transcriber]:
                 raise SubtitlerError(
@@ -288,6 +294,7 @@ def _defaults() -> dict[str, Any]:
         "backend": {
             "name": "existing-pipeline",
             "transcriber": "local-gemma",
+            "auto_select_hosted_models": False,
             "model": "",
             "mmproj": "",
             "llama_server": "",

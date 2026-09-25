@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from .errors import ModelLoadError
+from .cleanup_gate import SAFE, cleanup_decision
 from .glossary import GlossaryEntry
 from .llama_server import LlamaServerProcess
 from .model_prompts import model_system_prompt
@@ -434,13 +435,16 @@ class LlamaServerTextRefiner(TextRefiner):
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
-        cleaned_lines, rejection_reason = _parse_indexed_cleanup_response(raw, [line], self.glossary)
+        rejected: list[str] = []
+        cleaned_lines, rejection_reason = _parse_indexed_cleanup_response(raw, [line], self.glossary, rejected)
         raw_line_count = len([part for part in raw.splitlines() if part.strip()])
         if rejection_reason is not None:
             self._record_cleanup_rejection([line], raw, rejection_reason, raw_line_count, len(cleaned_lines or []))
             print(f"Warning: cleanup response rejected ({rejection_reason}); retaining original subtitle.", flush=True)
             return None
         assert cleaned_lines is not None
+        if rejected:
+            self._record_cleanup_rejection([line], raw, "; ".join(rejected), raw_line_count, len(cleaned_lines))
         return cleaned_lines[0]
 
     def _refine_many(self, lines: list[str]) -> list[str] | None:
@@ -456,13 +460,17 @@ class LlamaServerTextRefiner(TextRefiner):
         except Exception as exc:
             print(f"Warning: cleanup failed; using original subtitle text. {exc}")
             return None
-        cleaned_lines, reason = _parse_indexed_cleanup_response(raw, lines, self.glossary)
+        rejected: list[str] = []
+        cleaned_lines, reason = _parse_indexed_cleanup_response(raw, lines, self.glossary, rejected)
         raw_line_count = len([part for part in raw.splitlines() if part.strip()])
         if reason is not None:
             self._record_cleanup_rejection(lines, raw, reason, raw_line_count, len(cleaned_lines or []))
             print(f"Warning: cleanup response rejected ({reason}).", flush=True)
             return None
         assert cleaned_lines is not None
+        if rejected:
+            self._record_cleanup_rejection(lines, raw, "; ".join(rejected), raw_line_count, len(cleaned_lines or []))
+            print(f"Local cleanup gate: retained {len(rejected)} unsafe edit(s); accepted independent safe edits.", flush=True)
         return cleaned_lines
 
     def _record_cleanup_rejection(
@@ -533,8 +541,9 @@ def _parse_indexed_cleanup_response(
     raw: str,
     originals: list[str],
     glossary: list[GlossaryEntry] | None = None,
+    rejected: list[str] | None = None,
 ) -> tuple[list[str] | None, str | None]:
-    """Parse an indexed cleanup response atomically and fail closed."""
+    """Require intact indexing, then retain unsafe edits independently."""
     raw_lines = [line.rstrip("\r") for line in raw.splitlines() if line.strip()]
     results: dict[int, str] = {}
     for raw_line in raw_lines:
@@ -557,15 +566,16 @@ def _parse_indexed_cleanup_response(
     for index, original in enumerate(originals, start=1):
         cleaned = results[index]
         if cleaned == _CLEANUP_DELETE_MARKER:
-            if not _is_filler_only(original):
-                return None, f"line_{index}_delete_non_filler"
             cleaned = ""
-        elif _CLEANUP_DELETE_MARKER.casefold() in cleaned.casefold():
-            return None, f"line_{index}_malformed_delete_marker"
         line_reason = _cleanup_rejection_reason(cleaned, original)
         if line_reason is not None:
-            return None, f"line_{index}_{line_reason}"
-        cleaned = _apply_exact_glossary_normalization(cleaned, glossary or [])
+            if rejected is not None:
+                rejected.append(f"line_{index}_{line_reason}")
+            cleaned_lines.append(original)
+            continue
+        normalized = _apply_exact_glossary_normalization(cleaned, glossary or [])
+        if cleanup_decision(original, normalized) in SAFE:
+            cleaned = normalized
         cleaned_lines.append(cleaned)
     return cleaned_lines, None
 
@@ -626,7 +636,7 @@ def _valid_cleanup_result(text: str, original: str) -> bool:
 
 def _cleanup_rejection_reason(text: str, original: str) -> str | None:
     if not text:
-        return None if _is_filler_only(original) else "empty_non_filler_line"
+        return None if cleanup_decision(original, text) in SAFE else "empty_non_filler_line"
     if "\n" in text or "\r" in text:
         return "multiline_line"
     if not _valid_cleaned_line(text):
@@ -666,7 +676,7 @@ def _cleanup_rejection_reason(text: str, original: str) -> str | None:
     # removing the fillers and punctuation it is allowed to delete, the spoken
     # content must remain identical. This catches subtle meaning changes such
     # as ません -> ます as well as glossary-driven title substitutions.
-    if _cleanup_content_fingerprint(text) != _cleanup_content_fingerprint(original):
+    if cleanup_decision(original, text) not in SAFE:
         return "semantic_content_changed"
     return None
 

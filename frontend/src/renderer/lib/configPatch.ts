@@ -3,10 +3,10 @@ import type { CoreWorkflowSettings, WorkflowConfig, WorkflowName } from "./types
 import { hostedCleanupTuning, recommendedFallbackTranscription } from "../../shared/hostedModelCatalog";
 
 export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSettings {
-  const transcriptionProvider = config.backend?.transcriber === "openai" ? "openai" : "gemini";
+  const transcriptionProvider = config.backend?.transcriber === "dashscope" ? "dashscope" : config.backend?.transcriber === "openai" ? "openai" : "gemini";
   const transcriptionModel = String(config.backend?.transcription_model ?? "");
   const recommendedFallback = recommendedFallbackTranscription(transcriptionProvider, transcriptionModel);
-  const fallbackTranscriptionProvider = config.backend?.fallback_transcriber === "openai" || config.backend?.fallback_transcriber === "gemini"
+  const fallbackTranscriptionProvider = config.backend?.fallback_transcriber === "dashscope" || config.backend?.fallback_transcriber === "openai" || config.backend?.fallback_transcriber === "gemini"
     ? config.backend.fallback_transcriber
     : recommendedFallback.provider;
   return {
@@ -30,11 +30,12 @@ export function extractCoreSettings(config: WorkflowConfig): CoreWorkflowSetting
       cleanupDraftModel: String(config.cleanup?.spec_draft_model ?? "")
     },
     hosted: {
+      automatic: config.backend?.auto_select_hosted_models === true,
       transcriptionProvider,
       transcriptionModel,
       fallbackTranscriptionProvider,
       fallbackTranscriptionModel: String(config.backend?.fallback_transcription_model ?? recommendedFallback.model),
-      cleanupProvider: config.cleanup?.backend === "gemini" ? "gemini" : "openai",
+      cleanupProvider: config.cleanup?.backend === "dashscope" ? "dashscope" : config.cleanup?.backend === "gemini" ? "gemini" : "openai",
       cleanupModel: String(config.cleanup?.api_model ?? ""),
       envFile: ""
     },
@@ -103,13 +104,14 @@ export function applyCoreSettings(config: WorkflowConfig, settings: CoreWorkflow
     next.backend.fallback_transcription_model = "";
     next.cleanup.api_model = "";
   } else {
+    next.backend.auto_select_hosted_models = settings.hosted?.automatic ?? false;
     next.backend.transcription_model = settings.hosted?.transcriptionModel ?? next.backend.transcription_model ?? "";
     next.backend.transcriber = settings.hosted?.transcriptionProvider ?? next.backend.transcriber ?? "gemini";
     next.backend.fallback_transcription_model = settings.hosted?.fallbackTranscriptionModel ?? next.backend.fallback_transcription_model ?? "";
     next.backend.fallback_transcriber = settings.hosted?.fallbackTranscriptionProvider ?? next.backend.fallback_transcriber ?? "openai";
     next.cleanup.api_model = settings.hosted?.cleanupModel ?? next.cleanup.api_model ?? "";
     next.cleanup.backend = settings.hosted?.cleanupProvider ?? next.cleanup.backend ?? "openai";
-    const tuning = hostedCleanupTuning(next.cleanup.backend as "openai" | "gemini", String(next.cleanup.api_model));
+    const tuning = hostedCleanupTuning(next.cleanup.backend as "openai" | "gemini" | "dashscope", String(next.cleanup.api_model));
     next.cleanup.reasoning_effort = tuning?.reasoningEffort ?? null;
     next.cleanup.thinking_level = tuning?.thinkingLevel ?? null;
   }

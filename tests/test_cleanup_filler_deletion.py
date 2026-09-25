@@ -9,7 +9,7 @@ class CleanupFillerDeletionTests(unittest.TestCase):
         subtitles = [
             Subtitle(0.0, 1.0, "前"),
             Subtitle(1.0, 2.0, "えー"),
-            Subtitle(2.0, 3.0, "あの、"),
+            Subtitle(2.0, 3.0, "えっと、"),
             Subtitle(3.0, 4.0, "後"),
         ]
 

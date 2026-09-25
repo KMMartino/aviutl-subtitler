@@ -426,7 +426,7 @@ class ExistingPipelineBackend:
                 selected_chunks=selection.selected_chunks,
                 samples=request.metadata["samples"],
                 sample_rate=request.sample_rate,
-                max_group_sec=cleanup_group_max_sec,
+                max_group_sec=min(cleanup_group_max_sec, hosted_group_limit(self.config)),
                 temp_dir=request.temp_dir,
             )
             print(
@@ -454,7 +454,7 @@ class ExistingPipelineBackend:
             f"vad_speech={selection.total_speech_seconds / 60.0:.2f} min)",
             flush=True,
         )
-        hosted_run = backend_cfg["transcriber"] in {"gemini", "openai"} or self.config["cleanup"]["backend"] in {"gemini", "openai"}
+        hosted_run = backend_cfg["transcriber"] in {"gemini", "openai", "dashscope"} or self.config["cleanup"]["backend"] in {"gemini", "openai", "dashscope"}
         estimate_cost_only = validate_cost_estimate(self.config, estimated_api_cost)
         if hosted_run and estimate_cost_only:
             return BackendTranscriptResult(
@@ -664,6 +664,10 @@ class ExistingPipelineBackend:
                 (Gemini35TranscribeAdapter if model == "gemini-3.5-transcribe" else GeminiTranscriber)(**transcriber_args),
                 self._build_fallback_transcriber(request, allow_sparse_transcript=allow_sparse_transcript),
             )
+        if name == "dashscope":
+            from ..qwen import QwenTranscriber
+            return FallbackTranscriber(QwenTranscriber(model, request.temp_dir, self.api_usage, request.glossary, request.language, allow_sparse_transcript=allow_sparse_transcript),
+                                       self._build_fallback_transcriber(request, allow_sparse_transcript=allow_sparse_transcript))
         if name == "openai":
             transcriber_type = GPTTranscribeAdapter if model == "gpt-transcribe" else OpenAITranscriber
             return FallbackTranscriber(
@@ -704,6 +708,9 @@ class ExistingPipelineBackend:
             if model == "gemini-3.5-transcribe":
                 transcriber_args["language"] = request.language
             return (Gemini35TranscribeAdapter if model == "gemini-3.5-transcribe" else GeminiTranscriber)(**transcriber_args)
+        if name == "dashscope":
+            from ..qwen import QwenTranscriber
+            return QwenTranscriber(model, request.temp_dir, self.api_usage, request.glossary, request.language, allow_sparse_transcript=allow_sparse_transcript)
         if name == "openai":
             transcriber_type = GPTTranscribeAdapter if model == "gpt-transcribe" else OpenAITranscriber
             return transcriber_type(
@@ -727,7 +734,7 @@ def transcription_model(config: dict[str, Any]) -> str:
 
 def cleanup_model(config: dict[str, Any]) -> str:
     cleanup = config["cleanup"]
-    return cleanup.get("api_model") if cleanup["backend"] in {"gemini", "openai"} else cleanup.get("model", "")
+    return cleanup.get("api_model") if cleanup["backend"] in {"gemini", "openai", "dashscope"} else cleanup.get("model", "")
 
 
 def estimate_backend_run_cost(config: dict[str, Any], speech_seconds: float) -> float:
@@ -743,7 +750,7 @@ def estimate_backend_run_cost(config: dict[str, Any], speech_seconds: float) -> 
 
 
 def is_hosted_run(config: dict[str, Any]) -> bool:
-    return config["backend"]["transcriber"] in {"gemini", "openai"} or config["cleanup"]["backend"] in {"gemini", "openai"}
+    return config["backend"]["transcriber"] in {"gemini", "openai", "dashscope"} or config["cleanup"]["backend"] in {"gemini", "openai", "dashscope"}
 
 
 def validate_cost_estimate(config: dict[str, Any], estimated_api_cost: float) -> bool:
@@ -802,10 +809,18 @@ def transcription_workers(config: dict[str, Any]) -> int:
 
 
 def uses_larger_hosted_transcription_segments(config: dict[str, Any]) -> bool:
-    return (
-        config["backend"]["transcriber"] == "openai"
-        and transcription_model(config) == "gpt-transcribe"
-    )
+    return (config["backend"]["transcriber"], transcription_model(config)) in {
+        ("openai", "gpt-transcribe"), ("gemini", "gemini-3.8-flash"),
+        ("dashscope", "qwen-audio-3.1-asr-flash"),
+    }
+
+
+def hosted_group_limit(config: dict[str, Any]) -> float:
+    # PCM16 mono 16kHz + base64 stays below Gemini's 20MB inline request limit.
+    # Cap groups for the fallback too: it receives the primary's audio chunks.
+    providers = {config["backend"]["transcriber"], config["backend"].get("fallback_transcriber")}
+    return min(295.0 if "dashscope" in providers else 600.0,
+               450.0 if "gemini" in providers else 600.0)
 
 
 def build_speech_selection(workflow_cfg: dict[str, Any], chunks: list[AudioChunk], media_duration_sec: float) -> SpeechSelection:

@@ -40,6 +40,8 @@ OPENAI_PRICES: dict[str, TokenPrices] = {
     ),
     "gpt-5.5": TokenPrices(input_per_1m=5.00, output_per_1m=30.00),
     "gpt-5.4-mini": TokenPrices(input_per_1m=0.75, output_per_1m=4.50),
+    "gpt-6-luna": TokenPrices(input_per_1m=0.10, output_per_1m=0.50),
+    "gpt-6-sol": TokenPrices(input_per_1m=2.00, output_per_1m=10.00),
     "gpt-5.6-sol": TokenPrices(input_per_1m=4.00, output_per_1m=20.00),
     "gpt-5.6-terra": TokenPrices(input_per_1m=2.00, output_per_1m=12.00),
     "gpt-5.6-luna": TokenPrices(input_per_1m=0.20, output_per_1m=1.20),
@@ -55,6 +57,8 @@ def model_prices(provider: str, model: str, *, as_of: date | None = None) -> Tok
                 else GEMINI_FLASH_STANDARD_PRICES
             )
         return GEMINI_PRICES.get(model, TokenPrices(input_per_1m=1.50, output_per_1m=9.00, audio_input_per_1m=1.50))
+    if provider == "dashscope":
+        return TokenPrices(input_per_1m=0.03, output_per_1m=0.13) if model == "qwen3.7-flash" else TokenPrices(input_per_1m=0.15, output_per_1m=0.47)
     if provider == "openai":
         return OPENAI_PRICES.get(model, TokenPrices(input_per_1m=5.00, output_per_1m=30.00))
     return TokenPrices()
@@ -70,6 +74,11 @@ def token_cost(
     as_of: date | None = None,
 ) -> float:
     prices = model_prices(provider, model, as_of=as_of)
+    if provider == "dashscope" and model == "qwen3.7-flash":
+        if input_tokens > 256_000:
+            prices = TokenPrices(input_per_1m=0.20, output_per_1m=0.80)
+        elif input_tokens > 32_000:
+            prices = TokenPrices(input_per_1m=0.10, output_per_1m=0.40)
     text_input_tokens = max(0, input_tokens - audio_input_tokens)
     audio_rate = prices.audio_input_per_1m if prices.audio_input_per_1m is not None else prices.input_per_1m
     return (
@@ -80,6 +89,8 @@ def token_cost(
 
 
 def estimate_transcription_cost(provider: str, model: str, speech_seconds: float) -> float:
+    if provider == "dashscope":
+        return token_cost(provider, model, input_tokens=int(max(0, speech_seconds) * 16), output_tokens=int(max(0, speech_seconds) * 12))
     if provider == "gemini":
         prices = model_prices(provider, model)
         audio_tokens = int(round(max(0.0, speech_seconds) * GEMINI_AUDIO_TOKENS_PER_SECOND))
@@ -93,7 +104,7 @@ def estimate_transcription_cost(provider: str, model: str, speech_seconds: float
 
 
 def estimate_cleanup_cost(provider: str, model: str, speech_seconds: float) -> float:
-    if provider not in {"gemini", "openai"}:
+    if provider not in {"gemini", "openai", "dashscope"}:
         return 0.0
     transcript_tokens = int(round(max(0.0, speech_seconds) * TRANSCRIPT_OUTPUT_TOKENS_PER_SPEECH_SECOND))
     input_tokens = int(round(transcript_tokens * CLEANUP_TOKEN_MULTIPLIER))

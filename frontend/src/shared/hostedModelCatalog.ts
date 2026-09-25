@@ -1,10 +1,13 @@
-export type HostedProvider = "openai" | "gemini";
+export type HostedProvider = "openai" | "gemini" | "dashscope";
 export type HostedRole = "transcription" | "cleanup";
 export type HostedEmphasis = "quality" | "balanced" | "speed";
 
 export const APPROVED_MODELS = {
   openaiTranscriptionGpt: "gpt-transcribe",
   openaiCleanup: "gpt-5.4-mini",
+  openaiCleanup6Luna: "gpt-6-luna",
+  qwenAsr: "qwen-audio-3.1-asr-flash",
+  qwenCleanup: "qwen3.7-flash",
   openaiCleanup56Luna: "gpt-5.6-luna",
   gemini: "gemini-3.5-flash",
   gemini38Flash: "gemini-3.8-flash",
@@ -23,7 +26,7 @@ export function hostedCleanupTuning(provider: HostedProvider, model: string): Ho
   if (provider === "openai" && model === APPROVED_MODELS.openaiCleanup) {
     return { reasoningEffort: "medium", thinkingLevel: null };
   }
-  if (provider === "openai" && model === APPROVED_MODELS.openaiCleanup56Luna) {
+  if (provider === "openai" && (model === APPROVED_MODELS.openaiCleanup56Luna || model === APPROVED_MODELS.openaiCleanup6Luna)) {
     return { reasoningEffort: "low", thinkingLevel: null };
   }
   if (provider === "gemini" && model === APPROVED_MODELS.gemini36Flash) {
@@ -32,6 +35,7 @@ export function hostedCleanupTuning(provider: HostedProvider, model: string): Ho
   if (provider === "gemini" && model === APPROVED_MODELS.gemini37Flash) {
     return { reasoningEffort: null, thinkingLevel: "low" };
   }
+  if (provider === "dashscope" && model === APPROVED_MODELS.qwenCleanup) return { reasoningEffort: null, thinkingLevel: null };
   return null;
 }
 
@@ -48,6 +52,9 @@ type HostedModel = HostedOption & {
 };
 
 export const HOSTED_MODELS: HostedModel[] = [
+  { provider: "openai", model: APPROVED_MODELS.openaiCleanup6Luna, label: "OpenAI GPT-6 Luna - Low", emphasis: "balanced", blurb: "Preferred cleanup profile.", verification: { cleanup: "cleanup6Luna" } },
+  { provider: "dashscope", model: APPROVED_MODELS.qwenAsr, label: "Alibaba Qwen ASR 3.1 - Large groups", emphasis: "speed", blurb: "Low-cost Japanese transcription with larger groups.", verification: { transcription: "transcription" } },
+  { provider: "dashscope", model: APPROVED_MODELS.qwenCleanup, label: "Alibaba Qwen3.7 Flash - Thinking off", emphasis: "speed", blurb: "Low-cost text cleanup with thinking disabled.", verification: { cleanup: "cleanup" } },
   {
     provider: "openai",
     model: APPROVED_MODELS.openaiTranscriptionGpt,
@@ -75,7 +82,7 @@ export const HOSTED_MODELS: HostedModel[] = [
   {
     provider: "gemini",
     model: APPROVED_MODELS.gemini38Flash,
-    label: "Gemini 3.8 Flash · Low",
+    label: "Gemini 3.8 Flash · Low · Large groups",
     emphasis: "speed",
     blurb: "Default transcription profile. Low thinking cleared the production quality bar at lower measured cost than GPT Transcribe.",
     verification: { transcription: "transcription38" }
@@ -134,6 +141,7 @@ export function recommendedFallbackTranscription(
   provider: HostedProvider,
   model: string,
 ): { provider: HostedProvider; model: string } {
+  if (provider === "dashscope") return { provider, model: APPROVED_MODELS.qwenAsr };
   if (provider === "gemini") {
     if (model === APPROVED_MODELS.gemini38Flash) {
       return { provider: "gemini", model: APPROVED_MODELS.gemini37Flash };
@@ -151,7 +159,7 @@ export function isHostedModelVerified(
   provider: HostedProvider,
   model: string,
   role: HostedRole,
-  verification: Record<HostedProvider, Record<string, unknown>>,
+  verification: Partial<Record<HostedProvider, Record<string, unknown>>>,
 ): boolean {
   const item = HOSTED_MODELS.find((candidate) => (
     candidate.provider === provider
@@ -159,14 +167,25 @@ export function isHostedModelVerified(
     && role in candidate.verification
   ));
   const key = item?.verification[role];
-  return Boolean(key && verification[provider][key]);
+  return Boolean(key && verification[provider]?.[key]);
 }
 
 export function verifiedHostedOptions(
-  verification: Record<HostedProvider, Record<string, unknown>>,
+  verification: Partial<Record<HostedProvider, Record<string, unknown>>>,
   role: HostedRole,
 ): Array<{ provider: HostedProvider; model: string }> {
   return hostedOptions(role)
     .filter((option) => isHostedModelVerified(option.provider, option.model, role, verification))
     .map(({ provider, model }) => ({ provider, model }));
 }
+
+export const TRANSCRIPTION_HIERARCHY: Array<{ provider: HostedProvider; model: string }> = [
+  { provider: "gemini", model: APPROVED_MODELS.gemini38Flash },
+  { provider: "openai", model: APPROVED_MODELS.openaiTranscriptionGpt },
+  { provider: "dashscope", model: APPROVED_MODELS.qwenAsr },
+];
+export const CLEANUP_HIERARCHY: Array<{ provider: HostedProvider; model: string }> = [
+  { provider: "openai", model: APPROVED_MODELS.openaiCleanup6Luna },
+  { provider: "gemini", model: APPROVED_MODELS.gemini36Flash },
+  { provider: "dashscope", model: APPROVED_MODELS.qwenCleanup },
+];
